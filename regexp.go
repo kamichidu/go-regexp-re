@@ -10,10 +10,12 @@ import (
 
 // Regexp is the representation of a compiled regular expression.
 type Regexp struct {
-	expr   string
-	prefix []byte
-	prog   *syntax.Prog
-	dfa    *ir.DFA
+	expr        string
+	prefix      []byte
+	prefixState ir.StateID
+	prog        *syntax.Prog
+	dfa         *ir.DFA
+	match       func([]byte) bool
 }
 
 // Compile parses a regular expression and returns, if successful,
@@ -24,7 +26,19 @@ func Compile(expr string) (*Regexp, error) {
 		return nil, err
 	}
 	re = syntax.Simplify(re)
-	prefixStr, _ := syntax.Prefix(re)
+	prefixStr, complete := syntax.Prefix(re)
+
+	// Optimization: If the regex is just a literal, use bytes.Contains directly.
+	if complete {
+		return &Regexp{
+			expr:   expr,
+			prefix: []byte(prefixStr),
+			match: func(b []byte) bool {
+				return bytes.Contains(b, []byte(prefixStr))
+			},
+		}, nil
+	}
+
 	prog, err := syntax.Compile(re)
 	if err != nil {
 		return nil, err
@@ -33,12 +47,38 @@ func Compile(expr string) (*Regexp, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Regexp{
+	res := &Regexp{
 		expr:   expr,
 		prefix: []byte(prefixStr),
 		prog:   prog,
 		dfa:    dfa,
-	}, nil
+	}
+
+	if len(res.prefix) > 0 && !dfa.HasAnchors() {
+		state := dfa.StartState()
+		for _, b := range res.prefix {
+			state = dfa.Next(state, int(b))
+			if state == ir.InvalidState {
+				break
+			}
+		}
+		res.prefixState = state
+	}
+
+	if dfa.HasAnchors() {
+		if len(res.prefix) > 0 {
+			res.match = res.doMatchExtendedPrefix
+		} else {
+			res.match = res.doMatchExtended
+		}
+	} else {
+		if len(res.prefix) > 0 {
+			res.match = res.doMatchFastPrefix
+		} else {
+			res.match = res.doMatchFast
+		}
+	}
+	return res, nil
 }
 
 // MustCompile is like Compile but panics if the expression cannot be parsed.
@@ -52,12 +92,12 @@ func MustCompile(expr string) *Regexp {
 
 // Match reports whether the byte slice b contains any match of the regular expression re.
 func (re *Regexp) Match(b []byte) bool {
-	return re.doMatch(b)
+	return re.match(b)
 }
 
 // MatchString reports whether the string s contains any match of the regular expression re.
 func (re *Regexp) MatchString(s string) bool {
-	return re.doMatch([]byte(s))
+	return re.match([]byte(s))
 }
 
 // String returns the source text used to compile the regular expression.
@@ -65,38 +105,21 @@ func (re *Regexp) String() string {
 	return re.expr
 }
 
-func (re *Regexp) doMatch(b []byte) bool {
-	if re.dfa.HasAnchors() {
-		return re.doMatchExtended(b)
-	}
-	return re.doMatchFast(b)
-}
-
 func (re *Regexp) doMatchFast(b []byte) bool {
+	dfa := re.dfa
 	for i := 0; i <= len(b); i++ {
-		searchBuf := b[i:]
-
-		// Prefix skip optimization
-		if i < len(b) && len(re.prefix) > 0 {
-			idx := bytes.Index(searchBuf, re.prefix)
-			if idx < 0 {
-				return false
-			}
-			i += idx
-			searchBuf = b[i:]
-		}
-
-		state := re.dfa.StartState()
-		if re.dfa.IsAccepting(state) {
+		state := dfa.StartState()
+		if dfa.IsAccepting(state) {
 			return true
 		}
 
+		searchBuf := b[i:]
 		for j := 0; j < len(searchBuf); j++ {
-			state = re.dfa.Next(state, int(searchBuf[j]))
+			state = dfa.Next(state, int(searchBuf[j]))
 			if state == ir.InvalidState {
 				break
 			}
-			if re.dfa.IsAccepting(state) {
+			if dfa.IsAccepting(state) {
 				return true
 			}
 		}
@@ -104,23 +127,40 @@ func (re *Regexp) doMatchFast(b []byte) bool {
 	return false
 }
 
-func (re *Regexp) doMatchExtended(b []byte) bool {
-	// Optimization: If pattern must start at the beginning, only try i=0.
-	// We can check if the program always starts with EmptyBeginText.
-	// For now, let's just keep the loop but it's a potential further optimization.
+func (re *Regexp) doMatchFastPrefix(b []byte) bool {
+	prefix := re.prefix
+	plen := len(prefix)
+	ps := re.prefixState
+	dfa := re.dfa
 
+	for i := 0; ; {
+		idx := bytes.Index(b[i:], prefix)
+		if idx < 0 {
+			return false
+		}
+		i += idx
+
+		state := ps
+		if dfa.IsAccepting(state) {
+			return true
+		}
+
+		for _, c := range b[i+plen:] {
+			state = dfa.Next(state, int(c))
+			if state == ir.InvalidState {
+				break
+			}
+			if dfa.IsAccepting(state) {
+				return true
+			}
+		}
+		i++
+	}
+}
+
+func (re *Regexp) doMatchExtended(b []byte) bool {
 	for i := 0; i <= len(b); i++ {
 		searchBuf := b[i:]
-
-		// Prefix skip optimization
-		if i < len(b) && len(re.prefix) > 0 {
-			idx := bytes.Index(searchBuf, re.prefix)
-			if idx < 0 {
-				return false
-			}
-			i += idx
-			searchBuf = b[i:]
-		}
 
 		state := re.dfa.StartState()
 
@@ -162,6 +202,59 @@ func (re *Regexp) doMatchExtended(b []byte) bool {
 		}
 	}
 	return false
+}
+
+func (re *Regexp) doMatchExtendedPrefix(b []byte) bool {
+	prefix := re.prefix
+
+	for i := 0; ; {
+		idx := bytes.Index(b[i:], prefix)
+		if idx < 0 {
+			return false
+		}
+		i += idx
+
+		state := re.dfa.StartState()
+
+		// Initial context at position i
+		state = re.applyContext(state, re.calculateContext(b, i))
+		if re.dfa.IsAccepting(state) {
+			return true
+		}
+
+		searchBuf := b[i:]
+		for j := 0; j < len(searchBuf); j++ {
+			curr := searchBuf[j]
+
+			state = re.dfa.Next(state, int(curr))
+			if state == ir.InvalidState {
+				break
+			}
+
+			// Calculate context at position i+j+1 more efficiently
+			var op syntax.EmptyOp
+			pos := i + j + 1
+			if pos == len(b) {
+				op |= syntax.EmptyEndText | syntax.EmptyEndLine
+			} else if b[pos] == '\n' {
+				op |= syntax.EmptyEndLine
+			}
+			if b[pos-1] == '\n' {
+				op |= syntax.EmptyBeginLine
+			}
+			if isWordBoundary(b, pos) {
+				op |= syntax.EmptyWordBoundary
+			} else {
+				op |= syntax.EmptyNoWordBoundary
+			}
+
+			state = re.applyContext(state, op)
+			if re.dfa.IsAccepting(state) {
+				return true
+			}
+		}
+		i++
+	}
 }
 
 func (re *Regexp) calculateContext(b []byte, i int) syntax.EmptyOp {
