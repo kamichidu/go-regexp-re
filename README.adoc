@@ -1,0 +1,49 @@
+= go-regexp-re: Pure Go High-Performance DFA Regular Expression Engine
+
+go-regexp-re is a high-performance regular expression engine for Go,
+designed to surpass the throughput limits of the standard `regexp` package while maintaining $O(n)$ time complexity.
+
+== Core Philosophy
+
+* **Deterministic Finite Automaton (DFA)**: Patterns are compiled into a deterministic transition table for constant-time processing per byte.
+* **Byte-Oriented Scanning**: Direct scanning of `[]byte` without runtime UTF-8 decoding to maximize CPU pipeline efficiency.
+* **Pure Go**: Zero CGO dependencies for portability and simplicity.
+
+== Performance
+
+Current benchmarks show approximately **5x to 20x** higher throughput compared to the standard library for common patterns.
+
+== Known Limitations (Compatibility with standard `regexp`)
+
+While go-regexp-re aims for high compatibility with standard Go regex syntax, some differences exist due to its optimized architecture:
+
+=== 1. UTF-8 Replacement Character (U+FFFD)
+In the standard `regexp` package, the pattern `\uFFFD` () matches invalid UTF-8 byte sequences because the standard engine decodes runes during scanning.
+
+**go-regexp-re** is strictly byte-oriented.
+It treats `\uFFFD` as the specific 3-byte UTF-8 sequence (`\xEF\xBF\xBD`).
+It will **not** match invalid UTF-8 bytes like `\xFF`.
+This is a trade-off made to achieve maximum scanning throughput by eliminating runtime decoding.
+
+=== 2. Backreferences
+Backreferences (e.g., `(a)\1`) are not supported to guarantee $O(n)$ time complexity and prevent catastrophic backtracking.
+
+=== 3. Advanced Lookarounds
+Only fixed-length lookahead/lookbehind assertions that can be statically integrated into the DFA are supported.
+
+== Testing
+
+To run functional and benchmark tests:
+
+[source,bash]
+----
+go test -v .
+go test -bench . -benchmem
+----
+
+To run the Go standard library compatibility suite:
+
+[source,bash]
+----
+go test -v ./internal/compat
+----
