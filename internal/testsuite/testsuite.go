@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -26,6 +27,7 @@ type Engine struct {
 // Matcher represents a compiled regexp that can match against strings.
 type Matcher interface {
 	MatchString(s string) bool
+	FindStringSubmatchIndex(s string) []int
 	String() string
 }
 
@@ -161,6 +163,59 @@ func RunCompatibility(t *testing.T) {
 					gotMatch := re.MatchString(tt.text)
 					if gotMatch != wantMatch {
 						t.Errorf("MatchString(%q, %q) = %v; want %v", tt.pat, tt.text, gotMatch, wantMatch)
+					}
+				})
+			}
+		})
+	}
+}
+
+// RunSubmatchCompatibility runs capture group compatibility tests for all registered engines.
+func RunSubmatchCompatibility(t *testing.T) {
+	if len(findTests) == 0 {
+		t.Skip("no find tests loaded")
+	}
+
+	// Identify reference engine (GoRegexp)
+	var referenceEngine Engine
+	for _, engine := range engines {
+		if engine.Name == "GoRegexp" {
+			referenceEngine = engine
+			break
+		}
+	}
+	if referenceEngine.Name == "" {
+		t.Skip("no reference engine GoRegexp found")
+	}
+
+	for _, engine := range engines {
+		if engine.Name == "GoRegexp" {
+			continue
+		}
+		t.Run(engine.Name, func(t *testing.T) {
+			for _, tt := range findTests {
+				t.Run(fmt.Sprintf("pat=%s/text=%s", tt.pat, tt.text), func(t *testing.T) {
+					if strings.Contains(tt.pat, "\uFFFD") || strings.Contains(tt.pat, "\\x{fffd}") {
+						t.Skip("skipping U+FFFD test")
+					}
+
+					re, err := engine.Compile(tt.pat)
+					if err != nil {
+						t.Skipf("failed to compile %q: %v", tt.pat, err)
+						return
+					}
+
+					refRe, err := referenceEngine.Compile(tt.pat)
+					if err != nil {
+						t.Skipf("reference engine failed to compile %q: %v", tt.pat, err)
+						return
+					}
+
+					want := refRe.FindStringSubmatchIndex(tt.text)
+					got := re.FindStringSubmatchIndex(tt.text)
+
+					if !reflect.DeepEqual(got, want) {
+						t.Errorf("FindStringSubmatchIndex(%q, %q) = %v; want %v", tt.pat, tt.text, got, want)
 					}
 				})
 			}

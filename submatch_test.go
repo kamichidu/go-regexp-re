@@ -2,6 +2,7 @@ package regexp
 
 import (
 	"reflect"
+	goregexp "regexp"
 	"testing"
 )
 
@@ -9,20 +10,25 @@ func TestFindSubmatchIndex(t *testing.T) {
 	tests := []struct {
 		pattern string
 		input   string
-		want    []int
 	}{
-		{`a`, "a", []int{0, 1}},
-		{`(a)`, "a", []int{0, 1, 0, 1}},
-		{`(a)b`, "ab", []int{0, 2, 0, 1}},
-		{`a(b)c`, "abc", []int{0, 3, 1, 2}},
-		{`(a)(b)c`, "abc", []int{0, 3, 0, 1, 1, 2}},
-		{`(a*)b`, "aaab", []int{0, 4, 0, 3}},
-		{`(a|b)c`, "ac", []int{0, 2, 0, 1}},
-		{`(a|b)c`, "bc", []int{0, 2, 0, 1}},
-		{`^(a)b$`, "ab", []int{0, 2, 0, 1}},
-		{`^(a)b`, "ab", []int{0, 2, 0, 1}},
-		{`(a)b$`, "ab", []int{0, 2, 0, 1}},
-		{`\b(abc)\b`, "abc", []int{0, 3, 0, 3}},
+		{`a`, "a"},
+		{`(a)`, "a"},
+		{`(a)b`, "ab"},
+		{`a(b)c`, "abc"},
+		{`(a)(b)c`, "abc"},
+		{`(a*)b`, "aaab"},
+		{`(a|b)c`, "ac"},
+		{`(a|b)c`, "bc"},
+		{`^(a)b$`, "ab"},
+		{`^(a)b`, "ab"},
+		{`(a)b$`, "ab"},
+		{`\b(abc)\b`, "abc"},
+		{`(|a)*`, "a"},
+		{`(|a)*`, ""},
+		{`(a|ab)`, "ab"},
+		{`(a){0}`, ""},
+		{`(a)?b`, "b"},
+		{`(([^xyz]*)(d))`, "abcd"},
 	}
 
 	for _, tt := range tests {
@@ -32,8 +38,11 @@ func TestFindSubmatchIndex(t *testing.T) {
 				t.Fatalf("Compile(%q) failed: %v", tt.pattern, err)
 			}
 			got := re.FindStringSubmatchIndex(tt.input)
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("FindStringSubmatchIndex(%q, %q) = %v; want %v", tt.pattern, tt.input, got, tt.want)
+			stdRe := goregexp.MustCompile(tt.pattern)
+			want := stdRe.FindSubmatchIndex([]byte(tt.input))
+
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("FindStringSubmatchIndex(%q, %q) = %v; want %v", tt.pattern, tt.input, got, want)
 			}
 		})
 	}

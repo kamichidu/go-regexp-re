@@ -20,8 +20,6 @@ func runeRangesToUTF8Trie(runes []rune, foldCase bool) []*utf8Node {
 	var roots []*utf8Node
 	if foldCase {
 		// Expand each rune range to include its case-folded equivalents.
-		// For simplicity and correctness with the existing DFA builder,
-		// we "register both" (or all) folded variants into the trie.
 		seen := make(map[rune]bool)
 		var expanded []rune
 		for i := 0; i+1 < len(runes); i += 2 {
@@ -95,7 +93,6 @@ func sequenceToTrieChildren(seq []byteRange) []*utf8Node {
 }
 
 // encodeRange converts a rune range [lo, hi] into a set of byte-range sequences.
-// This implements the standard UTF-8 range decomposition.
 func encodeRange(lo, hi rune) [][]byteRange {
 	var sequences [][]byteRange
 	for i := 1; i <= 4; i++ {
@@ -180,4 +177,37 @@ func max(a, b rune) rune {
 		return a
 	}
 	return b
+}
+
+func byteRangesToTrie(ranges []byteRange) []*utf8Node {
+	return []*utf8Node{
+		{
+			ranges: ranges,
+			next:   nil,
+		},
+	}
+}
+
+// anyRuneTrie returns a Trie that matches any valid UTF-8 rune OR any single byte (fallback).
+func anyRuneTrie(includeNL bool) []*utf8Node {
+	var runes []rune
+	if includeNL {
+		runes = []rune{0, 0x10FFFF}
+	} else {
+		runes = []rune{0, '\n' - 1, '\n' + 1, 0x10FFFF}
+	}
+	roots := runeRangesToUTF8Trie(runes, false)
+
+	// Add raw byte fallback.
+	// Since updateBestMatch prefers LONGER matches, valid multi-byte UTF-8 sequences
+	// will win over this single-byte fallback.
+	var br []byteRange
+	if includeNL {
+		br = []byteRange{{0, 255}}
+	} else {
+		br = []byteRange{{0, '\n' - 1}, {'\n' + 1, 255}}
+	}
+	roots = append(roots, byteRangesToTrie(br)...)
+
+	return roots
 }

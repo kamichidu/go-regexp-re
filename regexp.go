@@ -11,6 +11,7 @@ import (
 // Regexp is the representation of a compiled regular expression.
 type Regexp struct {
 	expr        string
+	numSubexp   int
 	prefix      []byte
 	prefixState ir.StateID
 	prog        *syntax.Prog
@@ -25,6 +26,7 @@ func Compile(expr string) (*Regexp, error) {
 	if err != nil {
 		return nil, err
 	}
+	numSubexp := re.MaxCap()
 	re = syntax.Simplify(re)
 	prefixStr, complete := syntax.Prefix(re)
 
@@ -37,37 +39,19 @@ func Compile(expr string) (*Regexp, error) {
 		return nil, err
 	}
 	res := &Regexp{
-		expr:   expr,
-		prefix: []byte(prefixStr),
-		prog:   prog,
-		dfa:    dfa,
+		expr:      expr,
+		numSubexp: numSubexp,
+		prefix:    []byte(prefixStr),
+		prog:      prog,
+		dfa:       dfa,
 	}
 
 	if complete {
 		res.match = func(b []byte) bool {
 			return bytes.Contains(b, []byte(prefixStr))
 		}
-	} else if len(res.prefix) > 0 && !dfa.HasAnchors() {
-		state := dfa.StartState()
-		for _, b := range res.prefix {
-			state = dfa.Next(state, int(b))
-			if state == ir.InvalidState {
-				break
-			}
-		}
-		res.prefixState = state
-
-		if dfa.HasAnchors() {
-			res.match = res.doMatchExtendedPrefix
-		} else {
-			res.match = res.doMatchFastPrefix
-		}
 	} else {
-		if dfa.HasAnchors() {
-			res.match = res.doMatchExtended
-		} else {
-			res.match = res.doMatchFast
-		}
+		res.match = res.doMatch
 	}
 	return res, nil
 }
@@ -91,13 +75,176 @@ func (re *Regexp) MatchString(s string) bool {
 	return re.match([]byte(s))
 }
 
+// NumSubexp returns the number of parenthesized subexpressions in this Regexp.
+func (re *Regexp) NumSubexp() int {
+	return re.numSubexp
+}
+
 // FindSubmatchIndex returns a slice holding the index pairs identifying the leftmost match of
 // the regular expression of b and the matches, if any, of its subexpressions.
 func (re *Regexp) FindSubmatchIndex(b []byte) []int {
-	if re.dfa.HasAnchors() {
-		return re.doFindSubmatchExtended(b)
+	return re.doExecute(b)
+}
+
+func (re *Regexp) doExecute(b []byte) []int {
+	dfa := re.dfa
+	numRegs := (re.numSubexp + 1) * 2
+	hasAnchors := dfa.HasAnchors()
+
+	for i := 0; i <= len(b); i++ {
+		state := dfa.StartState()
+
+		// regs stores registers for each NFA path in the current DFA state.
+		nfaPaths := dfa.NfaPaths(state)
+		regs := make([][]int, len(nfaPaths))
+		for k := range regs {
+			regs[k] = make([]int, numRegs)
+			for r := range regs[k] {
+				regs[k][r] = -1
+			}
+		}
+
+		// Apply initial entry tags to all paths in the start state.
+		for k := range regs {
+			re.applyTagsToRegs(regs[k], dfa.EntryTagsForPath(k), i)
+		}
+
+		// Initial Context
+		if hasAnchors {
+			ctx := re.calculateContext(b, i)
+			state, regs = re.applyContext(state, ctx, regs, i)
+		}
+
+		var bestMatch []int
+		bestPriority := 1<<30 - 1
+
+		updateBestMatch := func(endOffset int, currentState ir.StateID, currentRegs [][]int) {
+			priority := dfa.AcceptingPriority(currentState)
+			if priority > bestPriority {
+				return
+			}
+			// If priority is same, we prefer LONGER match (higher endOffset).
+			if bestMatch != nil && priority == bestPriority && endOffset <= bestMatch[1] {
+				return
+			}
+
+			// Find which NFA path matched with this priority.
+			paths := dfa.NfaPaths(currentState)
+			for idx, p := range paths {
+				// check if this path is a match
+				if re.prog.Inst[p.ID].Op == syntax.InstMatch {
+					if p.Priority == priority {
+						bestPriority = priority
+						bestMatch = make([]int, numRegs)
+						copy(bestMatch, currentRegs[idx])
+						bestMatch[0] = i
+						bestMatch[1] = endOffset
+						break
+					}
+				}
+			}
+		}
+
+		if dfa.IsAccepting(state) {
+			updateBestMatch(i, state, regs)
+		}
+
+		searchBuf := b[i:]
+		for j := 0; j < len(searchBuf); j++ {
+			c := searchBuf[j]
+			nextState := dfa.Next(state, int(c))
+			if nextState == ir.InvalidState {
+				break
+			}
+
+			sources, tags := dfa.TransitionInfo(state, int(c))
+			nextRegs := make([][]int, len(sources))
+			for k, srcIdx := range sources {
+				nextRegs[k] = make([]int, numRegs)
+				if srcIdx >= 0 && int(srcIdx) < len(regs) {
+					copy(nextRegs[k], regs[srcIdx])
+				} else {
+					for r := range nextRegs[k] {
+						nextRegs[k][r] = -1
+					}
+				}
+				re.applyTagsToRegs(nextRegs[k], tags[k], i+j)
+			}
+
+			state = nextState
+			regs = nextRegs
+
+			if hasAnchors {
+				ctx := re.calculateContext(b, i+j+1)
+				state, regs = re.applyContext(state, ctx, regs, i+j+1)
+			}
+
+			if dfa.IsAccepting(state) {
+				updateBestMatch(i+j+1, state, regs)
+			}
+		}
+		if bestMatch != nil {
+			return bestMatch
+		}
 	}
-	return re.doFindSubmatchFast(b)
+	return nil
+}
+
+func (re *Regexp) applyTagsToRegs(regs []int, tags []ir.TagOp, offset int) {
+	for _, tag := range tags {
+		idx := tag.Index()
+		if idx < len(regs) {
+			off := offset
+			if tag.After() {
+				off++
+			}
+			regs[idx] = off
+		}
+	}
+}
+
+func (re *Regexp) applyContext(state ir.StateID, op syntax.EmptyOp, regs [][]int, offset int) (ir.StateID, [][]int) {
+	for {
+		changed := false
+		var vbytes []int
+		if op&syntax.EmptyBeginLine != 0 {
+			vbytes = append(vbytes, ir.VirtualBeginLine)
+		}
+		if op&syntax.EmptyEndLine != 0 {
+			vbytes = append(vbytes, ir.VirtualEndLine)
+		}
+		if op&syntax.EmptyBeginText != 0 {
+			vbytes = append(vbytes, ir.VirtualBeginText)
+		}
+		if op&syntax.EmptyEndText != 0 {
+			vbytes = append(vbytes, ir.VirtualEndText)
+		}
+		if op&syntax.EmptyWordBoundary != 0 {
+			vbytes = append(vbytes, ir.VirtualWordBoundary)
+		}
+		if op&syntax.EmptyNoWordBoundary != 0 {
+			vbytes = append(vbytes, ir.VirtualNoWordBoundary)
+		}
+
+		for _, vb := range vbytes {
+			if next := re.dfa.Next(state, vb); next != ir.InvalidState {
+				sources, tags := re.dfa.TransitionInfo(state, vb)
+				nextRegs := make([][]int, len(sources))
+				for k, srcIdx := range sources {
+					nextRegs[k] = make([]int, len(regs[0]))
+					copy(nextRegs[k], regs[srcIdx])
+					re.applyTagsToRegs(nextRegs[k], tags[k], offset)
+				}
+				state = next
+				regs = nextRegs
+				changed = true
+			}
+		}
+		if !changed {
+			break
+		}
+	}
+	return state, regs
 }
 
 // FindStringSubmatchIndex is the string version of FindSubmatchIndex.
@@ -138,333 +285,12 @@ func (re *Regexp) FindStringSubmatch(s string) []string {
 	return result
 }
 
-func (re *Regexp) doFindSubmatchFast(b []byte) []int {
-	dfa := re.dfa
-	numRegs := re.prog.NumCap
-	if numRegs < 2 {
-		numRegs = 2
-	}
-
-	for i := 0; i <= len(b); i++ {
-		state := dfa.StartState()
-		registers := make([]int, numRegs)
-		for k := range registers {
-			registers[k] = -1
-		}
-
-		// Entry tags
-		for _, tag := range dfa.EntryTags() {
-			registers[tag.Index()] = i
-		}
-
-		var bestMatch []int
-		if dfa.IsAccepting(state) {
-			bestMatch = make([]int, numRegs)
-			copy(bestMatch, registers)
-			bestMatch[0] = i
-			bestMatch[1] = i
-		}
-
-		searchBuf := b[i:]
-		for j := 0; j < len(searchBuf); j++ {
-			c := searchBuf[j]
-			tags := dfa.Tags(state, int(c))
-			state = dfa.Next(state, int(c))
-			if state == ir.InvalidState {
-				break
-			}
-			for _, tag := range tags {
-				offset := i + j
-				if tag.After() {
-					offset++
-				}
-				registers[tag.Index()] = offset
-			}
-
-			if dfa.IsAccepting(state) {
-				bestMatch = make([]int, numRegs)
-				copy(bestMatch, registers)
-				bestMatch[0] = i
-				bestMatch[1] = i + j + 1
-			}
-		}
-
-		if bestMatch != nil {
-			return bestMatch
-		}
-	}
-	return nil
+func (re *Regexp) doMatch(b []byte) bool {
+	return re.doExecute(b) != nil
 }
 
-func (re *Regexp) doFindSubmatchExtended(b []byte) []int {
-	dfa := re.dfa
-	numRegs := re.prog.NumCap
-	if numRegs < 2 {
-		numRegs = 2
-	}
-
-	for i := 0; i <= len(b); i++ {
-		state := dfa.StartState()
-		registers := make([]int, numRegs)
-		for k := range registers {
-			registers[k] = -1
-		}
-
-		// Initial entry tags
-		for _, tag := range dfa.EntryTags() {
-			registers[tag.Index()] = i
-		}
-
-		// Initial context
-		state, tags := re.applyContextWithTags(state, re.calculateContext(b, i))
-		for _, tag := range tags {
-			// Tags on virtual transitions are always at the current position.
-			registers[tag.Index()] = i
-		}
-
-		var bestMatch []int
-		if dfa.IsAcceptingWithContext(state, re.prog, re.calculateContext(b, i)) {
-			bestMatch = make([]int, numRegs)
-			copy(bestMatch, registers)
-			bestMatch[0] = i
-			bestMatch[1] = i
-		}
-
-		searchBuf := b[i:]
-		for j := 0; j < len(searchBuf); j++ {
-			c := searchBuf[j]
-			tags := dfa.Tags(state, int(c))
-			state = dfa.Next(state, int(c))
-			if state == ir.InvalidState {
-				break
-			}
-			for _, tag := range tags {
-				offset := i + j
-				if tag.After() {
-					offset++
-				}
-				registers[tag.Index()] = offset
-			}
-
-			// Context at i+j+1
-			ctx := re.calculateContext(b, i+j+1)
-			var ctags []ir.TagOp
-			state, ctags = re.applyContextWithTags(state, ctx)
-			for _, tag := range ctags {
-				registers[tag.Index()] = i + j + 1
-			}
-
-			if dfa.IsAcceptingWithContext(state, re.prog, ctx) {
-				bestMatch = make([]int, numRegs)
-				copy(bestMatch, registers)
-				bestMatch[0] = i
-				bestMatch[1] = i + j + 1
-			}
-		}
-
-		if bestMatch != nil {
-			return bestMatch
-		}
-	}
-	return nil
-}
-
-func (re *Regexp) applyContextWithTags(state ir.StateID, op syntax.EmptyOp) (ir.StateID, []ir.TagOp) {
-	if state == ir.InvalidState {
-		return ir.InvalidState, nil
-	}
-	var allTags []ir.TagOp
-	for {
-		changed := false
-		var vbytes []int
-		if op&syntax.EmptyBeginLine != 0 {
-			vbytes = append(vbytes, ir.VirtualBeginLine)
-		}
-		if op&syntax.EmptyEndLine != 0 {
-			vbytes = append(vbytes, ir.VirtualEndLine)
-		}
-		if op&syntax.EmptyBeginText != 0 {
-			vbytes = append(vbytes, ir.VirtualBeginText)
-		}
-		if op&syntax.EmptyEndText != 0 {
-			vbytes = append(vbytes, ir.VirtualEndText)
-		}
-		if op&syntax.EmptyWordBoundary != 0 {
-			vbytes = append(vbytes, ir.VirtualWordBoundary)
-		}
-		if op&syntax.EmptyNoWordBoundary != 0 {
-			vbytes = append(vbytes, ir.VirtualNoWordBoundary)
-		}
-
-		for _, vb := range vbytes {
-			if next := re.dfa.Next(state, vb); next != ir.InvalidState {
-				allTags = append(allTags, re.dfa.Tags(state, vb)...)
-				state = next
-				changed = true
-			}
-		}
-		if !changed {
-			break
-		}
-	}
-	return state, allTags
-}
-
-// String returns the source text used to compile the regular expression.
 func (re *Regexp) String() string {
 	return re.expr
-}
-
-func (re *Regexp) doMatchFast(b []byte) bool {
-	dfa := re.dfa
-	for i := 0; i <= len(b); i++ {
-		state := dfa.StartState()
-		if dfa.IsAccepting(state) {
-			return true
-		}
-
-		searchBuf := b[i:]
-		for j := 0; j < len(searchBuf); j++ {
-			state = dfa.Next(state, int(searchBuf[j]))
-			if state == ir.InvalidState {
-				break
-			}
-			if dfa.IsAccepting(state) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func (re *Regexp) doMatchFastPrefix(b []byte) bool {
-	prefix := re.prefix
-	plen := len(prefix)
-	ps := re.prefixState
-	dfa := re.dfa
-
-	for i := 0; ; {
-		idx := bytes.Index(b[i:], prefix)
-		if idx < 0 {
-			return false
-		}
-		i += idx
-
-		state := ps
-		if dfa.IsAccepting(state) {
-			return true
-		}
-
-		for _, c := range b[i+plen:] {
-			state = dfa.Next(state, int(c))
-			if state == ir.InvalidState {
-				break
-			}
-			if dfa.IsAccepting(state) {
-				return true
-			}
-		}
-		i++
-	}
-}
-
-func (re *Regexp) doMatchExtended(b []byte) bool {
-	for i := 0; i <= len(b); i++ {
-		searchBuf := b[i:]
-
-		state := re.dfa.StartState()
-
-		// Initial context at position i
-		state = re.applyContext(state, re.calculateContext(b, i))
-		if re.dfa.IsAccepting(state) {
-			return true
-		}
-
-		for j := 0; j < len(searchBuf); j++ {
-			curr := searchBuf[j]
-
-			state = re.dfa.Next(state, int(curr))
-			if state == ir.InvalidState {
-				break
-			}
-
-			// Calculate context at position i+j+1 more efficiently
-			var op syntax.EmptyOp
-			pos := i + j + 1
-			if pos == len(b) {
-				op |= syntax.EmptyEndText | syntax.EmptyEndLine
-			} else if b[pos] == '\n' {
-				op |= syntax.EmptyEndLine
-			}
-			if b[pos-1] == '\n' {
-				op |= syntax.EmptyBeginLine
-			}
-			if isWordBoundary(b, pos) {
-				op |= syntax.EmptyWordBoundary
-			} else {
-				op |= syntax.EmptyNoWordBoundary
-			}
-
-			state = re.applyContext(state, op)
-			if re.dfa.IsAccepting(state) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func (re *Regexp) doMatchExtendedPrefix(b []byte) bool {
-	prefix := re.prefix
-
-	for i := 0; ; {
-		idx := bytes.Index(b[i:], prefix)
-		if idx < 0 {
-			return false
-		}
-		i += idx
-
-		state := re.dfa.StartState()
-
-		// Initial context at position i
-		state = re.applyContext(state, re.calculateContext(b, i))
-		if re.dfa.IsAccepting(state) {
-			return true
-		}
-
-		searchBuf := b[i:]
-		for j := 0; j < len(searchBuf); j++ {
-			curr := searchBuf[j]
-
-			state = re.dfa.Next(state, int(curr))
-			if state == ir.InvalidState {
-				break
-			}
-
-			// Calculate context at position i+j+1 more efficiently
-			var op syntax.EmptyOp
-			pos := i + j + 1
-			if pos == len(b) {
-				op |= syntax.EmptyEndText | syntax.EmptyEndLine
-			} else if b[pos] == '\n' {
-				op |= syntax.EmptyEndLine
-			}
-			if b[pos-1] == '\n' {
-				op |= syntax.EmptyBeginLine
-			}
-			if isWordBoundary(b, pos) {
-				op |= syntax.EmptyWordBoundary
-			} else {
-				op |= syntax.EmptyNoWordBoundary
-			}
-
-			state = re.applyContext(state, op)
-			if re.dfa.IsAccepting(state) {
-				return true
-			}
-		}
-		i++
-	}
 }
 
 func (re *Regexp) calculateContext(b []byte, i int) syntax.EmptyOp {
@@ -485,55 +311,6 @@ func (re *Regexp) calculateContext(b []byte, i int) syntax.EmptyOp {
 		op |= syntax.EmptyNoWordBoundary
 	}
 	return op
-}
-
-func (re *Regexp) applyContext(state ir.StateID, op syntax.EmptyOp) ir.StateID {
-	if state == ir.InvalidState {
-		return ir.InvalidState
-	}
-	for {
-		changed := false
-		if op&syntax.EmptyBeginLine != 0 {
-			if next := re.dfa.Next(state, ir.VirtualBeginLine); next != ir.InvalidState {
-				state = next
-				changed = true
-			}
-		}
-		if op&syntax.EmptyEndLine != 0 {
-			if next := re.dfa.Next(state, ir.VirtualEndLine); next != ir.InvalidState {
-				state = next
-				changed = true
-			}
-		}
-		if op&syntax.EmptyBeginText != 0 {
-			if next := re.dfa.Next(state, ir.VirtualBeginText); next != ir.InvalidState {
-				state = next
-				changed = true
-			}
-		}
-		if op&syntax.EmptyEndText != 0 {
-			if next := re.dfa.Next(state, ir.VirtualEndText); next != ir.InvalidState {
-				state = next
-				changed = true
-			}
-		}
-		if op&syntax.EmptyWordBoundary != 0 {
-			if next := re.dfa.Next(state, ir.VirtualWordBoundary); next != ir.InvalidState {
-				state = next
-				changed = true
-			}
-		}
-		if op&syntax.EmptyNoWordBoundary != 0 {
-			if next := re.dfa.Next(state, ir.VirtualNoWordBoundary); next != ir.InvalidState {
-				state = next
-				changed = true
-			}
-		}
-		if !changed {
-			break
-		}
-	}
-	return state
 }
 
 func isWordBoundary(b []byte, i int) bool {

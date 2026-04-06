@@ -29,10 +29,13 @@ To maximize throughput, the engine MUST select the most efficient execution loop
 - **Extended Path (Virtual Byte Insertion)**: Selected for patterns with anchors (e.g., `^`, `$`, `\b`). It employs "Virtual Bytes" (indices 256+) injected at character boundaries to process empty-width assertions within the DFA's $O(n)$ framework.
 - **Submatch Path (Transition-Embedded Tagging)**: Selected when submatches are requested. It utilizes "tags" (TagOp) embedded directly into the transition table to record capture offsets without a separate post-processing pass.
 
-### 2.5 Transition-Embedded Tagging for Submatches
-- **Static Priority Resolution**: Leftmost-first priority for multiple NFA paths is resolved during DFA construction. Only tags from the highest-priority path are stored on each DFA transition edge.
-- **Register-Based Recording**: Capture group offsets are recorded into a fixed-size register array (`int` slice) during the scan. This approach maintains $O(n)$ complexity and minimizes memory allocation.
-- **Zero-Cost Dispatch**: Use function variables to bind the appropriate execution loop (Match-only vs. Find-Submatch) at compile/instantiation time, avoiding conditional checks within the hot scanning loop.
+### 2.5 Submatch Extraction Architecture (Path to TDFA)
+- **Zero-Tolerance for State Explosion**: The core mandate of $O(n)$ execution and L1/L2 cache locality takes absolute precedence over 100% submatch compatibility. If incorporating tag information into DFA states (to resolve complex nested captures or ambiguous empty matches) causes state explosion, it is **strictly forbidden**.
+- **Fail-Fast Compilation**: Patterns with complex capturing groups that would require state explosion to resolve correctly MUST be rejected at compile time. It is better to fail to compile than to degrade the $O(n)$ performance guarantee or exceed memory limits.
+- **Future Direction (TNFA to TDFA)**: The ultimate architectural goal for achieving full submatch compatibility without state explosion is the implementation of a Tagged DFA (TDFA) compiled directly from a Tagged NFA (TNFA). Until this is fully realized, the engine uses **Transition-Embedded Tagging**:
+  - **Static Priority Resolution**: Leftmost-first priority for multiple NFA paths is resolved during DFA construction. Only tags from the highest-priority path are stored on each DFA transition edge.
+  - **Register-Based Recording**: Capture group offsets are recorded into a fixed-size register array (`int` slice) during the scan.
+  - **Zero-Cost Dispatch**: Use function variables to bind the appropriate execution loop (Match-only vs. Find-Submatch) at compile/instantiation time.
 
 ### 2.6 Pure Go (No CGO)
 - **Zero Overhead**: CGO is strictly prohibited to avoid context-switching overhead and maintain Go's native portability and build simplicity.
@@ -42,7 +45,7 @@ To maximize throughput, the engine MUST select the most efficient execution loop
 ### 3.1 Supported Features
 - **Standard Syntax Compatibility**: Accept `syntax.Prog` instruction sequences from the standard Go parser.
 - **Anchors & Boundaries**: Support `^`, `$`, `\b`, `\B` and multiline anchors via the **Virtual Byte Insertion** mechanism.
-- **Capturing Groups**: Support extraction by recording offsets into fixed-size register arrays using **Transition-Embedded Tagging** during the scan. This ensures $O(n)$ complexity and avoids backtracking.
+- **Capturing Groups**: Support extraction by recording offsets into fixed-size register arrays. **Crucial Limitation**: Submatch extraction that triggers state explosion (e.g., deeply nested groups with ambiguous transitions) will result in a compilation error to preserve cache locality and $O(n)$ bounds.
 - **Fixed-Length Lookahead/Lookbehind**: Support assertions that can be statically integrated into the DFA transition graph during compilation.
 
 ### 3.2 Excluded Features
