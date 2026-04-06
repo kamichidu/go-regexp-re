@@ -25,15 +25,43 @@ type nfaState struct {
 	node *utf8Node // if nil, the instruction hasn't started yet.
 }
 
+// TagOp represents a capture group register index and whether it's after the byte.
+type TagOp uint32
+
+func (t TagOp) Index() int {
+	return int(t >> 1)
+}
+
+func (t TagOp) After() bool {
+	return (t & 1) != 0
+}
+
+func MakeTagOp(index int, after bool) TagOp {
+	if after {
+		return TagOp(index<<1 | 1)
+	}
+	return TagOp(index << 1)
+}
+
+// nfaPath represents an NFA state reached with associated tags.
+type nfaPath struct {
+	nfaState
+	tags []int // Just indices
+}
+
 // DFA represents a Deterministic Finite Automaton.
 type DFA struct {
-	transitions []StateID // Flattened table for better cache locality: table[state * stride + byte]
-	stride      int       // 256 or 257
-	numStates   int
-	startState  StateID
-	accepting   []bool
-	hasAnchors  bool
-	dfaToNfa    [][]nfaState // For post-processing context checks
+	transitions   []StateID // Flattened table for better cache locality: table[state * stride + byte]
+	tagOffsets    []uint32  // tagPool[tagOffsets[i]:tagOffsets[i+1]] are tags for transition i
+	tagPool       []TagOp
+	stride        int // 256 or 257
+	numStates     int
+	startState    StateID
+	entryTags     []TagOp
+	accepting     []bool
+	hasAnchors    bool
+	dfaToNfa      [][]nfaPath // Carry paths with tags
+	stateBestTags [][]int     // Best tags (indices) for each state
 }
 
 const (
@@ -62,6 +90,14 @@ func (d *DFA) Next(current StateID, b int) StateID {
 	return d.transitions[int(current)*d.stride+b]
 }
 
+func (d *DFA) Tags(current StateID, b int) []TagOp {
+	if current < 0 || int(current) >= d.numStates || b < 0 || b >= d.stride || len(d.tagOffsets) == 0 {
+		return nil
+	}
+	idx := int(current)*d.stride + b
+	return d.tagPool[d.tagOffsets[idx]:d.tagOffsets[idx+1]]
+}
+
 func (d *DFA) IsAccepting(s StateID) bool {
 	if s < 0 || int(s) >= d.numStates {
 		return false
@@ -72,6 +108,11 @@ func (d *DFA) IsAccepting(s StateID) bool {
 // StartState returns the state ID to use for the initial position.
 func (d *DFA) StartState() StateID {
 	return d.startState
+}
+
+// EntryTags returns the tags to be applied at the start of matching.
+func (d *DFA) EntryTags() []TagOp {
+	return d.entryTags
 }
 
 // HasAnchors reports whether the DFA contains any anchor transitions.
@@ -121,22 +162,32 @@ func (d *DFA) build(prog *syntax.Prog) error {
 	}
 
 	nfaToDfa := make(map[string]StateID)
-	dfaToNfa := make([][]nfaState, 0)
+	dfaToNfa := make([][]nfaPath, 0)
+	allTags := make([][]TagOp, 0)
 
-	addDfaState := func(set []nfaState) StateID {
-		key := serializeSet(set)
+	addDfaState := func(closure []nfaPath, bestTags []int) StateID {
+		sorted := make([]nfaPath, len(closure))
+		copy(sorted, closure)
+		sort.Slice(sorted, func(i, j int) bool {
+			if sorted[i].id != sorted[j].id {
+				return sorted[i].id < sorted[j].id
+			}
+			return fmt.Sprintf("%p", sorted[i].node) < fmt.Sprintf("%p", sorted[j].node)
+		})
+
+		key := serializeSet(sorted)
 		if id, ok := nfaToDfa[key]; ok {
 			return id
 		}
 
 		id := StateID(len(dfaToNfa))
 		nfaToDfa[key] = id
-		dfaToNfa = append(dfaToNfa, set)
-		d.dfaToNfa = append(d.dfaToNfa, set)
+		dfaToNfa = append(dfaToNfa, closure)
+		d.dfaToNfa = append(d.dfaToNfa, closure)
+		d.stateBestTags = append(d.stateBestTags, bestTags)
 
 		// Determine if this state is an accepting state WITHOUT any extra context.
 		isAccepting := false
-		closure := epsilonClosure(set, prog, 0)
 		for _, s := range closure {
 			if prog.Inst[s.id].Op == syntax.InstMatch && s.node == nil {
 				isAccepting = true
@@ -147,25 +198,38 @@ func (d *DFA) build(prog *syntax.Prog) error {
 
 		for i := 0; i < d.stride; i++ {
 			d.transitions = append(d.transitions, InvalidState)
+			allTags = append(allTags, nil)
 		}
 		d.numStates++
 		return id
 	}
 
 	// 1. Initial start state (no context)
-	defaultStartClosure := epsilonClosure([]nfaState{{id: uint32(prog.Start)}}, prog, 0)
-	d.startState = addDfaState(defaultStartClosure)
+	defaultStartClosure, entryIndices := epsilonClosure([]nfaPath{{nfaState: nfaState{id: uint32(prog.Start)}}}, prog, 0)
+	d.startState = addDfaState(defaultStartClosure, entryIndices)
+	d.entryTags = make([]TagOp, len(entryIndices))
+	for i, idx := range entryIndices {
+		d.entryTags[i] = MakeTagOp(idx, false)
+	}
 
 	// 2. Process all states
 	for i := 0; i < len(dfaToNfa); i++ {
-		currentSet := dfaToNfa[i]
+		currentClosure := dfaToNfa[i]
+		currentBestTags := d.stateBestTags[i]
 		currentDfaID := StateID(i)
 
 		// Byte transitions
 		for b := 0; b < 256; b++ {
-			var nextStates []nfaState
-			for _, s := range currentSet {
+			var nextPaths []nfaPath
+			var bestBefore []int
+			foundMatch := false
+
+			for _, p := range currentClosure {
+				s := p.nfaState
 				inst := prog.Inst[s.id]
+
+				var matchedOut []uint32
+				var matchedNodes []*utf8Node
 
 				if s.node == nil {
 					switch inst.Op {
@@ -179,10 +243,10 @@ func (d *DFA) build(prog *syntax.Prog) error {
 							}
 							if match(root, byte(b)) {
 								if root.next == nil {
-									nextStates = append(nextStates, nfaState{id: inst.Out})
+									matchedOut = append(matchedOut, inst.Out)
 								} else {
 									for _, child := range root.next {
-										nextStates = append(nextStates, nfaState{id: s.id, node: child})
+										matchedNodes = append(matchedNodes, child)
 									}
 								}
 							}
@@ -197,20 +261,45 @@ func (d *DFA) build(prog *syntax.Prog) error {
 					}
 					if match(s.node, byte(b)) {
 						if s.node.next == nil {
-							nextStates = append(nextStates, nfaState{id: inst.Out})
+							matchedOut = append(matchedOut, inst.Out)
 						} else {
 							for _, child := range s.node.next {
-								nextStates = append(nextStates, nfaState{id: s.id, node: child})
+								matchedNodes = append(matchedNodes, child)
 							}
 						}
 					}
 				}
 
+				if len(matchedOut) > 0 || len(matchedNodes) > 0 {
+					if !foundMatch {
+						bestBefore = p.tags
+					}
+					for _, out := range matchedOut {
+						nextPaths = append(nextPaths, nfaPath{nfaState: nfaState{id: out}})
+					}
+					for _, node := range matchedNodes {
+						nextPaths = append(nextPaths, nfaPath{nfaState: nfaState{id: s.id, node: node}})
+					}
+					foundMatch = true
+				}
 			}
-			if len(nextStates) > 0 {
-				nextClosure := epsilonClosure(nextStates, prog, 0)
-				nextDfaID := addDfaState(nextClosure)
-				d.transitions[int(currentDfaID)*d.stride+b] = nextDfaID
+
+			if foundMatch {
+				nextClosure, tagsAfterIndices := epsilonClosure(nextPaths, prog, 0)
+				nextDfaID := addDfaState(nextClosure, tagsAfterIndices)
+				idx := int(currentDfaID)*d.stride + b
+				d.transitions[idx] = nextDfaID
+
+				// diffBefore = bestBefore - currentBestTags
+				diffBefore := diffTags(bestBefore, currentBestTags)
+				edgeTags := make([]TagOp, 0, len(diffBefore)+len(tagsAfterIndices))
+				for _, t := range diffBefore {
+					edgeTags = append(edgeTags, MakeTagOp(t, false))
+				}
+				for _, t := range tagsAfterIndices {
+					edgeTags = append(edgeTags, MakeTagOp(t, true))
+				}
+				allTags[idx] = edgeTags
 			}
 		}
 
@@ -218,15 +307,41 @@ func (d *DFA) build(prog *syntax.Prog) error {
 		if d.hasAnchors {
 			for bit := 0; bit < numVirtualBytes; bit++ {
 				op := syntax.EmptyOp(1 << bit)
-				nextClosure := epsilonClosure(currentSet, prog, op)
-				if serializeSet(nextClosure) != serializeSet(currentSet) {
-					nextDfaID := addDfaState(nextClosure)
-					d.transitions[int(currentDfaID)*d.stride+256+bit] = nextDfaID
+				nextClosure, tagsIndices := epsilonClosure(currentClosure, prog, op)
+
+				if serializeSet(nextClosure) != serializeSet(currentClosure) {
+					nextDfaID := addDfaState(nextClosure, tagsIndices)
+					idx := int(currentDfaID)*d.stride + 256 + bit
+					d.transitions[idx] = nextDfaID
+
+					diff := diffTags(tagsIndices, currentBestTags)
+					edgeTags := make([]TagOp, len(diff))
+					for k, t := range diff {
+						edgeTags[k] = MakeTagOp(t, false) // virtual is same position
+					}
+					allTags[idx] = edgeTags
 				}
 			}
 		}
 	}
+
+	// Flatten tags
+	d.tagOffsets = make([]uint32, len(allTags)+1)
+	for i, tags := range allTags {
+		d.tagOffsets[i] = uint32(len(d.tagPool))
+		d.tagPool = append(d.tagPool, tags...)
+	}
+	d.tagOffsets[len(allTags)] = uint32(len(d.tagPool))
+
 	return nil
+}
+
+func diffTags(next, curr []int) []int {
+	i := 0
+	for i < len(next) && i < len(curr) && next[i] == curr[i] {
+		i++
+	}
+	return next[i:]
 }
 
 // IsAcceptingWithContext checks if a state is accepting given the current empty-width context.
@@ -235,7 +350,7 @@ func (d *DFA) IsAcceptingWithContext(s StateID, prog *syntax.Prog, context synta
 		return false
 	}
 	set := d.dfaToNfa[s]
-	closure := epsilonClosure(set, prog, context)
+	closure, _ := epsilonClosure(set, prog, context)
 	for _, ns := range closure {
 		if prog.Inst[ns.id].Op == syntax.InstMatch && ns.node == nil {
 			return true
@@ -254,60 +369,66 @@ func matchesByte(node *utf8Node, b byte) bool {
 }
 
 func matchesByteFold(node *utf8Node, b byte) bool {
-	// For now, since we've expanded the trie in runeRangesToUTF8Trie,
-	// this is functionally the same as matchesByte.
 	return matchesByte(node, b)
 }
 
-func epsilonClosure(states []nfaState, prog *syntax.Prog, context syntax.EmptyOp) []nfaState {
+func epsilonClosure(paths []nfaPath, prog *syntax.Prog, context syntax.EmptyOp) ([]nfaPath, []int) {
 	type key struct {
 		id   uint32
 		node *utf8Node
 	}
 	seen := make(map[key]bool)
-	stack := append([]nfaState{}, states...)
-	var result []nfaState
+	stack := make([]nfaPath, 0, len(paths))
+	for i := len(paths) - 1; i >= 0; i-- {
+		stack = append(stack, paths[i])
+	}
+	var result []nfaPath
 
 	for len(stack) > 0 {
-		s := stack[len(stack)-1]
+		p := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
 
-		k := key{s.id, s.node}
+		k := key{p.id, p.node}
 		if seen[k] {
 			continue
 		}
 		seen[k] = true
 
-		if s.node == nil {
-			inst := prog.Inst[s.id]
+		if p.node == nil {
+			inst := prog.Inst[p.id]
 			switch inst.Op {
-			case syntax.InstAlt, syntax.InstAltMatch, syntax.InstCapture, syntax.InstNop:
-				stack = append(stack, nfaState{id: inst.Out})
-				if inst.Op == syntax.InstAlt || inst.Op == syntax.InstAltMatch {
-					stack = append(stack, nfaState{id: inst.Arg})
-				}
+			case syntax.InstAlt, syntax.InstAltMatch:
+				stack = append(stack, nfaPath{nfaState: nfaState{id: inst.Arg}, tags: p.tags})
+				stack = append(stack, nfaPath{nfaState: nfaState{id: inst.Out}, tags: p.tags})
+				continue
+			case syntax.InstCapture:
+				newTags := make([]int, len(p.tags)+1)
+				copy(newTags, p.tags)
+				newTags[len(p.tags)] = int(inst.Arg)
+				stack = append(stack, nfaPath{nfaState: nfaState{id: inst.Out}, tags: newTags})
+				continue
+			case syntax.InstNop:
+				stack = append(stack, nfaPath{nfaState: nfaState{id: inst.Out}, tags: p.tags})
 				continue
 			case syntax.InstEmptyWidth:
 				if syntax.EmptyOp(inst.Arg)&context == syntax.EmptyOp(inst.Arg) {
-					stack = append(stack, nfaState{id: inst.Out})
+					stack = append(stack, nfaPath{nfaState: nfaState{id: inst.Out}, tags: p.tags})
 					continue
 				}
-				// If it doesn't match now, keep it in the set to re-evaluate later.
 			}
 		}
-		result = append(result, s)
+		result = append(result, p)
 	}
 
-	sort.Slice(result, func(i, j int) bool {
-		if result[i].id != result[j].id {
-			return result[i].id < result[j].id
-		}
-		return fmt.Sprintf("%p", result[i].node) < fmt.Sprintf("%p", result[j].node)
-	})
-	return result
+	var bestTags []int
+	if len(result) > 0 {
+		bestTags = result[0].tags
+	}
+
+	return result, bestTags
 }
 
-func serializeSet(set []nfaState) string {
+func serializeSet(set []nfaPath) string {
 	var sb strings.Builder
 	for i, s := range set {
 		if i > 0 {

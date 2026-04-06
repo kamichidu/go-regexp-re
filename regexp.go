@@ -28,17 +28,6 @@ func Compile(expr string) (*Regexp, error) {
 	re = syntax.Simplify(re)
 	prefixStr, complete := syntax.Prefix(re)
 
-	// Optimization: If the regex is just a literal, use bytes.Contains directly.
-	if complete {
-		return &Regexp{
-			expr:   expr,
-			prefix: []byte(prefixStr),
-			match: func(b []byte) bool {
-				return bytes.Contains(b, []byte(prefixStr))
-			},
-		}, nil
-	}
-
 	prog, err := syntax.Compile(re)
 	if err != nil {
 		return nil, err
@@ -54,7 +43,11 @@ func Compile(expr string) (*Regexp, error) {
 		dfa:    dfa,
 	}
 
-	if len(res.prefix) > 0 && !dfa.HasAnchors() {
+	if complete {
+		res.match = func(b []byte) bool {
+			return bytes.Contains(b, []byte(prefixStr))
+		}
+	} else if len(res.prefix) > 0 && !dfa.HasAnchors() {
 		state := dfa.StartState()
 		for _, b := range res.prefix {
 			state = dfa.Next(state, int(b))
@@ -63,17 +56,15 @@ func Compile(expr string) (*Regexp, error) {
 			}
 		}
 		res.prefixState = state
-	}
 
-	if dfa.HasAnchors() {
-		if len(res.prefix) > 0 {
+		if dfa.HasAnchors() {
 			res.match = res.doMatchExtendedPrefix
 		} else {
-			res.match = res.doMatchExtended
+			res.match = res.doMatchFastPrefix
 		}
 	} else {
-		if len(res.prefix) > 0 {
-			res.match = res.doMatchFastPrefix
+		if dfa.HasAnchors() {
+			res.match = res.doMatchExtended
 		} else {
 			res.match = res.doMatchFast
 		}
@@ -98,6 +89,225 @@ func (re *Regexp) Match(b []byte) bool {
 // MatchString reports whether the string s contains any match of the regular expression re.
 func (re *Regexp) MatchString(s string) bool {
 	return re.match([]byte(s))
+}
+
+// FindSubmatchIndex returns a slice holding the index pairs identifying the leftmost match of
+// the regular expression of b and the matches, if any, of its subexpressions.
+func (re *Regexp) FindSubmatchIndex(b []byte) []int {
+	if re.dfa.HasAnchors() {
+		return re.doFindSubmatchExtended(b)
+	}
+	return re.doFindSubmatchFast(b)
+}
+
+// FindStringSubmatchIndex is the string version of FindSubmatchIndex.
+func (re *Regexp) FindStringSubmatchIndex(s string) []int {
+	return re.FindSubmatchIndex([]byte(s))
+}
+
+// FindSubmatch returns a slice of slices holding the text of the leftmost match of the
+// regular expression in b and the matches, if any, of its subexpressions.
+func (re *Regexp) FindSubmatch(b []byte) [][]byte {
+	indices := re.FindSubmatchIndex(b)
+	if indices == nil {
+		return nil
+	}
+	result := make([][]byte, len(indices)/2)
+	for i := range result {
+		start, end := indices[2*i], indices[2*i+1]
+		if start >= 0 && end >= 0 {
+			result[i] = b[start:end]
+		}
+	}
+	return result
+}
+
+// FindStringSubmatch is the string version of FindSubmatch.
+func (re *Regexp) FindStringSubmatch(s string) []string {
+	indices := re.FindStringSubmatchIndex(s)
+	if indices == nil {
+		return nil
+	}
+	result := make([]string, len(indices)/2)
+	for i := range result {
+		start, end := indices[2*i], indices[2*i+1]
+		if start >= 0 && end >= 0 {
+			result[i] = s[start:end]
+		}
+	}
+	return result
+}
+
+func (re *Regexp) doFindSubmatchFast(b []byte) []int {
+	dfa := re.dfa
+	numRegs := re.prog.NumCap
+	if numRegs < 2 {
+		numRegs = 2
+	}
+
+	for i := 0; i <= len(b); i++ {
+		state := dfa.StartState()
+		registers := make([]int, numRegs)
+		for k := range registers {
+			registers[k] = -1
+		}
+
+		// Entry tags
+		for _, tag := range dfa.EntryTags() {
+			registers[tag.Index()] = i
+		}
+
+		var bestMatch []int
+		if dfa.IsAccepting(state) {
+			bestMatch = make([]int, numRegs)
+			copy(bestMatch, registers)
+			bestMatch[0] = i
+			bestMatch[1] = i
+		}
+
+		searchBuf := b[i:]
+		for j := 0; j < len(searchBuf); j++ {
+			c := searchBuf[j]
+			tags := dfa.Tags(state, int(c))
+			state = dfa.Next(state, int(c))
+			if state == ir.InvalidState {
+				break
+			}
+			for _, tag := range tags {
+				offset := i + j
+				if tag.After() {
+					offset++
+				}
+				registers[tag.Index()] = offset
+			}
+
+			if dfa.IsAccepting(state) {
+				bestMatch = make([]int, numRegs)
+				copy(bestMatch, registers)
+				bestMatch[0] = i
+				bestMatch[1] = i + j + 1
+			}
+		}
+
+		if bestMatch != nil {
+			return bestMatch
+		}
+	}
+	return nil
+}
+
+func (re *Regexp) doFindSubmatchExtended(b []byte) []int {
+	dfa := re.dfa
+	numRegs := re.prog.NumCap
+	if numRegs < 2 {
+		numRegs = 2
+	}
+
+	for i := 0; i <= len(b); i++ {
+		state := dfa.StartState()
+		registers := make([]int, numRegs)
+		for k := range registers {
+			registers[k] = -1
+		}
+
+		// Initial entry tags
+		for _, tag := range dfa.EntryTags() {
+			registers[tag.Index()] = i
+		}
+
+		// Initial context
+		state, tags := re.applyContextWithTags(state, re.calculateContext(b, i))
+		for _, tag := range tags {
+			// Tags on virtual transitions are always at the current position.
+			registers[tag.Index()] = i
+		}
+
+		var bestMatch []int
+		if dfa.IsAcceptingWithContext(state, re.prog, re.calculateContext(b, i)) {
+			bestMatch = make([]int, numRegs)
+			copy(bestMatch, registers)
+			bestMatch[0] = i
+			bestMatch[1] = i
+		}
+
+		searchBuf := b[i:]
+		for j := 0; j < len(searchBuf); j++ {
+			c := searchBuf[j]
+			tags := dfa.Tags(state, int(c))
+			state = dfa.Next(state, int(c))
+			if state == ir.InvalidState {
+				break
+			}
+			for _, tag := range tags {
+				offset := i + j
+				if tag.After() {
+					offset++
+				}
+				registers[tag.Index()] = offset
+			}
+
+			// Context at i+j+1
+			ctx := re.calculateContext(b, i+j+1)
+			var ctags []ir.TagOp
+			state, ctags = re.applyContextWithTags(state, ctx)
+			for _, tag := range ctags {
+				registers[tag.Index()] = i + j + 1
+			}
+
+			if dfa.IsAcceptingWithContext(state, re.prog, ctx) {
+				bestMatch = make([]int, numRegs)
+				copy(bestMatch, registers)
+				bestMatch[0] = i
+				bestMatch[1] = i + j + 1
+			}
+		}
+
+		if bestMatch != nil {
+			return bestMatch
+		}
+	}
+	return nil
+}
+
+func (re *Regexp) applyContextWithTags(state ir.StateID, op syntax.EmptyOp) (ir.StateID, []ir.TagOp) {
+	if state == ir.InvalidState {
+		return ir.InvalidState, nil
+	}
+	var allTags []ir.TagOp
+	for {
+		changed := false
+		var vbytes []int
+		if op&syntax.EmptyBeginLine != 0 {
+			vbytes = append(vbytes, ir.VirtualBeginLine)
+		}
+		if op&syntax.EmptyEndLine != 0 {
+			vbytes = append(vbytes, ir.VirtualEndLine)
+		}
+		if op&syntax.EmptyBeginText != 0 {
+			vbytes = append(vbytes, ir.VirtualBeginText)
+		}
+		if op&syntax.EmptyEndText != 0 {
+			vbytes = append(vbytes, ir.VirtualEndText)
+		}
+		if op&syntax.EmptyWordBoundary != 0 {
+			vbytes = append(vbytes, ir.VirtualWordBoundary)
+		}
+		if op&syntax.EmptyNoWordBoundary != 0 {
+			vbytes = append(vbytes, ir.VirtualNoWordBoundary)
+		}
+
+		for _, vb := range vbytes {
+			if next := re.dfa.Next(state, vb); next != ir.InvalidState {
+				allTags = append(allTags, re.dfa.Tags(state, vb)...)
+				state = next
+				changed = true
+			}
+		}
+		if !changed {
+			break
+		}
+	}
+	return state, allTags
 }
 
 // String returns the source text used to compile the regular expression.

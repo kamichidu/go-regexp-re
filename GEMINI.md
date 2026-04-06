@@ -27,8 +27,14 @@ Every implementation must adhere to these four pillars to ensure maximum perform
 To maximize throughput, the engine MUST select the most efficient execution loop based on pattern characteristics:
 - **Fast Path (Pure DFA)**: Automatically selected for patterns without anchors. It utilizes a minimalist execution loop with zero boundary/context checks to approach raw memory bandwidth speeds.
 - **Extended Path (Virtual Byte Insertion)**: Selected for patterns with anchors (e.g., `^`, `$`, `\b`). It employs "Virtual Bytes" (indices 256+) injected at character boundaries to process empty-width assertions within the DFA's $O(n)$ framework.
+- **Submatch Path (Transition-Embedded Tagging)**: Selected when submatches are requested. It utilizes "tags" (TagOp) embedded directly into the transition table to record capture offsets without a separate post-processing pass.
 
-### 2.5 Pure Go (No CGO)
+### 2.5 Transition-Embedded Tagging for Submatches
+- **Static Priority Resolution**: Leftmost-first priority for multiple NFA paths is resolved during DFA construction. Only tags from the highest-priority path are stored on each DFA transition edge.
+- **Register-Based Recording**: Capture group offsets are recorded into a fixed-size register array (`int` slice) during the scan. This approach maintains $O(n)$ complexity and minimizes memory allocation.
+- **Zero-Cost Dispatch**: Use function variables to bind the appropriate execution loop (Match-only vs. Find-Submatch) at compile/instantiation time, avoiding conditional checks within the hot scanning loop.
+
+### 2.6 Pure Go (No CGO)
 - **Zero Overhead**: CGO is strictly prohibited to avoid context-switching overhead and maintain Go's native portability and build simplicity.
 
 ## 3. Feature Selection Policy (Performance over Features)
@@ -36,7 +42,7 @@ To maximize throughput, the engine MUST select the most efficient execution loop
 ### 3.1 Supported Features
 - **Standard Syntax Compatibility**: Accept `syntax.Prog` instruction sequences from the standard Go parser.
 - **Anchors & Boundaries**: Support `^`, `$`, `\b`, `\B` and multiline anchors via the **Virtual Byte Insertion** mechanism.
-- **Capturing Groups**: Support extraction by recording offsets using a stack during the DFA scan and executing extraction as a post-processing pipeline.
+- **Capturing Groups**: Support extraction by recording offsets into fixed-size register arrays using **Transition-Embedded Tagging** during the scan. This ensures $O(n)$ complexity and avoids backtracking.
 - **Fixed-Length Lookahead/Lookbehind**: Support assertions that can be statically integrated into the DFA transition graph during compilation.
 
 ### 3.2 Excluded Features
