@@ -50,10 +50,120 @@ func Compile(expr string) (*Regexp, error) {
 		res.match = func(b []byte) bool {
 			return bytes.Contains(b, []byte(prefixStr))
 		}
+	} else if dfa.HasAnchors() {
+		res.match = res.doMatchExtended
 	} else {
-		res.match = res.doMatch
+		res.match = res.doMatchFast
 	}
 	return res, nil
+}
+
+func (re *Regexp) doMatchFast(b []byte) bool {
+	dfa := re.dfa
+	trans := dfa.Transitions()
+	stride := dfa.Stride()
+	accepting := dfa.Accepting()
+	startState := dfa.StartState()
+
+	for i := 0; i <= len(b); i++ {
+		state := startState
+		if accepting[state] {
+			return true
+		}
+		for j := i; j < len(b); j++ {
+			c := b[j]
+			state = trans[int(state)*stride+int(c)]
+			if state == ir.InvalidState {
+				break
+			}
+			if accepting[state] {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (re *Regexp) doMatchExtended(b []byte) bool {
+	dfa := re.dfa
+	trans := dfa.Transitions()
+	stride := dfa.Stride()
+	accepting := dfa.Accepting()
+	startState := dfa.StartState()
+
+	for i := 0; i <= len(b); i++ {
+		state := startState
+
+		// Context-based virtual bytes at the start
+		ctx := re.calculateContext(b, i)
+		state = re.applyContextToState(state, ctx)
+
+		if accepting[state] {
+			return true
+		}
+
+		searchBuf := b[i:]
+		for j := 0; j < len(searchBuf); j++ {
+			c := searchBuf[j]
+			state = trans[int(state)*stride+int(c)]
+			if state == ir.InvalidState {
+				break
+			}
+
+			// Context-based virtual bytes at boundaries
+			ctx := re.calculateContext(b, i+j+1)
+			state = re.applyContextToState(state, ctx)
+
+			if accepting[state] {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (re *Regexp) applyContextToState(state ir.StateID, op syntax.EmptyOp) ir.StateID {
+	dfa := re.dfa
+	trans := dfa.Transitions()
+	stride := dfa.Stride()
+
+	for {
+		changed := false
+		if op&syntax.EmptyBeginLine != 0 {
+			if next := trans[int(state)*stride+ir.VirtualBeginLine]; next != ir.InvalidState {
+				state, changed = next, true
+			}
+		}
+		if op&syntax.EmptyEndLine != 0 {
+			if next := trans[int(state)*stride+ir.VirtualEndLine]; next != ir.InvalidState {
+				state, changed = next, true
+			}
+		}
+		if op&syntax.EmptyBeginText != 0 {
+			if next := trans[int(state)*stride+ir.VirtualBeginText]; next != ir.InvalidState {
+				state, changed = next, true
+			}
+		}
+		if op&syntax.EmptyEndText != 0 {
+			if next := trans[int(state)*stride+ir.VirtualEndText]; next != ir.InvalidState {
+				state, changed = next, true
+			}
+		}
+		if op&syntax.EmptyWordBoundary != 0 {
+			if next := trans[int(state)*stride+ir.VirtualWordBoundary]; next != ir.InvalidState {
+				state, changed = next, true
+			}
+		}
+		if op&syntax.EmptyNoWordBoundary != 0 {
+			if next := trans[int(state)*stride+ir.VirtualNoWordBoundary]; next != ir.InvalidState {
+				state, changed = next, true
+			}
+		}
+		if !changed {
+			break
+		}
+	}
+	return state
 }
 
 // MustCompile is like Compile but panics if the expression cannot be parsed.

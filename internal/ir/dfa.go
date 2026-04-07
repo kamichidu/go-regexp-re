@@ -104,6 +104,18 @@ func (d *DFA) Next(current StateID, b int) StateID {
 	return d.transitions[int(current)*d.stride+b]
 }
 
+func (d *DFA) Transitions() []StateID {
+	return d.transitions
+}
+
+func (d *DFA) Stride() int {
+	return d.stride
+}
+
+func (d *DFA) Accepting() []bool {
+	return d.accepting
+}
+
 func (d *DFA) IsAccepting(s StateID) bool {
 	if s < 0 || int(s) >= d.numStates {
 		return false
