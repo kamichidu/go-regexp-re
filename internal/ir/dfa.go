@@ -149,6 +149,34 @@ func (d *DFA) NfaPaths(s StateID) []nfaPath {
 	return d.dfaToNfa[s]
 }
 
+func (d *DFA) TransitionTags(current StateID, b int) []TagOp {
+	if current < 0 || int(current) >= d.numStates || b < 0 || b >= d.stride {
+		return nil
+	}
+	idx := int(current)*d.stride + b
+	if idx >= len(d.transPathOffsets)-1 {
+		return nil
+	}
+
+	start := d.transPathOffsets[idx]
+	end := d.transPathOffsets[idx+1]
+	if start == end {
+		return nil
+	}
+
+	// In TDFA with Static Priority Resolution, we only follow the tags
+	// of the highest priority NFA path (index 0 in nextClosure/allTransInfo).
+	tagStart := d.pathTagOffsets[start]
+	tagEnd := d.pathTagOffsets[start+1]
+	return d.tagPool[tagStart:tagEnd]
+}
+
+// I'll add direct fields accessors for the engine to use.
+func (d *DFA) PathSources() []int16       { return d.pathSources }
+func (d *DFA) TransPathOffsets() []uint32 { return d.transPathOffsets }
+func (d *DFA) PathTagOffsets() []uint32   { return d.pathTagOffsets }
+func (d *DFA) TagPool() []TagOp           { return d.tagPool }
+
 func (d *DFA) TransitionInfo(current StateID, b int) (sources []int16, tags [][]TagOp) {
 	if current < 0 || int(current) >= d.numStates || b < 0 || b >= d.stride {
 		return nil, nil
@@ -362,12 +390,6 @@ func (d *DFA) build(prog *syntax.Prog) error {
 				}
 				for j, p := range nextClosure {
 					ti.sources[j] = int16(p.origin)
-					srcPath := currentClosure[p.origin]
-					for k, t := range srcPath.tags {
-						if k < len(srcPath.visited) && srcPath.visited[k] {
-							ti.tags[j] = append(ti.tags[j], MakeTagOp(t, false))
-						}
-					}
 					for k, t := range p.tags {
 						if k < len(p.visited) && p.visited[k] {
 							ti.tags[j] = append(ti.tags[j], MakeTagOp(t, true))

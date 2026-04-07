@@ -193,60 +193,77 @@ func (re *Regexp) NumSubexp() int {
 // FindSubmatchIndex returns a slice holding the index pairs identifying the leftmost match of
 // the regular expression of b and the matches, if any, of its subexpressions.
 func (re *Regexp) FindSubmatchIndex(b []byte) []int {
-	return re.doExecute(b)
+	return re.doExecuteFastSubmatch(b)
 }
 
-func (re *Regexp) doExecute(b []byte) []int {
+func (re *Regexp) doExecuteFastSubmatch(b []byte) []int {
 	dfa := re.dfa
 	numRegs := (re.numSubexp + 1) * 2
 	hasAnchors := dfa.HasAnchors()
+	trans := dfa.Transitions()
+	stride := dfa.Stride()
+	accepting := dfa.Accepting()
+	startState := dfa.StartState()
+
+	// Pre-allocate register pool. Two sets (current and next) to avoid copies.
+	const maxPaths = 512
+	poolA := make([]int, maxPaths*numRegs)
+	poolB := make([]int, maxPaths*numRegs)
+	for i := range poolA {
+		poolA[i] = -1
+		poolB[i] = -1
+	}
 
 	for i := 0; i <= len(b); i++ {
-		state := dfa.StartState()
+		state := startState
+		currentPaths := dfa.NfaPaths(state)
 
-		// regs stores registers for each NFA path in the current DFA state.
-		nfaPaths := dfa.NfaPaths(state)
-		regs := make([][]int, len(nfaPaths))
-		for k := range regs {
-			regs[k] = make([]int, numRegs)
-			for r := range regs[k] {
-				regs[k][r] = -1
+		currPool := poolA
+		nextPool := poolB
+
+		// Reset initial registers.
+		for k := 0; k < len(currentPaths); k++ {
+			base := k * numRegs
+			for r := 0; r < numRegs; r++ {
+				currPool[base+r] = -1
 			}
-		}
-
-		// Apply initial entry tags to all paths in the start state.
-		for k := range regs {
-			re.applyTagsToRegs(regs[k], dfa.EntryTagsForPath(k), i)
+			re.applyTagsToRegs(currPool[base:base+numRegs], dfa.EntryTagsForPath(k), i)
 		}
 
 		// Initial Context
+		numCurrent := len(currentPaths)
 		if hasAnchors {
 			ctx := re.calculateContext(b, i)
-			state, regs = re.applyContext(state, ctx, regs, i)
+			var nextState ir.StateID
+			var n int
+			var finalPool []int
+			nextState, n, finalPool = re.applyContextWithPool(state, ctx, currPool, numCurrent, numRegs, i, nextPool)
+			if nextState != state || len(finalPool) > 0 { // Just check if any transitions happened
+				if n > 0 {
+					state = nextState
+					numCurrent = n
+					// If the pool was swapped, currPool and nextPool need to be updated.
+					// We can check if finalPool is actually currPool or nextPool.
+					if &finalPool[0] == &nextPool[0] {
+						currPool, nextPool = nextPool, currPool
+					}
+				}
+			}
 		}
 
 		var bestMatch []int
 		bestPriority := 1<<30 - 1
 
-		updateBestMatch := func(endOffset int, currentState ir.StateID, currentRegs [][]int) {
-			priority := dfa.AcceptingPriority(currentState)
-			if priority > bestPriority {
-				return
-			}
-			// If priority is same, we prefer LONGER match (higher endOffset).
-			if bestMatch != nil && priority == bestPriority && endOffset <= bestMatch[1] {
-				return
-			}
-
-			// Find which NFA path matched with this priority.
-			paths := dfa.NfaPaths(currentState)
-			for idx, p := range paths {
-				// check if this path is a match
-				if re.prog.Inst[p.ID].Op == syntax.InstMatch {
-					if p.Priority == priority {
-						bestPriority = priority
+		updateBestMatch := func(endOffset int, s ir.StateID, regs []int) {
+			p := dfa.AcceptingPriority(s)
+			if bestMatch == nil || p < bestPriority || (p == bestPriority && endOffset > bestMatch[1]) {
+				// Find which path matched.
+				paths := dfa.NfaPaths(s)
+				for idx, path := range paths {
+					if re.prog.Inst[path.ID].Op == syntax.InstMatch && path.Priority == p {
+						bestPriority = p
 						bestMatch = make([]int, numRegs)
-						copy(bestMatch, currentRegs[idx])
+						copy(bestMatch, regs[idx*numRegs:(idx+1)*numRegs])
 						bestMatch[0] = i
 						bestMatch[1] = endOffset
 						break
@@ -255,42 +272,65 @@ func (re *Regexp) doExecute(b []byte) []int {
 			}
 		}
 
-		if dfa.IsAccepting(state) {
-			updateBestMatch(i, state, regs)
+		if accepting[state] {
+			updateBestMatch(i, state, currPool)
 		}
 
-		searchBuf := b[i:]
-		for j := 0; j < len(searchBuf); j++ {
-			c := searchBuf[j]
-			nextState := dfa.Next(state, int(c))
+		for j := i; j < len(b); j++ {
+			c := b[j]
+			idx := int(state)*stride + int(c)
+			nextState := trans[idx]
 			if nextState == ir.InvalidState {
 				break
 			}
 
-			sources, tags := dfa.TransitionInfo(state, int(c))
-			nextRegs := make([][]int, len(sources))
-			for k, srcIdx := range sources {
-				nextRegs[k] = make([]int, numRegs)
-				if srcIdx >= 0 && int(srcIdx) < len(regs) {
-					copy(nextRegs[k], regs[srcIdx])
+			// Transition info.
+			pathOffsets := dfa.TransPathOffsets()
+			sources := dfa.PathSources()
+			tagOffsets := dfa.PathTagOffsets()
+			tagPool := dfa.TagPool()
+
+			start := pathOffsets[idx]
+			end := pathOffsets[idx+1]
+			numNext := int(end - start)
+
+			for k := 0; k < numNext; k++ {
+				srcIdx := int(sources[start+uint32(k)])
+				base := k * numRegs
+				if srcIdx >= 0 {
+					copy(nextPool[base:base+numRegs], currPool[srcIdx*numRegs:(srcIdx+1)*numRegs])
 				} else {
-					for r := range nextRegs[k] {
-						nextRegs[k][r] = -1
+					for r := 0; r < numRegs; r++ {
+						nextPool[base+r] = -1
 					}
 				}
-				re.applyTagsToRegs(nextRegs[k], tags[k], i+j)
+				tags := tagPool[tagOffsets[start+uint32(k)]:tagOffsets[start+uint32(k)+1]]
+				re.applyTagsToRegs(nextPool[base:base+numRegs], tags, j)
 			}
 
 			state = nextState
-			regs = nextRegs
+			numCurrent = numNext
+			currPool, nextPool = nextPool, currPool // Swap pools.
 
 			if hasAnchors {
-				ctx := re.calculateContext(b, i+j+1)
-				state, regs = re.applyContext(state, ctx, regs, i+j+1)
+				ctx := re.calculateContext(b, j+1)
+				var s2 ir.StateID
+				var n int
+				var finalPool []int
+				s2, n, finalPool = re.applyContextWithPool(state, ctx, currPool, numCurrent, numRegs, j+1, nextPool)
+				if s2 != state || len(finalPool) > 0 {
+					if n > 0 {
+						state = s2
+						numCurrent = n
+						if &finalPool[0] == &nextPool[0] {
+							currPool, nextPool = nextPool, currPool
+						}
+					}
+				}
 			}
 
-			if dfa.IsAccepting(state) {
-				updateBestMatch(i+j+1, state, regs)
+			if accepting[state] {
+				updateBestMatch(j+1, state, currPool)
 			}
 		}
 		if bestMatch != nil {
@@ -298,6 +338,60 @@ func (re *Regexp) doExecute(b []byte) []int {
 		}
 	}
 	return nil
+}
+
+func (re *Regexp) applyContextWithPool(state ir.StateID, op syntax.EmptyOp, currPool []int, numCurrent int, numRegs int, offset int, nextPool []int) (ir.StateID, int, []int) {
+	dfa := re.dfa
+	trans := dfa.Transitions()
+	stride := dfa.Stride()
+
+	pathOffsets := dfa.TransPathOffsets()
+	sources := dfa.PathSources()
+	tagOffsets := dfa.PathTagOffsets()
+	tagPool := dfa.TagPool()
+
+	vbytes := [...]int{
+		ir.VirtualBeginLine,
+		ir.VirtualEndLine,
+		ir.VirtualBeginText,
+		ir.VirtualEndText,
+		ir.VirtualWordBoundary,
+		ir.VirtualNoWordBoundary,
+	}
+
+	anyChanged := false
+	for {
+		changed := false
+		for k, vb := range vbytes {
+			if (op & syntax.EmptyOp(1<<k)) != 0 {
+				idx := int(state)*stride + vb
+				next := trans[idx]
+				if next != ir.InvalidState {
+					start, end := pathOffsets[idx], pathOffsets[idx+1]
+					numNext := int(end - start)
+					for nextK := 0; nextK < numNext; nextK++ {
+						srcIdx := int(sources[start+uint32(nextK)])
+						base := nextK * numRegs
+						copy(nextPool[base:base+numRegs], currPool[srcIdx*numRegs:(srcIdx+1)*numRegs])
+						tags := tagPool[tagOffsets[start+uint32(nextK)]:tagOffsets[start+uint32(nextK)+1]]
+						re.applyTagsToRegs(nextPool[base:base+numRegs], tags, offset)
+					}
+					state = next
+					numCurrent = numNext
+					currPool, nextPool = nextPool, currPool // Swap.
+					changed = true
+					anyChanged = true
+				}
+			}
+		}
+		if !changed {
+			break
+		}
+	}
+	if !anyChanged {
+		return state, numCurrent, nil
+	}
+	return state, numCurrent, currPool
 }
 
 func (re *Regexp) applyTagsToRegs(regs []int, tags []ir.TagOp, offset int) {
@@ -396,7 +490,7 @@ func (re *Regexp) FindStringSubmatch(s string) []string {
 }
 
 func (re *Regexp) doMatch(b []byte) bool {
-	return re.doExecute(b) != nil
+	return re.match(b)
 }
 
 func (re *Regexp) String() string {
