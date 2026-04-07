@@ -1,7 +1,9 @@
 package regexp
 
 import (
+	"fmt"
 	goregexp "regexp"
+	"strings"
 	"testing"
 )
 
@@ -57,4 +59,26 @@ func BenchmarkMatchRe(b *testing.B) {
 			}
 		})
 	}
+}
+
+func BenchmarkComplexity(b *testing.B) {
+	lengths := []int{10, 100, 1000, 10000}
+	pattern := "a*b"
+
+	fn := func(b *testing.B, re interface{ Match([]byte) bool }) {
+		for _, n := range lengths {
+			input := []byte(strings.Repeat("a", n))
+			b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
+				for i := 0; i < b.N; i++ {
+					re.Match(input)
+				}
+			})
+		}
+	}
+	b.Run("Go", func(b *testing.B) {
+		fn(b, goregexp.MustCompile(pattern))
+	})
+	b.Run("Re", func(b *testing.B) {
+		fn(b, MustCompile(pattern))
+	})
 }
