@@ -310,11 +310,24 @@ func (d *DFA) build(prog *syntax.Prog) error {
 		currentClosure := dfaToNfa[i]
 		currentDfaID := StateID(i)
 
+		// To support implicit .*? (O(n) search), always try starting a new match.
+		searchClosure := make([]nfaPath, len(currentClosure)+1)
+		copy(searchClosure, currentClosure)
+		searchClosure[len(currentClosure)] = nfaPath{
+			nfaState: nfaState{ID: uint32(prog.Start)},
+			origin:   -1,
+			Priority: 1000000, // Very low priority
+		}
+
 		for b := 0; b < 256; b++ {
 			var nextPaths []nfaPath
 			foundMatch := false
 
-			for pIdx, p := range currentClosure {
+			for pIdx, p := range searchClosure {
+				origin := pIdx
+				if pIdx == len(currentClosure) {
+					origin = -1
+				}
 				s := p.nfaState
 				inst := prog.Inst[s.ID]
 
@@ -364,14 +377,14 @@ func (d *DFA) build(prog *syntax.Prog) error {
 					for _, out := range matchedOut {
 						nextPaths = append(nextPaths, nfaPath{
 							nfaState: nfaState{ID: out},
-							origin:   pIdx,
+							origin:   origin,
 							Priority: p.Priority,
 						})
 					}
 					for _, node := range matchedNodes {
 						nextPaths = append(nextPaths, nfaPath{
 							nfaState: nfaState{ID: s.ID, node: node},
-							origin:   pIdx,
+							origin:   origin,
 							Priority: p.Priority,
 						})
 					}
@@ -403,13 +416,18 @@ func (d *DFA) build(prog *syntax.Prog) error {
 		if d.hasAnchors {
 			for bit := 0; bit < numVirtualBytes; bit++ {
 				op := syntax.EmptyOp(1 << bit)
-				initialPaths := make([]nfaPath, len(currentClosure))
+				initialPaths := make([]nfaPath, len(currentClosure)+1)
 				for j, p := range currentClosure {
 					initialPaths[j] = nfaPath{
 						nfaState: p.nfaState,
 						origin:   j,
 						Priority: p.Priority,
 					}
+				}
+				initialPaths[len(currentClosure)] = nfaPath{
+					nfaState: nfaState{ID: uint32(prog.Start)},
+					origin:   -1,
+					Priority: 1000000,
 				}
 				nextClosure, _ := epsilonClosure(initialPaths, prog, op)
 				if serializeSet(nextClosure) != serializeSet(currentClosure) {

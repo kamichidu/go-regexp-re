@@ -63,22 +63,18 @@ func (re *Regexp) doMatchFast(b []byte) bool {
 	trans := dfa.Transitions()
 	stride := dfa.Stride()
 	accepting := dfa.Accepting()
-	startState := dfa.StartState()
+	state := dfa.StartState()
 
-	for i := 0; i <= len(b); i++ {
-		state := startState
+	if accepting[state] {
+		return true
+	}
+	for _, c := range b {
+		state = trans[int(state)*stride+int(c)]
+		if state == ir.InvalidState {
+			state = dfa.StartState()
+		}
 		if accepting[state] {
 			return true
-		}
-		for j := i; j < len(b); j++ {
-			c := b[j]
-			state = trans[int(state)*stride+int(c)]
-			if state == ir.InvalidState {
-				break
-			}
-			if accepting[state] {
-				return true
-			}
 		}
 	}
 	return false
@@ -89,34 +85,26 @@ func (re *Regexp) doMatchExtended(b []byte) bool {
 	trans := dfa.Transitions()
 	stride := dfa.Stride()
 	accepting := dfa.Accepting()
-	startState := dfa.StartState()
+	state := dfa.StartState()
 
-	for i := 0; i <= len(b); i++ {
-		state := startState
+	// Initial context
+	ctx := re.calculateContext(b, 0)
+	state = re.applyContextToState(state, ctx)
+	if accepting[state] {
+		return true
+	}
 
-		// Context-based virtual bytes at the start
-		ctx := re.calculateContext(b, i)
+	for i, c := range b {
+		state = trans[int(state)*stride+int(c)]
+		if state == ir.InvalidState {
+			state = dfa.StartState()
+		}
+
+		ctx := re.calculateContext(b, i+1)
 		state = re.applyContextToState(state, ctx)
 
 		if accepting[state] {
 			return true
-		}
-
-		searchBuf := b[i:]
-		for j := 0; j < len(searchBuf); j++ {
-			c := searchBuf[j]
-			state = trans[int(state)*stride+int(c)]
-			if state == ir.InvalidState {
-				break
-			}
-
-			// Context-based virtual bytes at boundaries
-			ctx := re.calculateContext(b, i+j+1)
-			state = re.applyContextToState(state, ctx)
-
-			if accepting[state] {
-				return true
-			}
 		}
 	}
 	return false
@@ -203,9 +191,9 @@ func (re *Regexp) doExecuteFastSubmatch(b []byte) []int {
 	trans := dfa.Transitions()
 	stride := dfa.Stride()
 	accepting := dfa.Accepting()
-	startState := dfa.StartState()
+	state := dfa.StartState()
 
-	// Pre-allocate register pool. Two sets (current and next) to avoid copies.
+	// Pre-allocate register pool.
 	const maxPaths = 512
 	poolA := make([]int, maxPaths*numRegs)
 	poolB := make([]int, maxPaths*numRegs)
@@ -214,130 +202,127 @@ func (re *Regexp) doExecuteFastSubmatch(b []byte) []int {
 		poolB[i] = -1
 	}
 
-	for i := 0; i <= len(b); i++ {
-		state := startState
-		currentPaths := dfa.NfaPaths(state)
+	currPool := poolA
+	nextPool := poolB
 
-		currPool := poolA
-		nextPool := poolB
-
-		// Reset initial registers.
-		for k := 0; k < len(currentPaths); k++ {
-			base := k * numRegs
-			for r := 0; r < numRegs; r++ {
-				currPool[base+r] = -1
-			}
-			re.applyTagsToRegs(currPool[base:base+numRegs], dfa.EntryTagsForPath(k), i)
+	// Initial paths in start state.
+	initialPaths := dfa.NfaPaths(state)
+	numCurrent := len(initialPaths)
+	for k := 0; k < numCurrent; k++ {
+		base := k * numRegs
+		for r := 0; r < numRegs; r++ {
+			currPool[base+r] = -1
 		}
+		// Match starting at index 0.
+		currPool[base] = 0
+		re.applyTagsToRegs(currPool[base:base+numRegs], dfa.EntryTagsForPath(k), 0)
+	}
 
-		// Initial Context
-		numCurrent := len(currentPaths)
-		if hasAnchors {
-			ctx := re.calculateContext(b, i)
-			var nextState ir.StateID
-			var n int
-			var finalPool []int
-			nextState, n, finalPool = re.applyContextWithPool(state, ctx, currPool, numCurrent, numRegs, i, nextPool)
-			if nextState != state || len(finalPool) > 0 { // Just check if any transitions happened
-				if n > 0 {
-					state = nextState
-					numCurrent = n
-					// If the pool was swapped, currPool and nextPool need to be updated.
-					// We can check if finalPool is actually currPool or nextPool.
-					if &finalPool[0] == &nextPool[0] {
-						currPool, nextPool = nextPool, currPool
-					}
+	// Initial Context
+	if hasAnchors {
+		ctx := re.calculateContext(b, 0)
+		var nextState ir.StateID
+		var n int
+		var finalPool []int
+		nextState, n, finalPool = re.applyContextWithPool(state, ctx, currPool, numCurrent, numRegs, 0, nextPool)
+		if nextState != state || finalPool != nil {
+			state = nextState
+			numCurrent = n
+			if finalPool != nil && &finalPool[0] == &nextPool[0] {
+				currPool, nextPool = nextPool, currPool
+			}
+		}
+	}
+
+	var bestMatch []int
+	bestPriority := 1<<30 - 1
+
+	updateBestMatch := func(endOffset int, s ir.StateID, regs []int, numPaths int) {
+		paths := dfa.NfaPaths(s)
+		for k, path := range paths {
+			if k >= numPaths {
+				break
+			}
+			if re.prog.Inst[path.ID].Op == syntax.InstMatch {
+				currRegs := regs[k*numRegs : (k+1)*numRegs]
+				// Leftmost-first:
+				// 1. Smaller start offset (regs[0])
+				// 2. Smaller Priority value (higher priority)
+				startOffset := currRegs[0]
+				if startOffset == -1 {
+					continue
+				}
+				if bestMatch == nil || startOffset < bestMatch[0] || (startOffset == bestMatch[0] && path.Priority < bestPriority) {
+					bestMatch = make([]int, numRegs)
+					copy(bestMatch, currRegs)
+					bestMatch[1] = endOffset
+					bestPriority = path.Priority
 				}
 			}
 		}
+	}
 
-		var bestMatch []int
-		bestPriority := 1<<30 - 1
+	if accepting[state] {
+		updateBestMatch(0, state, currPool, numCurrent)
+	}
 
-		updateBestMatch := func(endOffset int, s ir.StateID, regs []int) {
-			p := dfa.AcceptingPriority(s)
-			if bestMatch == nil || p < bestPriority || (p == bestPriority && endOffset > bestMatch[1]) {
-				// Find which path matched.
-				paths := dfa.NfaPaths(s)
-				for idx, path := range paths {
-					if re.prog.Inst[path.ID].Op == syntax.InstMatch && path.Priority == p {
-						bestPriority = p
-						bestMatch = make([]int, numRegs)
-						copy(bestMatch, regs[idx*numRegs:(idx+1)*numRegs])
-						bestMatch[0] = i
-						bestMatch[1] = endOffset
-						break
-					}
+	for i, c := range b {
+		idx := int(state)*stride + int(c)
+		nextState := trans[idx]
+		if nextState == ir.InvalidState {
+			nextState = dfa.StartState()
+		}
+
+		// Transition info.
+		pathOffsets := dfa.TransPathOffsets()
+		sources := dfa.PathSources()
+		tagOffsets := dfa.PathTagOffsets()
+		tagPool := dfa.TagPool()
+
+		start := pathOffsets[idx]
+		end := pathOffsets[idx+1]
+		numNext := int(end - start)
+
+		for k := 0; k < numNext; k++ {
+			srcIdx := int(sources[start+uint32(k)])
+			base := k * numRegs
+			if srcIdx >= 0 && srcIdx < numCurrent {
+				copy(nextPool[base:base+numRegs], currPool[srcIdx*numRegs:(srcIdx+1)*numRegs])
+			} else {
+				// New match starting at current position i
+				for r := 0; r < numRegs; r++ {
+					nextPool[base+r] = -1
+				}
+				nextPool[base] = i
+			}
+			tags := tagPool[tagOffsets[start+uint32(k)]:tagOffsets[start+uint32(k)+1]]
+			re.applyTagsToRegs(nextPool[base:base+numRegs], tags, i)
+		}
+
+		state = nextState
+		numCurrent = numNext
+		currPool, nextPool = nextPool, currPool // Swap pools.
+
+		if hasAnchors {
+			ctx := re.calculateContext(b, i+1)
+			var s2 ir.StateID
+			var n int
+			var finalPool []int
+			s2, n, finalPool = re.applyContextWithPool(state, ctx, currPool, numCurrent, numRegs, i+1, nextPool)
+			if s2 != state || finalPool != nil {
+				state = s2
+				numCurrent = n
+				if finalPool != nil && &finalPool[0] == &nextPool[0] {
+					currPool, nextPool = nextPool, currPool
 				}
 			}
 		}
 
 		if accepting[state] {
-			updateBestMatch(i, state, currPool)
-		}
-
-		for j := i; j < len(b); j++ {
-			c := b[j]
-			idx := int(state)*stride + int(c)
-			nextState := trans[idx]
-			if nextState == ir.InvalidState {
-				break
-			}
-
-			// Transition info.
-			pathOffsets := dfa.TransPathOffsets()
-			sources := dfa.PathSources()
-			tagOffsets := dfa.PathTagOffsets()
-			tagPool := dfa.TagPool()
-
-			start := pathOffsets[idx]
-			end := pathOffsets[idx+1]
-			numNext := int(end - start)
-
-			for k := 0; k < numNext; k++ {
-				srcIdx := int(sources[start+uint32(k)])
-				base := k * numRegs
-				if srcIdx >= 0 {
-					copy(nextPool[base:base+numRegs], currPool[srcIdx*numRegs:(srcIdx+1)*numRegs])
-				} else {
-					for r := 0; r < numRegs; r++ {
-						nextPool[base+r] = -1
-					}
-				}
-				tags := tagPool[tagOffsets[start+uint32(k)]:tagOffsets[start+uint32(k)+1]]
-				re.applyTagsToRegs(nextPool[base:base+numRegs], tags, j)
-			}
-
-			state = nextState
-			numCurrent = numNext
-			currPool, nextPool = nextPool, currPool // Swap pools.
-
-			if hasAnchors {
-				ctx := re.calculateContext(b, j+1)
-				var s2 ir.StateID
-				var n int
-				var finalPool []int
-				s2, n, finalPool = re.applyContextWithPool(state, ctx, currPool, numCurrent, numRegs, j+1, nextPool)
-				if s2 != state || len(finalPool) > 0 {
-					if n > 0 {
-						state = s2
-						numCurrent = n
-						if &finalPool[0] == &nextPool[0] {
-							currPool, nextPool = nextPool, currPool
-						}
-					}
-				}
-			}
-
-			if accepting[state] {
-				updateBestMatch(j+1, state, currPool)
-			}
-		}
-		if bestMatch != nil {
-			return bestMatch
+			updateBestMatch(i+1, state, currPool, numCurrent)
 		}
 	}
-	return nil
+	return bestMatch
 }
 
 func (re *Regexp) applyContextWithPool(state ir.StateID, op syntax.EmptyOp, currPool []int, numCurrent int, numRegs int, offset int, nextPool []int) (ir.StateID, int, []int) {
@@ -372,7 +357,14 @@ func (re *Regexp) applyContextWithPool(state ir.StateID, op syntax.EmptyOp, curr
 					for nextK := 0; nextK < numNext; nextK++ {
 						srcIdx := int(sources[start+uint32(nextK)])
 						base := nextK * numRegs
-						copy(nextPool[base:base+numRegs], currPool[srcIdx*numRegs:(srcIdx+1)*numRegs])
+						if srcIdx >= 0 && srcIdx < numCurrent {
+							copy(nextPool[base:base+numRegs], currPool[srcIdx*numRegs:(srcIdx+1)*numRegs])
+						} else {
+							for r := 0; r < numRegs; r++ {
+								nextPool[base+r] = -1
+							}
+							nextPool[base] = offset
+						}
 						tags := tagPool[tagOffsets[start+uint32(nextK)]:tagOffsets[start+uint32(nextK)+1]]
 						re.applyTagsToRegs(nextPool[base:base+numRegs], tags, offset)
 					}
