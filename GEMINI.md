@@ -63,6 +63,12 @@ To maximize throughput for patterns with literal prefixes, the engine MUST utili
 ### 3.2 Excluded Features
 - **Backreferences**: Strictly excluded to maintain $O(n)$ complexity and prevent exponential "catastrophic backtracking."
 - **Dynamic Lookaround**: Complex or recursive assertions that require significant backtracking are restricted.
+- **POSIX Semantics**: Standard Go `CompilePOSIX` and POSIX-style leftmost-longest matching are explicitly unsupported. These are **not provided in the API** to ensure compile-time detection of unsupported patterns and prevent accidental performance degradation.
+- **Longest Match**: The `Longest()` method is not provided. The engine's matching priority is fixed at compile-time to maintain $O(n)$ and cache-locality mandates.
+
+### 3.3 Interface Compatibility Policy
+- **Compile-time Safety Over Runtime Panic**: For functions and methods in the standard `regexp` package that cannot be supported under our $O(n)$ and state-explosion-free mandates, we intentionally omit them from the API. This ensures that users are notified of incompatibilities at compile-time rather than encountering unexpected runtime panics or incorrect behavior.
+- **Functional Completeness**: We aim to provide a compatible interface for the most commonly used features (Find, Replace, Split, etc.) while adhering to our performance-first philosophy.
 
 ## 4. Engineering & Validation Standards
 - **Performance-First Benchmarking**: Any change must be validated against the standard `regexp` package. Significant throughput regressions are unacceptable.

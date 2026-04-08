@@ -6,18 +6,35 @@ import (
 
 // CalculateContext determines the empty-width assertions (anchors) that are true at position i in byte slice b.
 func CalculateContext(b []byte, i int) syntax.EmptyOp {
-	var op syntax.EmptyOp
+	var r1, r2 rune = -1, -1
 	if i == 0 {
-		op |= syntax.EmptyBeginText | syntax.EmptyBeginLine
-	} else if i > 0 && b[i-1] == '\n' {
-		op |= syntax.EmptyBeginLine
+		r1 = -1
+	} else {
+		r1 = rune(b[i-1]) // Simplified, only works for ASCII. For UTF-8, would need proper decoding.
 	}
 	if i == len(b) {
+		r2 = -1
+	} else {
+		r2 = rune(b[i])
+	}
+	return CalculateContextBetween(r1, r2)
+}
+
+// CalculateContextBetween returns the empty-width assertions that are true
+// between two runes r1 and r2. Use -1 to represent the start or end of text.
+func CalculateContextBetween(r1, r2 rune) syntax.EmptyOp {
+	var op syntax.EmptyOp
+	if r1 < 0 {
+		op |= syntax.EmptyBeginText | syntax.EmptyBeginLine
+	} else if r1 == '\n' {
+		op |= syntax.EmptyBeginLine
+	}
+	if r2 < 0 {
 		op |= syntax.EmptyEndText | syntax.EmptyEndLine
-	} else if i < len(b) && b[i] == '\n' {
+	} else if r2 == '\n' {
 		op |= syntax.EmptyEndLine
 	}
-	if IsWordBoundary(b, i) {
+	if IsWord(r1) != IsWord(r2) {
 		op |= syntax.EmptyWordBoundary
 	} else {
 		op |= syntax.EmptyNoWordBoundary

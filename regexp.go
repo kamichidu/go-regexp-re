@@ -18,6 +18,7 @@ type Regexp struct {
 	prog        *syntax.Prog
 	dfa         *ir.DFA
 	match       func([]byte) bool
+	subexpNames []string
 }
 
 // Compile parses a regular expression and returns, if successful,
@@ -28,6 +29,8 @@ func Compile(expr string) (*Regexp, error) {
 		return nil, err
 	}
 	numSubexp := re.MaxCap()
+	subexpNames := make([]string, numSubexp+1)
+	extractCapNames(re, subexpNames)
 	re = syntax.Simplify(re)
 	prefixStr, complete := syntax.Prefix(re)
 
@@ -59,6 +62,7 @@ func Compile(expr string) (*Regexp, error) {
 		complete:    complete,
 		prog:        prog,
 		dfa:         dfa,
+		subexpNames: subexpNames,
 	}
 
 	if complete {
@@ -248,6 +252,13 @@ func (re *Regexp) MatchString(s string) bool {
 // NumSubexp returns the number of parenthesized subexpressions in this Regexp.
 func (re *Regexp) NumSubexp() int {
 	return re.numSubexp
+}
+
+// LiteralPrefix returns a literal string that must begin any match
+// of the regular expression re. It returns the boolean true if the
+// literal string comprises the entire regular expression.
+func (re *Regexp) LiteralPrefix() (prefix string, complete bool) {
+	return string(re.prefix), re.complete
 }
 
 // FindSubmatchIndex returns a slice holding the index pairs identifying the leftmost match of
@@ -615,6 +626,17 @@ func (re *Regexp) String() string {
 
 func (re *Regexp) calculateContext(b []byte, i int) syntax.EmptyOp {
 	return ir.CalculateContext(b, i)
+}
+
+func extractCapNames(re *syntax.Regexp, names []string) {
+	if re.Op == syntax.OpCapture {
+		if re.Cap < len(names) {
+			names[re.Cap] = re.Name
+		}
+	}
+	for _, sub := range re.Sub {
+		extractCapNames(sub, names)
+	}
 }
 
 func quote(s string) string {
