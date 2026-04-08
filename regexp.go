@@ -14,6 +14,7 @@ type Regexp struct {
 	numSubexp   int
 	prefix      []byte
 	prefixState ir.StateID
+	complete    bool
 	prog        *syntax.Prog
 	dfa         *ir.DFA
 	match       func([]byte) bool
@@ -55,6 +56,7 @@ func Compile(expr string) (*Regexp, error) {
 		numSubexp:   numSubexp,
 		prefix:      []byte(prefixStr),
 		prefixState: prefixState,
+		complete:    complete,
 		prog:        prog,
 		dfa:         dfa,
 	}
@@ -251,6 +253,14 @@ func (re *Regexp) NumSubexp() int {
 // FindSubmatchIndex returns a slice holding the index pairs identifying the leftmost match of
 // the regular expression of b and the matches, if any, of its subexpressions.
 func (re *Regexp) FindSubmatchIndex(b []byte) []int {
+	if re.complete && re.numSubexp == 0 {
+		idx := bytes.Index(b, re.prefix)
+		if idx < 0 {
+			return nil
+		}
+		return []int{idx, idx + len(re.prefix)}
+	}
+
 	match := re.doExecuteDFAIndex(b)
 	if match == nil {
 		return nil

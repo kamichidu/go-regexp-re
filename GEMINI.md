@@ -50,6 +50,10 @@ To maximize throughput for patterns with literal prefixes, the engine MUST utili
 ### 2.7 Pure Go (No CGO)
 - **Zero Overhead**: CGO is strictly prohibited to avoid context-switching overhead and maintain Go's native portability and build simplicity.
 
+### 2.8 Literal Match Bypass (0-Pass Strategy)
+- **Direct Literal Resolution**: If the entire pattern is a constant literal and no capturing groups are present, the engine MUST completely bypass both DFA and NFA stages and use `bytes.Index` or other standard library functions directly for match and submatch extraction.
+- **Zero-Engine Overhead**: This "0-Pass Strategy" physically eliminates regex engine overhead for simple literal searches, guaranteeing peak performance equivalent to optimized standard library string search functions.
+
 ## 3. Feature Selection Policy (Performance over Features)
 
 ### 3.1 Supported Features
