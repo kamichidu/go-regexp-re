@@ -86,7 +86,7 @@ func nfaMatchBitParallel(prog *syntax.Prog, b []byte, start, end int, numSubexp 
 		initialRegs[i] = -1
 	}
 
-	ctx := calculateContext(b, start)
+	ctx := CalculateContext(b, start)
 	addThread(&curr, uint32(prog.Start), nil, initialRegs, start, ctx)
 
 	for pos := start; ; {
@@ -108,7 +108,7 @@ func nfaMatchBitParallel(prog *syntax.Prog, b []byte, start, end int, numSubexp 
 
 		if pos < end {
 			c := b[pos]
-			nextCtx := calculateContext(b, pos+1)
+			nextCtx := CalculateContext(b, pos+1)
 			clear(visited)
 
 			for _, t := range curr {

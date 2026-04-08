@@ -11,7 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
-	"regexp"
+	goregexp "regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -615,7 +615,7 @@ func loadRE2SearchFile(path string) *RE2TestSet {
 					break
 				}
 				// Use the standard regexp library to determine truth.
-				matched, err := regexp.MatchString(currentRegexp, strings_[i])
+				matched, err := goregexp.MatchString(currentRegexp, strings_[i])
 				if err != nil {
 					// If the standard library can't compile it, skip this case.
 					continue
