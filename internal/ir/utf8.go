@@ -188,7 +188,7 @@ func byteRangesToTrie(ranges []byteRange) []*utf8Node {
 	}
 }
 
-// anyRuneTrie returns a Trie that matches any valid UTF-8 rune OR any single byte (fallback).
+// anyRuneTrie returns a Trie that matches any valid UTF-8 rune OR any invalid UTF-8 byte.
 func anyRuneTrie(includeNL bool) []*utf8Node {
 	var runes []rune
 	if includeNL {
@@ -198,14 +198,13 @@ func anyRuneTrie(includeNL bool) []*utf8Node {
 	}
 	roots := runeRangesToUTF8Trie(runes, false)
 
-	// Add raw byte fallback.
-	// Since updateBestMatch prefers LONGER matches, valid multi-byte UTF-8 sequences
-	// will win over this single-byte fallback.
+	// Add disjoint raw byte fallback for invalid UTF-8 bytes.
+	// Valid UTF-8 starts are: 00-7F, C2-DF, E0-EF, F0-F4.
+	// We exclude 80-BF (continuations) to avoid matching parts of a valid sequence as single runes.
 	var br []byteRange
-	if includeNL {
-		br = []byteRange{{0, 255}}
-	} else {
-		br = []byteRange{{0, '\n' - 1}, {'\n' + 1, 255}}
+	br = []byteRange{
+		{0xC0, 0xC1},
+		{0xF5, 0xFF},
 	}
 	roots = append(roots, byteRangesToTrie(br)...)
 

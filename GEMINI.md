@@ -27,15 +27,19 @@ Every implementation must adhere to these four pillars to ensure maximum perform
 To maximize throughput, the engine MUST select the most efficient execution loop based on pattern characteristics:
 - **Fast Path (Pure DFA)**: Automatically selected for patterns without anchors. It utilizes a minimalist execution loop with zero boundary/context checks to approach raw memory bandwidth speeds.
 - **Extended Path (Virtual Byte Insertion)**: Selected for patterns with anchors (e.g., `^`, `$`, `\b`). It employs "Virtual Bytes" (indices 256+) injected at character boundaries to process empty-width assertions within the DFA's $O(n)$ framework.
-- **Submatch Path (Transition-Embedded Tagging)**: Selected when submatches are requested. It utilizes "tags" (TagOp) embedded directly into the transition table to record capture offsets without a separate post-processing pass.
+- **Submatch Hybrid Path (2-Pass)**: Selected when submatches are requested. It combines a high-speed DFA scan to identify match boundaries with a targeted NFA rescan for precise submatch extraction. This approach guarantees $O(n)$ performance while avoiding the state explosion risks associated with 1-pass tagged DFAs.
 
-### 2.5 Submatch Extraction Architecture (Path to TDFA)
-- **Zero-Tolerance for State Explosion**: The core mandate of $O(n)$ execution and L1/L2 cache locality takes absolute precedence over 100% submatch compatibility. If incorporating tag information into DFA states (to resolve complex nested captures or ambiguous empty matches) causes state explosion, it is **strictly forbidden**.
-- **Fail-Fast Compilation**: Patterns with complex capturing groups that would require state explosion to resolve correctly MUST be rejected at compile time. It is better to fail to compile than to degrade the $O(n)$ performance guarantee or exceed memory limits.
-- **Future Direction (TNFA to TDFA)**: The ultimate architectural goal for achieving full submatch compatibility without state explosion is the implementation of a Tagged DFA (TDFA) compiled directly from a Tagged NFA (TNFA). Until this is fully realized, the engine uses **Transition-Embedded Tagging**:
-  - **Static Priority Resolution**: Leftmost-first priority for multiple NFA paths is resolved during DFA construction. Only tags from the highest-priority path are stored on each DFA transition edge.
-  - **Register-Based Recording**: Capture group offsets are recorded into a fixed-size register array (`int` slice) during the scan.
-  - **Zero-Cost Dispatch**: Use function variables to bind the appropriate execution loop (Match-only vs. Find-Submatch) at compile/instantiation time.
+### 2.5 Submatch Extraction Architecture (Hybrid 2-Pass Strategy)
+To ensure absolute $O(n)$ execution and maintain L1/L2 cache locality, the engine adopts a **Hybrid 2-Pass** architecture for submatch extraction. This strategy is the definitive architectural choice, prioritizing system stability and memory predictability over the theoretical ideal of 1-pass submatch resolution, which frequently triggers catastrophic state explosion.
+
+- **Phase 1: DFA Boundary Scan**:
+  - A specialized DFA identifies the overall match boundaries (Start/End).
+  - This phase records only the minimum necessary tags (Capture 0) to resolve the leftmost-first match range.
+  - By excluding internal submatch tags from DFA states, we physically prevent state explosion and maintain fixed, predictable memory requirements during compilation.
+- **Phase 2: Targeted NFA Rescan**:
+  - Once a match range is identified, the engine performs a targeted rescan using an NFA (Pike VM) ONLY within the identified `[start, end]` bounds.
+  - By limiting the NFA scan to the precise match region, we keep the overhead negligible while ensuring 100% compatibility with standard Go `regexp` submatch results.
+- **Architecture Rationale**: This hybrid approach provides the best balance of "raw DFA speed" for the bulk scan and "guaranteed correctness" for submatch extraction without the risk of non-deterministic memory consumption or compilation failure due to state explosion.
 
 ### 2.6 Pure Go (No CGO)
 - **Zero Overhead**: CGO is strictly prohibited to avoid context-switching overhead and maintain Go's native portability and build simplicity.

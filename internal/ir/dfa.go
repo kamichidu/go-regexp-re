@@ -311,12 +311,12 @@ func (d *DFA) build(prog *syntax.Prog) error {
 		currentDfaID := StateID(i)
 
 		// To support implicit .*? (O(n) search), always try starting a new match.
-		searchClosure := make([]nfaPath, len(currentClosure)+1)
+		searchClosure := make([]nfaPath, len(currentClosure)+len(defaultStartClosure))
 		copy(searchClosure, currentClosure)
-		searchClosure[len(currentClosure)] = nfaPath{
-			nfaState: nfaState{ID: uint32(prog.Start)},
-			origin:   -1,
-			Priority: 1000000, // Very low priority
+		for j, p := range defaultStartClosure {
+			p.origin = -1         // new match start
+			p.Priority += 1000000 // Very low priority
+			searchClosure[len(currentClosure)+j] = p
 		}
 
 		for b := 0; b < 256; b++ {
@@ -325,7 +325,7 @@ func (d *DFA) build(prog *syntax.Prog) error {
 
 			for pIdx, p := range searchClosure {
 				origin := pIdx
-				if pIdx == len(currentClosure) {
+				if pIdx >= len(currentClosure) {
 					origin = -1
 				}
 				s := p.nfaState
@@ -541,13 +541,19 @@ func epsilonClosure(paths []nfaPath, prog *syntax.Prog, context syntax.EmptyOp) 
 				push(inst.Arg, p.tags, p.visited, p.Priority+1)
 				push(inst.Out, p.tags, p.visited, p.Priority)
 			case syntax.InstCapture:
-				newTags := make([]int, len(p.tags)+1)
-				copy(newTags, p.tags)
-				newTags[len(p.tags)] = int(inst.Arg)
-				newVisited := make([]bool, len(p.visited)+1)
-				copy(newVisited, p.visited)
-				newVisited[len(p.visited)] = true
-				push(inst.Out, newTags, newVisited, p.Priority)
+				// Only track the overall match (capture 0) in the DFA.
+				// Submatches will be handled by the 2nd pass NFA rescan.
+				if inst.Arg < 2 {
+					newTags := make([]int, len(p.tags)+1)
+					copy(newTags, p.tags)
+					newTags[len(p.tags)] = int(inst.Arg)
+					newVisited := make([]bool, len(p.visited)+1)
+					copy(newVisited, p.visited)
+					newVisited[len(p.visited)] = true
+					push(inst.Out, newTags, newVisited, p.Priority)
+				} else {
+					push(inst.Out, p.tags, p.visited, p.Priority)
+				}
 			case syntax.InstNop:
 				push(inst.Out, p.tags, p.visited, p.Priority)
 			case syntax.InstEmptyWidth:

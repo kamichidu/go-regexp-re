@@ -181,12 +181,18 @@ func (re *Regexp) NumSubexp() int {
 // FindSubmatchIndex returns a slice holding the index pairs identifying the leftmost match of
 // the regular expression of b and the matches, if any, of its subexpressions.
 func (re *Regexp) FindSubmatchIndex(b []byte) []int {
-	return re.doExecuteFastSubmatch(b)
+	match := re.doExecuteDFAIndex(b)
+	if match == nil {
+		return nil
+	}
+	// match[0] is start, match[1] is end.
+	// 2nd pass: NFA rescan to extract submatches.
+	return ir.NFAMatch(re.prog, b, match[0], match[1], re.numSubexp)
 }
 
-func (re *Regexp) doExecuteFastSubmatch(b []byte) []int {
+func (re *Regexp) doExecuteDFAIndex(b []byte) []int {
 	dfa := re.dfa
-	numRegs := (re.numSubexp + 1) * 2
+	numRegs := 2 // Only track overall match (start, end)
 	hasAnchors := dfa.HasAnchors()
 	trans := dfa.Transitions()
 	stride := dfa.Stride()
@@ -245,17 +251,16 @@ func (re *Regexp) doExecuteFastSubmatch(b []byte) []int {
 			}
 			if re.prog.Inst[path.ID].Op == syntax.InstMatch {
 				currRegs := regs[k*numRegs : (k+1)*numRegs]
-				// Leftmost-first:
-				// 1. Smaller start offset (regs[0])
-				// 2. Smaller Priority value (higher priority)
 				startOffset := currRegs[0]
 				if startOffset == -1 {
 					continue
 				}
-				if bestMatch == nil || startOffset < bestMatch[0] || (startOffset == bestMatch[0] && path.Priority < bestPriority) {
-					bestMatch = make([]int, numRegs)
-					copy(bestMatch, currRegs)
-					bestMatch[1] = endOffset
+				// Preference order:
+				// 1. Smaller startOffset (leftmost match)
+				// 2. Smaller path.Priority (first pattern match)
+				// 3. Larger endOffset (greedy match)
+				if bestMatch == nil || startOffset < bestMatch[0] || (startOffset == bestMatch[0] && path.Priority < bestPriority) || (startOffset == bestMatch[0] && path.Priority == bestPriority && endOffset > bestMatch[1]) {
+					bestMatch = []int{startOffset, endOffset}
 					bestPriority = path.Priority
 				}
 			}
@@ -273,7 +278,6 @@ func (re *Regexp) doExecuteFastSubmatch(b []byte) []int {
 			nextState = dfa.StartState()
 		}
 
-		// Transition info.
 		pathOffsets := dfa.TransPathOffsets()
 		sources := dfa.PathSources()
 		tagOffsets := dfa.PathTagOffsets()
@@ -301,7 +305,7 @@ func (re *Regexp) doExecuteFastSubmatch(b []byte) []int {
 
 		state = nextState
 		numCurrent = numNext
-		currPool, nextPool = nextPool, currPool // Swap pools.
+		currPool, nextPool = nextPool, currPool
 
 		if hasAnchors {
 			ctx := re.calculateContext(b, i+1)
