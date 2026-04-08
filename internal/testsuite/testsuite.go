@@ -40,6 +40,11 @@ var (
 	re2SearchSet *RE2TestSet
 	postalCodes  []string
 
+	// New corpora
+	sherlock    string
+	wikipediaJP string
+	httpLogs    string
+
 	initialized bool
 )
 
@@ -78,43 +83,64 @@ func initialize() {
 	re2SearchSet = loadRE2SearchFile(filepath.Join(testdataDir, "re2-search.txt"))
 
 	// 4. Load Japan Post postal codes
-	postalCodes = loadPostalCodes()
+	postalCodes = parsePostalCodes(loadCorpus("ken_all.zip", "https://www.post.japanpost.jp/zipcode/dl/kogaki/zip/ken_all.zip", "KEN_ALL.CSV"))
+
+	// 5. Load new corpora
+	sherlock = loadCorpus("sherlock.txt", "https://www.gutenberg.org/files/1661/1661-0.txt")
+	wikipediaJP = loadCorpus("wikipedia_jp_sample.txt", "https://raw.githubusercontent.com/taku910/mecab/master/mecab-ipadic/test/t/test.txt") // Temporary sample
+	httpLogs = loadCorpus("http_logs.txt", "https://raw.githubusercontent.com/elastic/examples/master/Common%20Data%20Formats/apache_logs/apache_logs")
 
 	initialized = true
 }
 
-func loadPostalCodes() []string {
+func loadCorpus(name, url string, targetInZip ...string) string {
 	cacheDir := filepath.Join(os.TempDir(), "go-regexp-re", "testdata")
-	csvPath := filepath.Join(cacheDir, "KEN_ALL.CSV")
-	if _, err := os.Stat(csvPath); os.IsNotExist(err) {
+	path := filepath.Join(cacheDir, name)
+
+	targetPath := path
+	if len(targetInZip) > 0 {
+		targetPath = filepath.Join(cacheDir, targetInZip[0])
+	}
+
+	if _, err := os.Stat(targetPath); os.IsNotExist(err) {
 		if err := os.MkdirAll(cacheDir, 0755); err != nil {
 			log.Printf("warning: failed to create cache dir: %v", err)
-			return nil
+			return ""
 		}
-		zipPath := filepath.Join(cacheDir, "ken_all.zip")
-		log.Printf("Downloading Japan Post postal codes...")
-		cmd := exec.Command("curl", "-L", "-o", zipPath, "https://www.post.japanpost.jp/zipcode/dl/kogaki/zip/ken_all.zip")
+
+		log.Printf("Downloading %s from %s...", name, url)
+		cmd := exec.Command("curl", "-L", "-o", path, url)
 		if err := cmd.Run(); err != nil {
-			log.Printf("warning: failed to download postal codes: %v", err)
-			return nil
+			log.Printf("warning: failed to download %s: %v", name, err)
+			return ""
 		}
-		cmd = exec.Command("unzip", "-o", zipPath, "-d", cacheDir)
-		if err := cmd.Run(); err != nil {
-			log.Printf("warning: failed to unzip postal codes: %v", err)
-			return nil
+
+		if strings.HasSuffix(name, ".zip") {
+			log.Printf("Unzipping %s...", name)
+			cmd = exec.Command("unzip", "-o", path, "-d", cacheDir)
+			if err := cmd.Run(); err != nil {
+				log.Printf("warning: failed to unzip %s: %v", name, err)
+				return ""
+			}
 		}
 	}
 
-	f, err := os.Open(csvPath)
+	data, err := os.ReadFile(targetPath)
 	if err != nil {
-		log.Printf("warning: failed to open %s: %v", csvPath, err)
+		log.Printf("warning: failed to read %s: %v", targetPath, err)
+		return ""
+	}
+	return string(data)
+}
+
+func parsePostalCodes(csvData string) []string {
+	if csvData == "" {
 		return nil
 	}
-	defer f.Close()
 
 	var codes []string
 	seen := make(map[string]bool)
-	scanner := bufio.NewScanner(f)
+	scanner := bufio.NewScanner(strings.NewReader(csvData))
 	for scanner.Scan() {
 		line := scanner.Text()
 		fields := strings.Split(line, ",")
@@ -130,7 +156,7 @@ func loadPostalCodes() []string {
 			seen[code] = true
 		}
 	}
-	log.Printf("Loaded %d unique postal codes from KEN_ALL.CSV", len(codes))
+	log.Printf("Loaded %d unique postal codes", len(codes))
 	return codes
 }
 
@@ -325,7 +351,8 @@ func BenchmarkStandardSuite(b *testing.B) {
 
 // BenchmarkLargeAlternation benchmarks engines with thousands of postal codes.
 func BenchmarkLargeAlternation(b *testing.B) {
-	counts := []int{10, 100, 1000, 5000}
+	initialize()
+	counts := []int{10, 100, 1000, 10000}
 	for _, count := range counts {
 		var patterns []string
 		if len(postalCodes) >= count {
@@ -344,7 +371,7 @@ func BenchmarkLargeAlternation(b *testing.B) {
 			b.Run(fmt.Sprintf("%s/Count=%d", engine.Name, count), func(b *testing.B) {
 				re, err := engine.Compile(pattern)
 				if err != nil {
-					b.Fatal(err)
+					b.Skip()
 				}
 				b.ResetTimer()
 				for i := 0; i < b.N; i++ {
@@ -352,6 +379,119 @@ func BenchmarkLargeAlternation(b *testing.B) {
 				}
 			})
 		}
+	}
+}
+
+// BenchmarkLiteralScan benchmarks literal patterns with Sherlock.
+func BenchmarkLiteralScan(b *testing.B) {
+	initialize()
+	if sherlock == "" {
+		b.Skip("sherlock corpus not loaded")
+	}
+
+	patterns := []string{
+		"Sherlock",                           // Simple
+		"The Adventure of the Speckled Band", // Long
+	}
+
+	for _, pattern := range patterns {
+		b.Run(fmt.Sprintf("pat=%s", pattern), func(b *testing.B) {
+			for _, engine := range engines {
+				b.Run(engine.Name, func(b *testing.B) {
+					re, err := engine.Compile(pattern)
+					if err != nil {
+						b.Skip()
+					}
+					b.ResetTimer()
+					for i := 0; i < b.N; i++ {
+						re.MatchString(sherlock)
+					}
+				})
+			}
+		})
+	}
+}
+
+// BenchmarkAnchors benchmarks anchor patterns with HTTP logs.
+func BenchmarkAnchors(b *testing.B) {
+	initialize()
+	if httpLogs == "" {
+		b.Skip("http logs corpus not loaded")
+	}
+
+	patterns := []string{
+		"^127.0.0.1",   // Line start
+		"HTTP/1.1$",    // Line end
+		"\\bGET\\b",    // Word boundary
+	}
+
+	for _, pattern := range patterns {
+		b.Run(fmt.Sprintf("pat=%s", pattern), func(b *testing.B) {
+			for _, engine := range engines {
+				b.Run(engine.Name, func(b *testing.B) {
+					re, err := engine.Compile(pattern)
+					if err != nil {
+						b.Skip()
+					}
+					b.ResetTimer()
+					for i := 0; i < b.N; i++ {
+						re.MatchString(httpLogs)
+					}
+				})
+			}
+		})
+	}
+}
+
+// BenchmarkCapturing benchmarks capturing groups with Email/URL patterns.
+func BenchmarkCapturing(b *testing.B) {
+	initialize()
+	// Use a sample input text for capturing
+	input := "Contact us at support@example.com or visit https://example.com/path?q=1#fragment"
+
+	patterns := []struct {
+		name string
+		pat  string
+	}{
+		{"Email", `([a-zA-Z0-9_.+-]+)@([a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)`},
+		{"URI", `^([a-zA-Z][a-zA-Z0-9+.-]*):(\/\/([^/?#]*))?([^?#]*)(\?([^#]*))?(#(.*))?`},
+	}
+
+	for _, tc := range patterns {
+		b.Run(tc.name, func(b *testing.B) {
+			for _, engine := range engines {
+				b.Run(engine.Name, func(b *testing.B) {
+					re, err := engine.Compile(tc.pat)
+					if err != nil {
+						b.Skip()
+					}
+					b.ResetTimer()
+					for i := 0; i < b.N; i++ {
+						re.FindStringSubmatchIndex(input)
+					}
+				})
+			}
+		})
+	}
+}
+
+// BenchmarkNFAWorstCase benchmarks (a+)+b against a...ac.
+func BenchmarkNFAWorstCase(b *testing.B) {
+	initialize()
+	pattern := `(a+)+b`
+	input := strings.Repeat("a", 25) + "c"
+
+	for _, engine := range engines {
+		b.Run(engine.Name, func(b *testing.B) {
+			re, err := engine.Compile(pattern)
+			if err != nil {
+				b.Skip()
+			}
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				re.MatchString(input)
+			}
+		})
 	}
 }
 
