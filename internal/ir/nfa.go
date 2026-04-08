@@ -5,6 +5,13 @@ import (
 )
 
 // NFAMatch performs submatch extraction using an NFA.
+type thread struct {
+	pc   uint32
+	node *utf8Node // Current position in the UTF-8 byte trie for this instruction
+	regs []int
+}
+
+// NFAMatch performs submatch extraction using an NFA.
 // It selects the most efficient implementation based on the program characteristics.
 func NFAMatch(prog *syntax.Prog, b []byte, start, end int, numSubexp int) []int {
 	if len(prog.Inst) <= 64 {
