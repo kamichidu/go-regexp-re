@@ -76,6 +76,8 @@ var (
 		{"EndText_NoMatch", `abc$`, "abcx", false},
 		{"WordBoundary", `\babc\b`, " abc ", true},
 		{"WordBoundary_NoMatch", `\babc\b`, "xabcx", false},
+		{"PrefixAnchor", `abc\b`, "abc ", true},
+		{"LongPrefixAnchor", `abc\b`, "some very long text before the abc ", true},
 	}
 )
 

@@ -38,12 +38,25 @@ func Compile(expr string) (*Regexp, error) {
 	if err != nil {
 		return nil, err
 	}
+	var prefixState ir.StateID = dfa.StartState()
+	if prefixStr != "" {
+		trans := dfa.Transitions()
+		stride := dfa.Stride()
+		for _, c := range []byte(prefixStr) {
+			prefixState = trans[int(prefixState)*stride+int(c)]
+			if prefixState == ir.InvalidState {
+				break
+			}
+		}
+	}
+
 	res := &Regexp{
-		expr:      expr,
-		numSubexp: numSubexp,
-		prefix:    []byte(prefixStr),
-		prog:      prog,
-		dfa:       dfa,
+		expr:        expr,
+		numSubexp:   numSubexp,
+		prefix:      []byte(prefixStr),
+		prefixState: prefixState,
+		prog:        prog,
+		dfa:         dfa,
 	}
 
 	if complete {
@@ -63,21 +76,46 @@ func (re *Regexp) doMatchFast(b []byte) bool {
 	trans := dfa.Transitions()
 	stride := dfa.Stride()
 	accepting := dfa.Accepting()
-	state := dfa.StartState()
 
-	if accepting[state] {
-		return true
-	}
-	for _, c := range b {
-		state = trans[int(state)*stride+int(c)]
-		if state == ir.InvalidState {
-			state = dfa.StartState()
-		}
+	if len(re.prefix) == 0 {
+		state := dfa.StartState()
 		if accepting[state] {
 			return true
 		}
+		for _, c := range b {
+			state = trans[int(state)*stride+int(c)]
+			if state == ir.InvalidState {
+				state = dfa.StartState()
+			}
+			if accepting[state] {
+				return true
+			}
+		}
+		return false
 	}
-	return false
+
+	for {
+		idx := bytes.Index(b, re.prefix)
+		if idx < 0 {
+			return false
+		}
+
+		state := re.prefixState
+		if accepting[state] {
+			return true
+		}
+		rest := b[idx+len(re.prefix):]
+		for _, c := range rest {
+			state = trans[int(state)*stride+int(c)]
+			if state == ir.InvalidState {
+				break
+			}
+			if accepting[state] {
+				return true
+			}
+		}
+		b = b[idx+1:]
+	}
 }
 
 func (re *Regexp) doMatchExtended(b []byte) bool {
@@ -85,29 +123,61 @@ func (re *Regexp) doMatchExtended(b []byte) bool {
 	trans := dfa.Transitions()
 	stride := dfa.Stride()
 	accepting := dfa.Accepting()
-	state := dfa.StartState()
 
-	// Initial context
-	ctx := re.calculateContext(b, 0)
-	state = re.applyContextToState(state, ctx)
-	if accepting[state] {
-		return true
-	}
-
-	for i, c := range b {
-		state = trans[int(state)*stride+int(c)]
-		if state == ir.InvalidState {
-			state = dfa.StartState()
-		}
-
-		ctx := re.calculateContext(b, i+1)
+	if len(re.prefix) == 0 {
+		state := dfa.StartState()
+		// Initial context
+		ctx := re.calculateContext(b, 0)
 		state = re.applyContextToState(state, ctx)
-
 		if accepting[state] {
 			return true
 		}
+
+		for i, c := range b {
+			state = trans[int(state)*stride+int(c)]
+			if state == ir.InvalidState {
+				state = dfa.StartState()
+			}
+
+			ctx := re.calculateContext(b, i+1)
+			state = re.applyContextToState(state, ctx)
+
+			if accepting[state] {
+				return true
+			}
+		}
+		return false
 	}
-	return false
+
+	for {
+		idx := bytes.Index(b, re.prefix)
+		if idx < 0 {
+			return false
+		}
+
+		state := dfa.StartState()
+		ctx := re.calculateContext(b, idx)
+		state = re.applyContextToState(state, ctx)
+		if accepting[state] {
+			return true
+		}
+
+		rest := b[idx:]
+		for i, c := range rest {
+			state = trans[int(state)*stride+int(c)]
+			if state == ir.InvalidState {
+				break
+			}
+
+			ctx = re.calculateContext(b, idx+i+1)
+			state = re.applyContextToState(state, ctx)
+
+			if accepting[state] {
+				return true
+			}
+		}
+		b = b[idx+1:]
+	}
 }
 
 func (re *Regexp) applyContextToState(state ir.StateID, op syntax.EmptyOp) ir.StateID {
@@ -271,7 +341,46 @@ func (re *Regexp) doExecuteDFAIndex(b []byte) []int {
 		updateBestMatch(0, state, currPool, numCurrent)
 	}
 
-	for i, c := range b {
+	for i := 0; i < len(b); {
+		if state == dfa.StartState() && len(re.prefix) > 0 {
+			idx := bytes.Index(b[i:], re.prefix)
+			if idx < 0 {
+				return bestMatch
+			}
+			i += idx
+
+			// Initialize paths for a new match starting at i
+			initialPaths := dfa.NfaPaths(state)
+			numCurrent = len(initialPaths)
+			for k := 0; k < numCurrent; k++ {
+				base := k * numRegs
+				for r := 0; r < numRegs; r++ {
+					currPool[base+r] = -1
+				}
+				currPool[base] = i
+				re.applyTagsToRegs(currPool[base:base+numRegs], dfa.EntryTagsForPath(k), i)
+			}
+
+			if hasAnchors {
+				ctx := re.calculateContext(b, i)
+				var nextState ir.StateID
+				var n int
+				var finalPool []int
+				nextState, n, finalPool = re.applyContextWithPool(state, ctx, currPool, numCurrent, numRegs, i, nextPool)
+				if nextState != state || finalPool != nil {
+					state = nextState
+					numCurrent = n
+					if finalPool != nil && &finalPool[0] == &nextPool[0] {
+						currPool, nextPool = nextPool, currPool
+					}
+				}
+			}
+			if accepting[state] {
+				updateBestMatch(i, state, currPool, numCurrent)
+			}
+		}
+
+		c := b[i]
 		idx := int(state)*stride + int(c)
 		nextState := trans[idx]
 		if nextState == ir.InvalidState {
@@ -325,6 +434,7 @@ func (re *Regexp) doExecuteDFAIndex(b []byte) []int {
 		if accepting[state] {
 			updateBestMatch(i+1, state, currPool, numCurrent)
 		}
+		i++
 	}
 	return bestMatch
 }

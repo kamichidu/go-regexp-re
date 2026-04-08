@@ -61,6 +61,22 @@ func BenchmarkMatchRe(b *testing.B) {
 	}
 }
 
+func BenchmarkSubmatchRe(b *testing.B) {
+	for _, p := range goldenPatterns {
+		if !p.want {
+			continue
+		}
+		b.Run(p.name, func(b *testing.B) {
+			r := MustCompile(p.pattern)
+			input := []byte(p.payload)
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				r.FindSubmatchIndex(input)
+			}
+		})
+	}
+}
+
 func BenchmarkComplexity(b *testing.B) {
 	lengths := []int{10, 100, 1000, 10000}
 	pattern := "a*b"
