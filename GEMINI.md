@@ -30,13 +30,15 @@ To maximize throughput, the engine MUST select the most efficient execution loop
 - **Extended Path (Virtual Byte Insertion)**: Selected for patterns with anchors (e.g., `^`, `$`, `\b`). It employs "Virtual Bytes" (indices 256+) injected at character boundaries to process empty-width assertions within the DFA's $O(n)$ framework.
 - **Submatch Path (Hybrid 2-Pass)**: Selected when submatches are requested. It utilizes a high-speed DFA scan to identify match boundaries, followed by an optimized NFA second pass for precise submatch extraction.
 
-### 2.5 Submatch Extraction Architecture (Hybrid 2-Pass Strategy)
-To ensure absolute $O(n)$ execution and maintain L1/L2 cache locality, the engine adopts a **Hybrid 2-Pass** architecture for submatch extraction. This strategy prioritizes system stability and memory predictability over the theoretical ideal of 1-pass submatch resolution (TDFA), which frequently triggers catastrophic state explosion.
+### 2.5 Submatch Extraction Architecture (Final Hybrid 2-Pass Strategy)
+The engine adopts a **Hybrid 2-Pass** architecture as its final and definitive strategy for submatch extraction. This deliberate architectural choice prioritizes system stability, code maintainability, and memory predictability over the theoretical (but practically risky) ideal of 1-pass submatch resolution (TDFA).
 
-- **Phase 1: DFA Boundary Scan**: A specialized DFA identifies the overall match boundaries `[start, end]`. By excluding internal submatch tags from DFA states, we physically prevent state explosion and maintain fixed memory requirements. **NFA MUST NOT be used for the initial search.**
-- **Phase 2: Targeted NFA Rescan**: An NFA rescans ONLY within the identified `[start, end]` bounds.
+- **Intentional Exclusion of TDFA**: Full TDFA implementation is explicitly excluded from the project roadmap. The risk of catastrophic state explosion and the extreme implementation complexity required to mitigate it are deemed incompatible with the project's goal of a lean, high-performance engine.
+- **Phase 1: DFA Boundary Scan**: A specialized DFA identifies the overall match boundaries `[start, end]`. By keeping DFA states free of internal submatch tags, we guarantee $O(n)$ execution and constant memory overhead. **NFA MUST NOT be used for the initial search.**
+- **Phase 2: Targeted Byte-Oriented NFA Rescan**: An optimized NFA rescans ONLY within the identified `[start, end]` bounds.
+  - **Eliminate Rune Decoding**: The NFA rescan MUST operate directly on raw bytes. Use of `utf8.DecodeRune` or any rune-based logic is strictly prohibited to maintain consistency with the DFA's performance characteristics.
   - **Bit-Parallel Optimization**: If the NFA has 64 or fewer states, the engine MUST use a bit-parallel implementation.
-  - **Pike VM Fallback**: Traditional NFA for patterns exceeding machine word size.
+  - **Pike VM Fallback**: Traditional NFA for patterns exceeding machine word size, refactored for byte-level transitions.
 
 ### 2.6 Prefix-Skip Optimization (SIMD Acceleration)
 To maximize throughput for patterns with literal prefixes, the engine MUST utilize a **Prefix-Skip** optimization:
