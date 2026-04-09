@@ -129,15 +129,22 @@ func (re *Regexp) doMatchFast(b []byte) bool {
 
 	// Prefix acceleration
 	for i := 0; i < len(b); {
-		idx := bytes.Index(b[i:], re.prefix)
-		if idx < 0 {
-			return false
+		var idx int
+		if re.anchorStart {
+			if i > 0 {
+				return false
+			}
+			if !bytes.HasPrefix(b, re.prefix) {
+				return false
+			}
+			idx = 0
+		} else {
+			idx = bytes.Index(b[i:], re.prefix)
+			if idx < 0 {
+				return false
+			}
 		}
 		i += idx
-
-		if re.anchorStart && i > 0 {
-			return false
-		}
 
 		state := re.prefixState
 		if accepting[state] {
@@ -215,15 +222,22 @@ func (re *Regexp) doMatchExtended(b []byte) bool {
 	}
 
 	for i := 0; i < len(b); {
-		idx := bytes.Index(b[i:], re.prefix)
-		if idx < 0 {
-			return false
+		var idx int
+		if re.anchorStart {
+			if i > 0 {
+				return false
+			}
+			if !bytes.HasPrefix(b, re.prefix) {
+				return false
+			}
+			idx = 0
+		} else {
+			idx = bytes.Index(b[i:], re.prefix)
+			if idx < 0 {
+				return false
+			}
 		}
 		i += idx
-
-		if re.anchorStart && i > 0 {
-			return false
-		}
 
 		state := startState
 		ctx := re.calculateContext(b, i)
@@ -447,16 +461,23 @@ func (re *Regexp) doExecuteDFAIndex(b []byte) []int {
 	}
 
 	for i := 0; i < len(b); {
-		if state == dfa.StartState() && len(re.prefix) > 0 {
-			idx := bytes.Index(b[i:], re.prefix)
-			if idx < 0 {
-				return bestMatch
+		if len(re.prefix) > 0 && (state == dfa.StartState() || (re.anchorStart && i == 0)) {
+			var idx int
+			if re.anchorStart {
+				if i > 0 {
+					return bestMatch
+				}
+				if !bytes.HasPrefix(b[i:], re.prefix) {
+					return bestMatch
+				}
+				idx = 0
+			} else {
+				idx = bytes.Index(b[i:], re.prefix)
+				if idx < 0 {
+					return bestMatch
+				}
 			}
 			i += idx
-
-			if re.anchorStart && i > 0 {
-				return bestMatch
-			}
 
 			// Initialize paths for a new match starting at i
 			initialPaths := dfa.NfaPaths(state)
