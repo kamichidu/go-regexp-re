@@ -65,14 +65,19 @@ func Prefix(re *Regexp) (string, bool) {
 		return Prefix(re.Sub[0])
 	case gosyntax.OpConcat:
 		var sb strings.Builder
-		for _, sub := range re.Sub {
+		allComplete := true
+		for i, sub := range re.Sub {
+			if i == 0 && (sub.Op == gosyntax.OpBeginText || sub.Op == gosyntax.OpBeginLine) {
+				allComplete = false
+				continue
+			}
 			p, complete := Prefix(sub)
 			sb.WriteString(p)
 			if !complete {
 				return sb.String(), false
 			}
 		}
-		return sb.String(), true
+		return sb.String(), allComplete
 	}
 	return "", false
 }

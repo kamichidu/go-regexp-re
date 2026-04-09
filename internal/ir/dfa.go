@@ -375,18 +375,38 @@ func (d *DFA) build(prog *syntax.Prog) error {
 				if len(matchedOut) > 0 || len(matchedNodes) > 0 {
 					foundMatch = true
 					for _, out := range matchedOut {
-						nextPaths = append(nextPaths, nfaPath{
+						np := nfaPath{
 							nfaState: nfaState{ID: out},
 							origin:   origin,
 							Priority: p.Priority,
-						})
+						}
+						if origin == -1 {
+							// If this is a new match start (not continuing from a previous state),
+							// we must carry over the tags encountered during epsilon closure of the start state
+							// BEFORE the first character was consumed.
+							// This ensures that capture groups at the very beginning of the pattern
+							// are correctly recorded even when the match starts in the middle of the input.
+							np.tags = p.tags
+							np.visited = p.visited
+						}
+						nextPaths = append(nextPaths, np)
 					}
 					for _, node := range matchedNodes {
-						nextPaths = append(nextPaths, nfaPath{
+						np := nfaPath{
 							nfaState: nfaState{ID: s.ID, node: node},
 							origin:   origin,
 							Priority: p.Priority,
-						})
+						}
+						if origin == -1 {
+							// If this is a new match start (not continuing from a previous state),
+							// we must carry over the tags encountered during epsilon closure of the start state
+							// BEFORE the first character was consumed.
+							// This ensures that capture groups at the very beginning of the pattern
+							// are correctly recorded even when the match starts in the middle of the input.
+							np.tags = p.tags
+							np.visited = p.visited
+						}
+						nextPaths = append(nextPaths, np)
 					}
 				}
 			}

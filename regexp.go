@@ -3,6 +3,7 @@ package regexp
 import (
 	"bytes"
 	"fmt"
+	"unsafe"
 
 	"github.com/kamichidu/go-regexp-re/internal/ir"
 	"github.com/kamichidu/go-regexp-re/syntax"
@@ -325,7 +326,8 @@ func (re *Regexp) Match(b []byte) bool {
 
 // MatchString reports whether the string s contains any match of the regular expression re.
 func (re *Regexp) MatchString(s string) bool {
-	return re.match([]byte(s))
+	b := unsafe.Slice(unsafe.StringData(s), len(s))
+	return re.match(b)
 }
 
 // NumSubexp returns the number of parenthesized subexpressions in this Regexp.
@@ -517,6 +519,9 @@ func (re *Regexp) doExecuteDFAIndex(b []byte) []int {
 					nextPool[base+r] = -1
 				}
 				nextPool[base] = i
+				// Apply entry tags for the new match.
+				// Since we are starting a new match, we use the entry tags of the start state for this path.
+				re.applyTagsToRegs(nextPool[base:base+numRegs], dfa.EntryTagsForPath(k), i)
 			}
 			tags := tagPool[tagOffsets[start+uint32(k)]:tagOffsets[start+uint32(k)+1]]
 			re.applyTagsToRegs(nextPool[base:base+numRegs], tags, i)
@@ -669,7 +674,8 @@ func (re *Regexp) applyContext(state ir.StateID, op syntax.EmptyOp, regs [][]int
 
 // FindStringSubmatchIndex is the string version of FindSubmatchIndex.
 func (re *Regexp) FindStringSubmatchIndex(s string) []int {
-	return re.FindSubmatchIndex([]byte(s))
+	b := unsafe.Slice(unsafe.StringData(s), len(s))
+	return re.FindSubmatchIndex(b)
 }
 
 // FindSubmatch returns a slice of slices holding the text of the leftmost match of the
