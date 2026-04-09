@@ -39,6 +39,8 @@ The engine adopts a **Hybrid 2-Pass** architecture as its final and definitive s
   - **Eliminate Rune Decoding**: The NFA rescan MUST operate directly on raw bytes. Use of `utf8.DecodeRune` or any rune-based logic is strictly prohibited to maintain consistency with the DFA's performance characteristics.
   - **Bit-Parallel Optimization**: If the NFA has 64 or fewer states, the engine MUST use a bit-parallel implementation.
   - **Pike VM Fallback**: Traditional NFA for patterns exceeding machine word size, refactored for byte-level transitions.
+  - **Efficient Register Management**: The NFA pass MUST utilize reference-counting and copy-on-write (COW) for capture registers to minimize slice allocations and copying overhead.
+  - **Allocation Suppression**: To minimize per-call allocations, the engine SHOULD utilize pooling (e.g., `sync.Pool`) for frequently reused objects. To prevent memory bloat, such pools MUST be managed within an appropriate scope (ideally function-scoped) and avoid global, unbounded growth.
 
 ### 2.6 Prefix-Skip Optimization (SIMD Acceleration)
 To maximize throughput for patterns with literal prefixes, the engine MUST utilize a **Prefix-Skip** optimization:

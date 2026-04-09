@@ -26,8 +26,8 @@ func nfaMatchBitParallel(prog *syntax.Prog, b []byte, start, end int, numSubexp 
 	}
 	visited := make(map[visitedKey]bool)
 
-	var addThread func(q *[]thread, pc uint32, node *utf8Node, regs []int, pos int, context syntax.EmptyOp)
-	addThread = func(q *[]thread, pc uint32, node *utf8Node, regs []int, pos int, context syntax.EmptyOp) {
+	var addThread func(q *[]thread, pc uint32, node *utf8Node, regs *regState, pos int, context syntax.EmptyOp)
+	addThread = func(q *[]thread, pc uint32, node *utf8Node, regs *regState, pos int, context syntax.EmptyOp) {
 		key := visitedKey{pc, node}
 		if visited[key] {
 			return
@@ -48,9 +48,9 @@ func nfaMatchBitParallel(prog *syntax.Prog, b []byte, start, end int, numSubexp 
 			addThread(q, inst.Arg, nil, regs, pos, context)
 		case syntax.InstCapture:
 			if int(inst.Arg) < numRegs {
-				newRegs := make([]int, numRegs)
-				copy(newRegs, regs)
-				newRegs[inst.Arg] = pos
+				newRegs := &regState{slots: make([]int, numRegs)}
+				copy(newRegs.slots, regs.slots)
+				newRegs.slots[inst.Arg] = pos
 				addThread(q, inst.Out, nil, newRegs, pos, context)
 			} else {
 				addThread(q, inst.Out, nil, regs, pos, context)
@@ -81,9 +81,9 @@ func nfaMatchBitParallel(prog *syntax.Prog, b []byte, start, end int, numSubexp 
 		}
 	}
 
-	initialRegs := make([]int, numRegs)
-	for i := range initialRegs {
-		initialRegs[i] = -1
+	initialRegs := &regState{slots: make([]int, numRegs)}
+	for i := range initialRegs.slots {
+		initialRegs.slots[i] = -1
 	}
 
 	ctx := CalculateContext(b, start)
@@ -97,11 +97,15 @@ func nfaMatchBitParallel(prog *syntax.Prog, b []byte, start, end int, numSubexp 
 		if pos == end {
 			for _, t := range curr {
 				if prog.Inst[t.pc].Op == syntax.InstMatch && t.node == nil {
-					if len(t.regs) >= 2 {
-						t.regs[0] = start
-						t.regs[1] = end
+					res := make([]int, numRegs)
+					copy(res, t.regs.slots)
+					result0 := start
+					result1 := end
+					if len(res) >= 2 {
+						res[0] = result0
+						res[1] = result1
 					}
-					return t.regs
+					return res
 				}
 			}
 		}
