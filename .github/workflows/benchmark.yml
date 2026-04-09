@@ -33,6 +33,12 @@ jobs:
           # count=5 for statistical stability.
           go test -v -bench . -benchmem -tags "re2_cgo cgo_engines" -count=5 | tee ../../benchmark-results.txt
 
+      - name: Upload benchmark result artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: benchmark-results.txt
+
       - name: Store benchmark result
         uses: benchmark-action/github-action-benchmark@v1
         with:
