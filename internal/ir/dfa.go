@@ -62,7 +62,9 @@ type DFA struct {
 	dfaToNfa    [][]nfaPath // List of NFA paths for each DFA state
 	numSubexp   int
 
-	// Transition submatch instructions
+	// Cached trie roots for each instruction
+	trieRoots [][]*utf8Node
+
 	transPathOffsets []uint32
 	pathSources      []int16
 	pathTagOffsets   []uint32
@@ -149,6 +151,10 @@ func (d *DFA) NfaPaths(s StateID) []nfaPath {
 	return d.dfaToNfa[s]
 }
 
+func (d *DFA) TrieRoots() [][]*utf8Node {
+	return d.trieRoots
+}
+
 func (d *DFA) TransitionTags(current StateID, b int) []TagOp {
 	if current < 0 || int(current) >= d.numStates || b < 0 || b >= d.stride {
 		return nil
@@ -221,9 +227,9 @@ func (d *DFA) build(prog *syntax.Prog) error {
 		d.stride = 256
 	}
 
-	trieCache := make(map[uint32][]*utf8Node)
+	d.trieRoots = make([][]*utf8Node, len(prog.Inst))
 	getTrie := func(ID uint32) []*utf8Node {
-		if roots, ok := trieCache[ID]; ok {
+		if roots := d.trieRoots[ID]; roots != nil {
 			return roots
 		}
 		inst := prog.Inst[ID]
@@ -237,7 +243,7 @@ func (d *DFA) build(prog *syntax.Prog) error {
 		case syntax.InstRuneAnyNotNL:
 			roots = anyRuneTrie(false)
 		}
-		trieCache[ID] = roots
+		d.trieRoots[ID] = roots
 		return roots
 	}
 

@@ -6,70 +6,75 @@ import (
 
 // nfaMatchPikeVM performs submatch extraction using an NFA (Pike VM).
 // It's intended to be used as a second pass after the DFA has identified the match range [start, end].
-func nfaMatchPikeVM(prog *syntax.Prog, b []byte, start, end int, numSubexp int) []int {
+func nfaMatchPikeVM(prog *syntax.Prog, trieRoots [][]*utf8Node, b []byte, start, end int, numSubexp int) []int {
 	numRegs := (numSubexp + 1) * 2
 
 	curr := make([]thread, 0, 64)
 	next := make([]thread, 0, 64)
 
-	// visited keeps track of (PC, node) already added to the thread list for the current position.
-	type visitedKey struct {
+	maxPC := len(prog.Inst)
+	// Track visited per PC and per trie node ID.
+	// Since nodeID is small and node matching is infrequent compared to epsilon steps,
+	// we use a simplified visited check.
+	visited := make([]int, maxPC)
+	visitedGen := 1
+
+	type workItem struct {
 		pc   uint32
 		node *utf8Node
+		regs []int
 	}
-	visited := make(map[visitedKey]bool)
+	stack := make([]workItem, 0, 64)
 
-	var addThread func(q *[]thread, pc uint32, node *utf8Node, regs []int, pos int, context syntax.EmptyOp)
-	addThread = func(q *[]thread, pc uint32, node *utf8Node, regs []int, pos int, context syntax.EmptyOp) {
-		key := visitedKey{pc, node}
-		if visited[key] {
-			return
-		}
-		visited[key] = true
+	addThread := func(q *[]thread, pc uint32, node *utf8Node, regs []int, pos int, context syntax.EmptyOp) {
+		stack = stack[:0]
+		stack = append(stack, workItem{pc, node, regs})
 
-		if node != nil {
-			*q = append(*q, thread{pc: pc, node: node, regs: regs})
-			return
-		}
+		for len(stack) > 0 {
+			item := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
 
-		inst := prog.Inst[pc]
-		switch inst.Op {
-		case syntax.InstNop:
-			addThread(q, inst.Out, nil, regs, pos, context)
-		case syntax.InstAlt, syntax.InstAltMatch:
-			addThread(q, inst.Out, nil, regs, pos, context)
-			addThread(q, inst.Arg, nil, regs, pos, context)
-		case syntax.InstCapture:
-			if int(inst.Arg) < numRegs {
-				newRegs := make([]int, numRegs)
-				copy(newRegs, regs)
-				newRegs[inst.Arg] = pos
-				addThread(q, inst.Out, nil, newRegs, pos, context)
-			} else {
-				addThread(q, inst.Out, nil, regs, pos, context)
+			if item.node == nil {
+				if visited[item.pc] == visitedGen {
+					continue
+				}
+				visited[item.pc] = visitedGen
 			}
-		case syntax.InstEmptyWidth:
-			if (syntax.EmptyOp(inst.Arg) & context) == syntax.EmptyOp(inst.Arg) {
-				addThread(q, inst.Out, nil, regs, pos, context)
+
+			if item.node != nil {
+				*q = append(*q, thread{pc: item.pc, node: item.node, regs: item.regs})
+				continue
 			}
-		case syntax.InstFail:
-			// do nothing
-		case syntax.InstMatch:
-			*q = append(*q, thread{pc: pc, node: nil, regs: regs})
-		default:
-			// Rune instructions: start with the trie roots
-			var roots []*utf8Node
+
+			inst := prog.Inst[item.pc]
 			switch inst.Op {
-			case syntax.InstRune, syntax.InstRune1:
-				foldCase := inst.Op == syntax.InstRune && (inst.Arg&uint32(syntax.FoldCase) != 0)
-				roots = runeRangesToUTF8Trie(inst.Rune, foldCase)
-			case syntax.InstRuneAny:
-				roots = anyRuneTrie(true)
-			case syntax.InstRuneAnyNotNL:
-				roots = anyRuneTrie(false)
-			}
-			for _, root := range roots {
-				*q = append(*q, thread{pc: pc, node: root, regs: regs})
+			case syntax.InstNop:
+				stack = append(stack, workItem{inst.Out, nil, item.regs})
+			case syntax.InstAlt, syntax.InstAltMatch:
+				stack = append(stack, workItem{inst.Arg, nil, item.regs})
+				stack = append(stack, workItem{inst.Out, nil, item.regs})
+			case syntax.InstCapture:
+				if int(inst.Arg) < numRegs {
+					newRegs := make([]int, numRegs)
+					copy(newRegs, item.regs)
+					newRegs[inst.Arg] = pos
+					stack = append(stack, workItem{inst.Out, nil, newRegs})
+				} else {
+					stack = append(stack, workItem{inst.Out, nil, item.regs})
+				}
+			case syntax.InstEmptyWidth:
+				if (syntax.EmptyOp(inst.Arg) & context) == syntax.EmptyOp(inst.Arg) {
+					stack = append(stack, workItem{inst.Out, nil, item.regs})
+				}
+			case syntax.InstFail:
+				// do nothing
+			case syntax.InstMatch:
+				*q = append(*q, thread{pc: item.pc, node: nil, regs: item.regs})
+			default:
+				roots := trieRoots[item.pc]
+				for _, root := range roots {
+					*q = append(*q, thread{pc: item.pc, node: root, regs: item.regs})
+				}
 			}
 		}
 	}
@@ -102,7 +107,7 @@ func nfaMatchPikeVM(prog *syntax.Prog, b []byte, start, end int, numSubexp int) 
 		if pos < end {
 			c := b[pos]
 			nextCtx := CalculateContext(b, pos+1)
-			clear(visited)
+			visitedGen++
 
 			for _, t := range curr {
 				if t.node == nil {

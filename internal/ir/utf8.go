@@ -6,8 +6,21 @@ import (
 
 // utf8Node represents a node in a Trie of byte ranges that match a set of runes.
 type utf8Node struct {
+	ID     int
 	ranges []byteRange
 	next   []*utf8Node // if nil, this is a leaf (match complete)
+}
+
+var TotalUTF8Nodes int = 1
+
+func newNode(ranges []byteRange, next []*utf8Node) *utf8Node {
+	id := TotalUTF8Nodes
+	TotalUTF8Nodes++
+	return &utf8Node{
+		ID:     id,
+		ranges: ranges,
+		next:   next,
+	}
 }
 
 type byteRange struct {
@@ -79,10 +92,7 @@ func sequenceToTrie(seq []byteRange) *utf8Node {
 	if len(seq) == 0 {
 		return nil
 	}
-	return &utf8Node{
-		ranges: []byteRange{seq[0]},
-		next:   sequenceToTrieChildren(seq[1:]),
-	}
+	return newNode([]byteRange{seq[0]}, sequenceToTrieChildren(seq[1:]))
 }
 
 func sequenceToTrieChildren(seq []byteRange) []*utf8Node {
@@ -181,10 +191,7 @@ func max(a, b rune) rune {
 
 func byteRangesToTrie(ranges []byteRange) []*utf8Node {
 	return []*utf8Node{
-		{
-			ranges: ranges,
-			next:   nil,
-		},
+		newNode(ranges, nil),
 	}
 }
 

@@ -13,11 +13,11 @@ type thread struct {
 
 // NFAMatch performs submatch extraction using an NFA.
 // It selects the most efficient implementation based on the program characteristics.
-func NFAMatch(prog *syntax.Prog, b []byte, start, end int, numSubexp int) []int {
+func NFAMatch(prog *syntax.Prog, trieRoots [][]*utf8Node, b []byte, start, end int, numSubexp int) []int {
 	if len(prog.Inst) <= 64 {
 		if res := nfaMatchBitParallel(prog, b, start, end, numSubexp); res != nil {
 			return res
 		}
 	}
-	return nfaMatchPikeVM(prog, b, start, end, numSubexp)
+	return nfaMatchPikeVM(prog, trieRoots, b, start, end, numSubexp)
 }

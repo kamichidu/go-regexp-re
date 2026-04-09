@@ -359,7 +359,7 @@ func (re *Regexp) FindSubmatchIndex(b []byte) []int {
 	}
 	// match[0] is start, match[1] is end.
 	// 2nd pass: NFA rescan to extract submatches.
-	return ir.NFAMatch(re.prog, b, match[0], match[1], re.numSubexp)
+	return ir.NFAMatch(re.prog, re.dfa.TrieRoots(), b, match[0], match[1], re.numSubexp)
 }
 
 func (re *Regexp) doExecuteDFAIndex(b []byte) []int {
