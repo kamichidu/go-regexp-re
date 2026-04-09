@@ -15,6 +15,8 @@ type Regexp struct {
 	prefix      []byte
 	prefixState ir.StateID
 	complete    bool
+	anchorStart bool
+	anchorEnd   bool
 	prog        *syntax.Prog
 	dfa         *ir.DFA
 	match       func([]byte) bool
@@ -31,6 +33,22 @@ func Compile(expr string) (*Regexp, error) {
 	numSubexp := re.MaxCap()
 	subexpNames := make([]string, numSubexp+1)
 	extractCapNames(re, subexpNames)
+
+	anchorStart := false
+	anchorEnd := false
+	if re.Op == syntax.OpConcat && len(re.Sub) > 0 {
+		if re.Sub[0].Op == syntax.OpBeginText {
+			anchorStart = true
+		}
+		if re.Sub[len(re.Sub)-1].Op == syntax.OpEndText {
+			anchorEnd = true
+		}
+	} else if re.Op == syntax.OpBeginText {
+		anchorStart = true
+	} else if re.Op == syntax.OpEndText {
+		anchorEnd = true
+	}
+
 	re = syntax.Simplify(re)
 	prefixStr, complete := syntax.Prefix(re)
 
@@ -60,6 +78,8 @@ func Compile(expr string) (*Regexp, error) {
 		prefix:      []byte(prefixStr),
 		prefixState: prefixState,
 		complete:    complete,
+		anchorStart: anchorStart,
+		anchorEnd:   anchorEnd,
 		prog:        prog,
 		dfa:         dfa,
 		subexpNames: subexpNames,
@@ -89,13 +109,18 @@ func (re *Regexp) doMatchFast(b []byte) bool {
 		if accepting[state] {
 			return true
 		}
-		for _, c := range b {
+		for i, c := range b {
 			state = trans[int(state)*stride+int(c)]
 			if state == ir.InvalidState {
+				if re.anchorStart {
+					return false
+				}
 				state = startState
 			}
 			if accepting[state] {
-				return true
+				if !re.anchorEnd || i == len(b)-1 {
+					return true
+				}
 			}
 		}
 		return false
@@ -109,9 +134,15 @@ func (re *Regexp) doMatchFast(b []byte) bool {
 		}
 		i += idx
 
+		if re.anchorStart && i > 0 {
+			return false
+		}
+
 		state := re.prefixState
 		if accepting[state] {
-			return true
+			if !re.anchorEnd || i+len(re.prefix) == len(b) {
+				return true
+			}
 		}
 
 		// Continue matching after the prefix
@@ -124,13 +155,18 @@ func (re *Regexp) doMatchFast(b []byte) bool {
 				break
 			}
 			if accepting[state] {
-				matched = true
-				break
+				if !re.anchorEnd || curr == len(b)-1 {
+					matched = true
+					break
+				}
 			}
 			curr++
 		}
 		if matched {
 			return true
+		}
+		if re.anchorStart {
+			return false
 		}
 		// If failed, start searching for the next prefix from i+1
 		i++
@@ -151,12 +187,17 @@ func (re *Regexp) doMatchExtended(b []byte) bool {
 		ctx := re.calculateContext(b, 0)
 		state = re.applyContextToState(state, ctx)
 		if accepting[state] {
-			return true
+			if !re.anchorEnd || len(b) == 0 {
+				return true
+			}
 		}
 
 		for i, c := range b {
 			state = trans[int(state)*stride+int(c)]
 			if state == ir.InvalidState {
+				if re.anchorStart {
+					return false
+				}
 				state = startState
 			}
 
@@ -164,7 +205,9 @@ func (re *Regexp) doMatchExtended(b []byte) bool {
 			state = re.applyContextToState(state, ctx)
 
 			if accepting[state] {
-				return true
+				if !re.anchorEnd || i == len(b)-1 {
+					return true
+				}
 			}
 		}
 		return false
@@ -177,11 +220,17 @@ func (re *Regexp) doMatchExtended(b []byte) bool {
 		}
 		i += idx
 
+		if re.anchorStart && i > 0 {
+			return false
+		}
+
 		state := startState
 		ctx := re.calculateContext(b, i)
 		state = re.applyContextToState(state, ctx)
 		if accepting[state] {
-			return true
+			if !re.anchorEnd || i == len(b) {
+				return true
+			}
 		}
 
 		// Continue matching after the prefix start
@@ -198,13 +247,18 @@ func (re *Regexp) doMatchExtended(b []byte) bool {
 			state = re.applyContextToState(state, ctx)
 
 			if accepting[state] {
-				matched = true
-				break
+				if !re.anchorEnd || curr == len(b)-1 {
+					matched = true
+					break
+				}
 			}
 			curr++
 		}
 		if matched {
 			return true
+		}
+		if re.anchorStart {
+			return false
 		}
 		i++
 	}
@@ -360,6 +414,9 @@ func (re *Regexp) doExecuteDFAIndex(b []byte) []int {
 	bestPriority := 1<<30 - 1
 
 	updateBestMatch := func(endOffset int, s ir.StateID, regs []int, numPaths int) {
+		if re.anchorEnd && endOffset != len(b) {
+			return
+		}
 		paths := dfa.NfaPaths(s)
 		for k, path := range paths {
 			if k >= numPaths {
@@ -394,6 +451,10 @@ func (re *Regexp) doExecuteDFAIndex(b []byte) []int {
 				return bestMatch
 			}
 			i += idx
+
+			if re.anchorStart && i > 0 {
+				return bestMatch
+			}
 
 			// Initialize paths for a new match starting at i
 			initialPaths := dfa.NfaPaths(state)
@@ -430,6 +491,9 @@ func (re *Regexp) doExecuteDFAIndex(b []byte) []int {
 		idx := int(state)*stride + int(c)
 		nextState := trans[idx]
 		if nextState == ir.InvalidState {
+			if re.anchorStart {
+				return bestMatch
+			}
 			nextState = dfa.StartState()
 		}
 
