@@ -7,74 +7,81 @@ import (
 	"testing"
 )
 
-func BenchmarkCompileGo(b *testing.B) {
-	for _, p := range goldenPatterns {
-		b.Run(p.name, func(b *testing.B) {
-			b.ReportAllocs()
-			for i := 0; i < b.N; i++ {
-				_ = goregexp.MustCompile(p.pattern)
-			}
-		})
-	}
-}
-
-func BenchmarkCompileRe(b *testing.B) {
-	for _, p := range goldenPatterns {
-		b.Run(p.name, func(b *testing.B) {
-			b.ReportAllocs()
-			for i := 0; i < b.N; i++ {
-				_ = MustCompile(p.pattern)
-			}
-		})
-	}
-}
-
-func BenchmarkMatchGo(b *testing.B) {
-	for _, p := range goldenPatterns {
-		if !p.want {
-			continue
+func BenchmarkCompile(b *testing.B) {
+	b.Run("Go", func(b *testing.B) {
+		for _, p := range goldenPatterns {
+			b.Run(p.name, func(b *testing.B) {
+				b.ReportAllocs()
+				for i := 0; i < b.N; i++ {
+					_ = goregexp.MustCompile(p.pattern)
+				}
+			})
 		}
-		b.Run(p.name, func(b *testing.B) {
-			r := goregexp.MustCompile(p.pattern)
-			input := []byte(p.payload)
-			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
-				r.Match(input)
-			}
-		})
-	}
+	})
+	b.Run("Re", func(b *testing.B) {
+		for _, p := range goldenPatterns {
+			b.Run(p.name, func(b *testing.B) {
+				b.ReportAllocs()
+				for i := 0; i < b.N; i++ {
+					_ = MustCompile(p.pattern)
+				}
+			})
+		}
+	})
 }
 
-func BenchmarkMatchRe(b *testing.B) {
-	for _, p := range goldenPatterns {
-		if !p.want {
-			continue
+func BenchmarkMatch(b *testing.B) {
+	b.Run("Go", func(b *testing.B) {
+		for _, p := range goldenPatterns {
+			b.Run(p.name, func(b *testing.B) {
+				r := goregexp.MustCompile(p.pattern)
+				input := []byte(p.payload)
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					r.Match(input)
+				}
+			})
 		}
-		b.Run(p.name, func(b *testing.B) {
-			r := MustCompile(p.pattern)
-			input := []byte(p.payload)
-			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
-				r.Match(input)
-			}
-		})
-	}
+	})
+	b.Run("Re", func(b *testing.B) {
+		for _, p := range goldenPatterns {
+			b.Run(p.name, func(b *testing.B) {
+				r := MustCompile(p.pattern)
+				input := []byte(p.payload)
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					r.Match(input)
+				}
+			})
+		}
+	})
 }
 
-func BenchmarkSubmatchRe(b *testing.B) {
-	for _, p := range goldenPatterns {
-		if !p.want {
-			continue
+func BenchmarkSubmatch(b *testing.B) {
+	b.Run("Go", func(b *testing.B) {
+		for _, p := range goldenPatterns {
+			b.Run(p.name, func(b *testing.B) {
+				r := goregexp.MustCompile(p.pattern)
+				input := []byte(p.payload)
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					r.FindSubmatchIndex(input)
+				}
+			})
 		}
-		b.Run(p.name, func(b *testing.B) {
-			r := MustCompile(p.pattern)
-			input := []byte(p.payload)
-			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
-				r.FindSubmatchIndex(input)
-			}
-		})
-	}
+	})
+	b.Run("Re", func(b *testing.B) {
+		for _, p := range goldenPatterns {
+			b.Run(p.name, func(b *testing.B) {
+				r := MustCompile(p.pattern)
+				input := []byte(p.payload)
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					r.FindSubmatchIndex(input)
+				}
+			})
+		}
+	})
 }
 
 func BenchmarkComplexity(b *testing.B) {

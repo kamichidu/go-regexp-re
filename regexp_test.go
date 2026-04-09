@@ -3,11 +3,20 @@ package regexp
 import (
 	"reflect"
 	goregexp "regexp"
+	"strings"
 	"testing"
 )
 
-var (
-	// goldenPatterns defines the standard test cases for this engine.
+var goldenPatterns []struct {
+	name    string
+	pattern string
+	payload string
+	want    bool
+}
+
+func init() {
+	benchPayload := strings.Repeat("The quick brown fox jumps over the lazy dog. ", 100) // ~4.5KB
+
 	goldenPatterns = []struct {
 		name    string
 		pattern string
@@ -17,6 +26,8 @@ var (
 		// 1. Literal: Simple linear chain of states
 		{"Literal", `Tokyo`, "Tokyo is the capital of Japan.", true},
 		{"Literal_NoMatch", `Kyoto`, "Tokyo is the capital of Japan.", false},
+		{"Literal_Long", `lazy dog.`, benchPayload, true},
+		{"Literal_Long_NoMatch", `SHERLOCK`, benchPayload, false},
 		// 2. Alternation: Branching fan-out from common states
 		{"Alternation", `apple|orange|banana|grape|peach`, "I like to eat a banana for breakfast.", true},
 		// 3. Character Class: Multiple transitions between states (Dense edges)
@@ -33,6 +44,7 @@ var (
 		{"MiddleMatch", `Target`, "Some prefix before the Target and some suffix after.", true},
 		// 8. Anchors: Correct handling of boundaries
 		{"BeginText", `^abc`, "abcx", true},
+		{"BeginText_Long", `^The quick`, benchPayload, true},
 		{"BeginText_NoMatch", `^abc`, "xabc", false},
 		{"EndText", `abc$`, "xabc", true},
 		{"EndText_NoMatch", `abc$`, "abcx", false},
@@ -40,8 +52,11 @@ var (
 		{"WordBoundary_NoMatch", `\babc\b`, "xabcx", false},
 		{"PrefixAnchor", `abc\b`, "abc ", true},
 		{"LongPrefixAnchor", `abc\b`, "some very long text before the abc ", true},
+		// 9. Capturing (for Submatch benchmarking)
+		{"CaptureEmail", `([a-zA-Z0-9_.+-]+)@([a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)`, "Contact us at support@example.com", true},
+		{"CaptureURI", `^([a-zA-Z][a-zA-Z0-9+.-]*):(\/\/([^/?#]*))?([^?#]*)(\?([^#]*))?(#(.*))?`, "https://example.com/path?q=1#fragment", true},
 	}
-)
+}
 
 func TestCompile(t *testing.T) {
 	cases := []struct {
