@@ -101,7 +101,7 @@ const (
 	ErrUnexpectedParen       ErrorCode = gosyntax.ErrUnexpectedParen
 )
 
-// IsWordChar reports whether r is considered a ``word'' character
+// IsWordChar reports whether r is considered a “word” character
 // during the evaluation of the \b and \B zero-width assertions.
 // These characters are [A-Za-z0-9_].
 func IsWordChar(r rune) bool {

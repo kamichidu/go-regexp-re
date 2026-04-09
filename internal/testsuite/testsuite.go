@@ -420,9 +420,9 @@ func BenchmarkAnchors(b *testing.B) {
 	}
 
 	patterns := []string{
-		"^127.0.0.1",   // Line start
-		"HTTP/1.1$",    // Line end
-		"\\bGET\\b",    // Word boundary
+		"^127.0.0.1", // Line start
+		"HTTP/1.1$",  // Line end
+		"\\bGET\\b",  // Word boundary
 	}
 
 	for _, pattern := range patterns {
