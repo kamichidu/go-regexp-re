@@ -6,9 +6,10 @@ import (
 
 // NFAMatch performs submatch extraction using an NFA.
 type thread struct {
-	pc   uint32
-	node *utf8Node // Current position in the UTF-8 byte trie for this instruction
-	regs []int
+	pc       uint32
+	node     *utf8Node // Current position in the UTF-8 byte trie for this instruction
+	regs     []int
+	priority int
 }
 
 // NFAMatch performs submatch extraction using an NFA.

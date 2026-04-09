@@ -26,8 +26,8 @@ func nfaMatchBitParallel(prog *syntax.Prog, b []byte, start, end int, numSubexp 
 	}
 	visited := make(map[visitedKey]bool)
 
-	var addThread func(q *[]thread, pc uint32, node *utf8Node, regs []int, pos int, context syntax.EmptyOp)
-	addThread = func(q *[]thread, pc uint32, node *utf8Node, regs []int, pos int, context syntax.EmptyOp) {
+	var addThread func(q *[]thread, pc uint32, node *utf8Node, regs []int, priority int, pos int, context syntax.EmptyOp)
+	addThread = func(q *[]thread, pc uint32, node *utf8Node, regs []int, priority int, pos int, context syntax.EmptyOp) {
 		key := visitedKey{pc, node}
 		if visited[key] {
 			return
@@ -35,34 +35,34 @@ func nfaMatchBitParallel(prog *syntax.Prog, b []byte, start, end int, numSubexp 
 		visited[key] = true
 
 		if node != nil {
-			*q = append(*q, thread{pc: pc, node: node, regs: regs})
+			*q = append(*q, thread{pc: pc, node: node, regs: regs, priority: priority})
 			return
 		}
 
 		inst := prog.Inst[pc]
 		switch inst.Op {
 		case syntax.InstNop:
-			addThread(q, inst.Out, nil, regs, pos, context)
+			addThread(q, inst.Out, nil, regs, priority, pos, context)
 		case syntax.InstAlt, syntax.InstAltMatch:
-			addThread(q, inst.Out, nil, regs, pos, context)
-			addThread(q, inst.Arg, nil, regs, pos, context)
+			addThread(q, inst.Out, nil, regs, priority*2, pos, context)
+			addThread(q, inst.Arg, nil, regs, priority*2+1, pos, context)
 		case syntax.InstCapture:
 			if int(inst.Arg) < numRegs {
 				newRegs := make([]int, numRegs)
 				copy(newRegs, regs)
 				newRegs[inst.Arg] = pos
-				addThread(q, inst.Out, nil, newRegs, pos, context)
+				addThread(q, inst.Out, nil, newRegs, priority, pos, context)
 			} else {
-				addThread(q, inst.Out, nil, regs, pos, context)
+				addThread(q, inst.Out, nil, regs, priority, pos, context)
 			}
 		case syntax.InstEmptyWidth:
 			if (syntax.EmptyOp(inst.Arg) & context) == syntax.EmptyOp(inst.Arg) {
-				addThread(q, inst.Out, nil, regs, pos, context)
+				addThread(q, inst.Out, nil, regs, priority, pos, context)
 			}
 		case syntax.InstFail:
 			// do nothing
 		case syntax.InstMatch:
-			*q = append(*q, thread{pc: pc, node: nil, regs: regs})
+			*q = append(*q, thread{pc: pc, node: nil, regs: regs, priority: priority})
 		default:
 			// Rune instructions
 			var roots []*utf8Node
@@ -76,7 +76,7 @@ func nfaMatchBitParallel(prog *syntax.Prog, b []byte, start, end int, numSubexp 
 				roots = anyRuneTrie(false)
 			}
 			for _, root := range roots {
-				*q = append(*q, thread{pc: pc, node: root, regs: regs})
+				*q = append(*q, thread{pc: pc, node: root, regs: regs, priority: priority})
 			}
 		}
 	}
@@ -87,26 +87,38 @@ func nfaMatchBitParallel(prog *syntax.Prog, b []byte, start, end int, numSubexp 
 	}
 
 	ctx := CalculateContext(b, start)
-	addThread(&curr, uint32(prog.Start), nil, initialRegs, start, ctx)
+	addThread(&curr, uint32(prog.Start), nil, initialRegs, 0, start, ctx)
+
+	var bestMatchRegs []int
+	bestPriority := 1 << 30
 
 	for pos := start; ; {
 		if len(curr) == 0 {
 			break
 		}
 
-		if pos == end {
-			for _, t := range curr {
-				if prog.Inst[t.pc].Op == syntax.InstMatch && t.node == nil {
-					if len(t.regs) >= 2 {
-						t.regs[0] = start
-						t.regs[1] = end
+		// Check for matches at current position
+		for _, t := range curr {
+			if prog.Inst[t.pc].Op == syntax.InstMatch && t.node == nil {
+				if t.priority < bestPriority {
+					bestPriority = t.priority
+					bestMatchRegs = make([]int, numRegs)
+					copy(bestMatchRegs, t.regs)
+					if len(bestMatchRegs) >= 2 {
+						bestMatchRegs[0] = start
+						bestMatchRegs[1] = pos
 					}
-					return t.regs
+				} else if t.priority == bestPriority {
+					// For same priority, prefer later match (greedy).
+					if len(bestMatchRegs) >= 2 {
+						bestMatchRegs[1] = pos
+					}
 				}
+				break
 			}
 		}
 
-		if pos < end {
+		if pos < len(b) {
 			c := b[pos]
 			nextCtx := CalculateContext(b, pos+1)
 			clear(visited)
@@ -125,10 +137,10 @@ func nfaMatchBitParallel(prog *syntax.Prog, b []byte, start, end int, numSubexp 
 
 				if match(t.node, c) {
 					if t.node.next == nil {
-						addThread(&next, inst.Out, nil, t.regs, pos+1, nextCtx)
+						addThread(&next, inst.Out, nil, t.regs, t.priority, pos+1, nextCtx)
 					} else {
 						for _, child := range t.node.next {
-							addThread(&next, t.pc, child, t.regs, pos+1, nextCtx)
+							addThread(&next, t.pc, child, t.regs, t.priority, pos+1, nextCtx)
 						}
 					}
 				}
@@ -142,5 +154,5 @@ func nfaMatchBitParallel(prog *syntax.Prog, b []byte, start, end int, numSubexp 
 		next = next[:0]
 	}
 
-	return nil
+	return bestMatchRegs
 }

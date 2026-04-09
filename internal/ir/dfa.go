@@ -90,10 +90,24 @@ const (
 )
 
 func NewDFA(prog *syntax.Prog) (*DFA, error) {
+	return NewDFAForSearch(prog)
+}
+
+func NewDFAForSearch(prog *syntax.Prog) (*DFA, error) {
 	d := &DFA{
 		numSubexp: prog.NumCap / 2,
 	}
-	if err := d.build(prog); err != nil {
+	if err := d.build(prog, true); err != nil {
+		return nil, fmt.Errorf("failed to build DFA: %w", err)
+	}
+	return d, nil
+}
+
+func NewDFAForMatch(prog *syntax.Prog) (*DFA, error) {
+	d := &DFA{
+		numSubexp: prog.NumCap / 2,
+	}
+	if err := d.build(prog, false); err != nil {
 		return nil, fmt.Errorf("failed to build DFA: %w", err)
 	}
 	return d, nil
@@ -127,6 +141,10 @@ func (d *DFA) IsAccepting(s StateID) bool {
 
 func (d *DFA) StartState() StateID {
 	return d.startState
+}
+
+func (d *DFA) NumEntryPaths() int {
+	return len(d.entryPathTags)
 }
 
 func (d *DFA) EntryTagsForPath(idx int) []TagOp {
@@ -212,7 +230,7 @@ func (d *DFA) AcceptingPriority(s StateID) int {
 	return d.stateMatchPriority[s]
 }
 
-func (d *DFA) build(prog *syntax.Prog) error {
+func (d *DFA) build(prog *syntax.Prog, withSearch bool) error {
 	d.hasAnchors = false
 	for _, inst := range prog.Inst {
 		if inst.Op == syntax.InstEmptyWidth {
@@ -316,13 +334,18 @@ func (d *DFA) build(prog *syntax.Prog) error {
 		currentClosure := dfaToNfa[i]
 		currentDfaID := StateID(i)
 
-		// To support implicit .*? (O(n) search), always try starting a new match.
-		searchClosure := make([]nfaPath, len(currentClosure)+len(defaultStartClosure))
-		copy(searchClosure, currentClosure)
-		for j, p := range defaultStartClosure {
-			p.origin = -1         // new match start
-			p.Priority += 1000000 // Very low priority
-			searchClosure[len(currentClosure)+j] = p
+		var searchClosure []nfaPath
+		if withSearch {
+			// To support implicit .*? (O(n) search), always try starting a new match.
+			searchClosure = make([]nfaPath, len(currentClosure)+len(defaultStartClosure))
+			copy(searchClosure, currentClosure)
+			for j, p := range defaultStartClosure {
+				p.origin = -1         // new match start
+				p.Priority += 1000000 // Very low priority
+				searchClosure[len(currentClosure)+j] = p
+			}
+		} else {
+			searchClosure = currentClosure
 		}
 
 		for b := 0; b < 256; b++ {
@@ -331,7 +354,7 @@ func (d *DFA) build(prog *syntax.Prog) error {
 
 			for pIdx, p := range searchClosure {
 				origin := pIdx
-				if pIdx >= len(currentClosure) {
+				if withSearch && pIdx >= len(currentClosure) {
 					origin = -1
 				}
 				s := p.nfaState
@@ -387,11 +410,6 @@ func (d *DFA) build(prog *syntax.Prog) error {
 							Priority: p.Priority,
 						}
 						if origin == -1 {
-							// If this is a new match start (not continuing from a previous state),
-							// we must carry over the tags encountered during epsilon closure of the start state
-							// BEFORE the first character was consumed.
-							// This ensures that capture groups at the very beginning of the pattern
-							// are correctly recorded even when the match starts in the middle of the input.
 							np.tags = p.tags
 							np.visited = p.visited
 						}
@@ -404,11 +422,6 @@ func (d *DFA) build(prog *syntax.Prog) error {
 							Priority: p.Priority,
 						}
 						if origin == -1 {
-							// If this is a new match start (not continuing from a previous state),
-							// we must carry over the tags encountered during epsilon closure of the start state
-							// BEFORE the first character was consumed.
-							// This ensures that capture groups at the very beginning of the pattern
-							// are correctly recorded even when the match starts in the middle of the input.
 							np.tags = p.tags
 							np.visited = p.visited
 						}
@@ -442,18 +455,30 @@ func (d *DFA) build(prog *syntax.Prog) error {
 		if d.hasAnchors {
 			for bit := 0; bit < numVirtualBytes; bit++ {
 				op := syntax.EmptyOp(1 << bit)
-				initialPaths := make([]nfaPath, len(currentClosure)+1)
-				for j, p := range currentClosure {
-					initialPaths[j] = nfaPath{
-						nfaState: p.nfaState,
-						origin:   j,
-						Priority: p.Priority,
+				var initialPaths []nfaPath
+				if withSearch {
+					initialPaths = make([]nfaPath, len(currentClosure)+1)
+					for j, p := range currentClosure {
+						initialPaths[j] = nfaPath{
+							nfaState: p.nfaState,
+							origin:   j,
+							Priority: p.Priority,
+						}
 					}
-				}
-				initialPaths[len(currentClosure)] = nfaPath{
-					nfaState: nfaState{ID: uint32(prog.Start)},
-					origin:   -1,
-					Priority: 1000000,
+					initialPaths[len(currentClosure)] = nfaPath{
+						nfaState: nfaState{ID: uint32(prog.Start)},
+						origin:   -1,
+						Priority: 1000000,
+					}
+				} else {
+					initialPaths = make([]nfaPath, len(currentClosure))
+					for j, p := range currentClosure {
+						initialPaths[j] = nfaPath{
+							nfaState: p.nfaState,
+							origin:   j,
+							Priority: p.Priority,
+						}
+					}
 				}
 				nextClosure, _ := epsilonClosure(initialPaths, prog, op)
 				if serializeSet(nextClosure) != serializeSet(currentClosure) {
