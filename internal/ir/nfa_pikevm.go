@@ -1,149 +1,91 @@
 package ir
 
 import (
-	"sync"
-
 	"github.com/kamichidu/go-regexp-re/syntax"
 )
 
-type pikeVM struct {
-	prog       *syntax.Prog
-	trieRoots  [][]*utf8Node
-	numRegs    int
-	visited    []int
-	visitedGen int
-	stack      []workItem
-	regsPool   *sync.Pool
-}
-
-type workItem struct {
-	pc   uint32
-	node *utf8Node
-	regs *regState
-}
-
-func (m *pikeVM) allocRegs() *regState {
-	rs := m.regsPool.Get().(*regState)
-	for i := range rs.slots {
-		rs.slots[i] = -1
-	}
-	rs.refs = 1
-	return rs
-}
-
-func (m *pikeVM) copyRegs(old *regState) *regState {
-	rs := m.regsPool.Get().(*regState)
-	copy(rs.slots, old.slots)
-	rs.refs = 1
-	return rs
-}
-
-func (m *pikeVM) freeRegs(rs *regState) {
-	if rs == nil {
-		return
-	}
-	rs.refs--
-	if rs.refs == 0 {
-		m.regsPool.Put(rs)
-	}
-}
-
-func (m *pikeVM) addThread(q *[]thread, pc uint32, node *utf8Node, regs *regState, pos int, context syntax.EmptyOp) {
-	m.stack = m.stack[:0]
-	m.stack = append(m.stack, workItem{pc, node, regs})
-	regs.refs++
-
-	for len(m.stack) > 0 {
-		item := m.stack[len(m.stack)-1]
-		m.stack = m.stack[:len(m.stack)-1]
-
-		if item.node == nil {
-			if m.visited[item.pc] == m.visitedGen {
-				m.freeRegs(item.regs)
-				continue
-			}
-			m.visited[item.pc] = m.visitedGen
-		}
-
-		if item.node != nil {
-			*q = append(*q, thread{pc: item.pc, node: item.node, regs: item.regs})
-			continue
-		}
-
-		inst := m.prog.Inst[item.pc]
-		switch inst.Op {
-		case syntax.InstNop:
-			m.stack = append(m.stack, workItem{inst.Out, nil, item.regs})
-		case syntax.InstAlt, syntax.InstAltMatch:
-			item.regs.refs++
-			m.stack = append(m.stack, workItem{inst.Arg, nil, item.regs})
-			m.stack = append(m.stack, workItem{inst.Out, nil, item.regs})
-		case syntax.InstCapture:
-			if int(inst.Arg) < m.numRegs {
-				var newRegs *regState
-				if item.regs.refs == 1 {
-					newRegs = item.regs
-				} else {
-					newRegs = m.copyRegs(item.regs)
-					m.freeRegs(item.regs)
-				}
-				newRegs.slots[inst.Arg] = pos
-				m.stack = append(m.stack, workItem{inst.Out, nil, newRegs})
-			} else {
-				m.stack = append(m.stack, workItem{inst.Out, nil, item.regs})
-			}
-		case syntax.InstEmptyWidth:
-			if (syntax.EmptyOp(inst.Arg) & context) == syntax.EmptyOp(inst.Arg) {
-				m.stack = append(m.stack, workItem{inst.Out, nil, item.regs})
-			} else {
-				m.freeRegs(item.regs)
-			}
-		case syntax.InstFail:
-			m.freeRegs(item.regs)
-		case syntax.InstMatch:
-			*q = append(*q, thread{pc: item.pc, node: nil, regs: item.regs})
-		default:
-			roots := m.trieRoots[item.pc]
-			for i, root := range roots {
-				if i < len(roots)-1 {
-					item.regs.refs++
-				}
-				*q = append(*q, thread{pc: item.pc, node: root, regs: item.regs})
-			}
-			if len(roots) == 0 {
-				m.freeRegs(item.regs)
-			}
-		}
-	}
-}
-
+// nfaMatchPikeVM performs submatch extraction using an NFA (Pike VM).
+// It's intended to be used as a second pass after the DFA has identified the match range [start, end].
 func nfaMatchPikeVM(prog *syntax.Prog, trieRoots [][]*utf8Node, b []byte, start, end int, numSubexp int) []int {
 	numRegs := (numSubexp + 1) * 2
-
-	m := &pikeVM{
-		prog:       prog,
-		trieRoots:  trieRoots,
-		numRegs:    numRegs,
-		visited:    make([]int, len(prog.Inst)),
-		visitedGen: 1,
-		stack:      make([]workItem, 0, 64),
-		regsPool: &sync.Pool{
-			New: func() any {
-				return &regState{slots: make([]int, numRegs)}
-			},
-		},
-	}
 
 	curr := make([]thread, 0, 64)
 	next := make([]thread, 0, 64)
 
-	initialRegs := m.allocRegs()
+	maxPC := len(prog.Inst)
+	// Track visited per PC and per trie node ID.
+	// Since nodeID is small and node matching is infrequent compared to epsilon steps,
+	// we use a simplified visited check.
+	visited := make([]int, maxPC)
+	visitedGen := 1
+
+	type workItem struct {
+		pc   uint32
+		node *utf8Node
+		regs []int
+	}
+	stack := make([]workItem, 0, 64)
+
+	addThread := func(q *[]thread, pc uint32, node *utf8Node, regs []int, pos int, context syntax.EmptyOp) {
+		stack = stack[:0]
+		stack = append(stack, workItem{pc, node, regs})
+
+		for len(stack) > 0 {
+			item := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+
+			if item.node == nil {
+				if visited[item.pc] == visitedGen {
+					continue
+				}
+				visited[item.pc] = visitedGen
+			}
+
+			if item.node != nil {
+				*q = append(*q, thread{pc: item.pc, node: item.node, regs: item.regs})
+				continue
+			}
+
+			inst := prog.Inst[item.pc]
+			switch inst.Op {
+			case syntax.InstNop:
+				stack = append(stack, workItem{inst.Out, nil, item.regs})
+			case syntax.InstAlt, syntax.InstAltMatch:
+				stack = append(stack, workItem{inst.Arg, nil, item.regs})
+				stack = append(stack, workItem{inst.Out, nil, item.regs})
+			case syntax.InstCapture:
+				if int(inst.Arg) < numRegs {
+					newRegs := make([]int, numRegs)
+					copy(newRegs, item.regs)
+					newRegs[inst.Arg] = pos
+					stack = append(stack, workItem{inst.Out, nil, newRegs})
+				} else {
+					stack = append(stack, workItem{inst.Out, nil, item.regs})
+				}
+			case syntax.InstEmptyWidth:
+				if (syntax.EmptyOp(inst.Arg) & context) == syntax.EmptyOp(inst.Arg) {
+					stack = append(stack, workItem{inst.Out, nil, item.regs})
+				}
+			case syntax.InstFail:
+				// do nothing
+			case syntax.InstMatch:
+				*q = append(*q, thread{pc: item.pc, node: nil, regs: item.regs})
+			default:
+				roots := trieRoots[item.pc]
+				for _, root := range roots {
+					*q = append(*q, thread{pc: item.pc, node: root, regs: item.regs})
+				}
+			}
+		}
+	}
+
+	initialRegs := make([]int, numRegs)
+	for i := range initialRegs {
+		initialRegs[i] = -1
+	}
 
 	ctx := CalculateContext(b, start)
-	m.addThread(&curr, uint32(prog.Start), nil, initialRegs, start, ctx)
-	m.freeRegs(initialRegs) // Handed over to addThread
-
-	var result []int
+	addThread(&curr, uint32(prog.Start), nil, initialRegs, start, ctx)
 
 	for pos := start; ; {
 		if len(curr) == 0 {
@@ -153,11 +95,11 @@ func nfaMatchPikeVM(prog *syntax.Prog, trieRoots [][]*utf8Node, b []byte, start,
 		if pos == end {
 			for _, t := range curr {
 				if prog.Inst[t.pc].Op == syntax.InstMatch && t.node == nil {
-					result = make([]int, numRegs)
-					copy(result, t.regs.slots)
-					result[0] = start
-					result[1] = end
-					goto found
+					if len(t.regs) >= 2 {
+						t.regs[0] = start
+						t.regs[1] = end
+					}
+					return t.regs
 				}
 			}
 		}
@@ -165,12 +107,10 @@ func nfaMatchPikeVM(prog *syntax.Prog, trieRoots [][]*utf8Node, b []byte, start,
 		if pos < end {
 			c := b[pos]
 			nextCtx := CalculateContext(b, pos+1)
-			m.visitedGen++
+			visitedGen++
 
-			for i := range curr {
-				t := &curr[i]
+			for _, t := range curr {
 				if t.node == nil {
-					m.freeRegs(t.regs)
 					continue
 				}
 
@@ -184,37 +124,23 @@ func nfaMatchPikeVM(prog *syntax.Prog, trieRoots [][]*utf8Node, b []byte, start,
 				if match(t.node, c) {
 					if t.node.next == nil {
 						// Character completed
-						t.regs.refs++
-						m.addThread(&next, inst.Out, nil, t.regs, pos+1, nextCtx)
+						addThread(&next, inst.Out, nil, t.regs, pos+1, nextCtx)
 					} else {
 						// Continue through the trie
 						for _, child := range t.node.next {
-							t.regs.refs++
-							m.addThread(&next, t.pc, child, t.regs, pos+1, nextCtx)
+							addThread(&next, t.pc, child, t.regs, pos+1, nextCtx)
 						}
 					}
 				}
-				m.freeRegs(t.regs)
 			}
 			pos++
 		} else {
-			for i := range curr {
-				m.freeRegs(curr[i].regs)
-			}
-			curr = curr[:0]
 			break
 		}
 
-		curr = curr[:0]
 		curr, next = next, curr
+		next = next[:0]
 	}
 
-found:
-	for _, t := range curr {
-		m.freeRegs(t.regs)
-	}
-	for _, t := range next {
-		m.freeRegs(t.regs)
-	}
-	return result
+	return nil
 }
