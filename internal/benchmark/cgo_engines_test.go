@@ -8,9 +8,33 @@ import (
 	"github.com/Jemmic/go-pcre2"
 	"github.com/flier/gohs/hyperscan"
 	"github.com/kamichidu/go-regexp-re/internal/testsuite"
+	"github.com/wasilibs/go-re2"
 )
 
 func init() {
+	// Register RE2 (Wasm)
+	testsuite.Register(testsuite.Engine{
+		Name: "RE2-Wasm",
+		Compile: func(pattern string) (testsuite.Matcher, error) {
+			re, err := re2.Compile(pattern)
+			if err != nil {
+				return nil, err
+			}
+			return re, nil
+		},
+	})
+	// Register RE2 (CGO)
+	// requires -tags re2_cgo to use CGO version, otherwise this is same as Wasm version.
+	testsuite.Register(testsuite.Engine{
+		Name: "RE2-CGO",
+		Compile: func(pattern string) (testsuite.Matcher, error) {
+			re, err := re2.Compile(pattern)
+			if err != nil {
+				return nil, err
+			}
+			return re, nil
+		},
+	})
 	// Register PCRE2 (CGO)
 	testsuite.Register(testsuite.Engine{
 		Name: "PCRE2-CGO",
@@ -22,7 +46,6 @@ func init() {
 			return &pcre2Matcher{re: re, pattern: pattern}, nil
 		},
 	})
-
 	// Register Hyperscan (CGO)
 	testsuite.Register(testsuite.Engine{
 		Name: "Hyperscan-CGO",
