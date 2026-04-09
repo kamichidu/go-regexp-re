@@ -82,16 +82,17 @@ func (re *Regexp) doMatchFast(b []byte) bool {
 	trans := dfa.Transitions()
 	stride := dfa.Stride()
 	accepting := dfa.Accepting()
+	startState := dfa.StartState()
 
 	if len(re.prefix) == 0 {
-		state := dfa.StartState()
+		state := startState
 		if accepting[state] {
 			return true
 		}
 		for _, c := range b {
 			state = trans[int(state)*stride+int(c)]
 			if state == ir.InvalidState {
-				state = dfa.StartState()
+				state = startState
 			}
 			if accepting[state] {
 				return true
@@ -100,28 +101,41 @@ func (re *Regexp) doMatchFast(b []byte) bool {
 		return false
 	}
 
-	for {
-		idx := bytes.Index(b, re.prefix)
+	// Prefix acceleration
+	for i := 0; i < len(b); {
+		idx := bytes.Index(b[i:], re.prefix)
 		if idx < 0 {
 			return false
 		}
+		i += idx
 
 		state := re.prefixState
 		if accepting[state] {
 			return true
 		}
-		rest := b[idx+len(re.prefix):]
-		for _, c := range rest {
+
+		// Continue matching after the prefix
+		curr := i + len(re.prefix)
+		matched := false
+		for curr < len(b) {
+			c := b[curr]
 			state = trans[int(state)*stride+int(c)]
 			if state == ir.InvalidState {
 				break
 			}
 			if accepting[state] {
-				return true
+				matched = true
+				break
 			}
+			curr++
 		}
-		b = b[idx+1:]
+		if matched {
+			return true
+		}
+		// If failed, start searching for the next prefix from i+1
+		i++
 	}
+	return false
 }
 
 func (re *Regexp) doMatchExtended(b []byte) bool {
@@ -129,9 +143,10 @@ func (re *Regexp) doMatchExtended(b []byte) bool {
 	trans := dfa.Transitions()
 	stride := dfa.Stride()
 	accepting := dfa.Accepting()
+	startState := dfa.StartState()
 
 	if len(re.prefix) == 0 {
-		state := dfa.StartState()
+		state := startState
 		// Initial context
 		ctx := re.calculateContext(b, 0)
 		state = re.applyContextToState(state, ctx)
@@ -142,7 +157,7 @@ func (re *Regexp) doMatchExtended(b []byte) bool {
 		for i, c := range b {
 			state = trans[int(state)*stride+int(c)]
 			if state == ir.InvalidState {
-				state = dfa.StartState()
+				state = startState
 			}
 
 			ctx := re.calculateContext(b, i+1)
@@ -155,35 +170,45 @@ func (re *Regexp) doMatchExtended(b []byte) bool {
 		return false
 	}
 
-	for {
-		idx := bytes.Index(b, re.prefix)
+	for i := 0; i < len(b); {
+		idx := bytes.Index(b[i:], re.prefix)
 		if idx < 0 {
 			return false
 		}
+		i += idx
 
-		state := dfa.StartState()
-		ctx := re.calculateContext(b, idx)
+		state := startState
+		ctx := re.calculateContext(b, i)
 		state = re.applyContextToState(state, ctx)
 		if accepting[state] {
 			return true
 		}
 
-		rest := b[idx:]
-		for i, c := range rest {
+		// Continue matching after the prefix start
+		curr := i
+		matched := false
+		for curr < len(b) {
+			c := b[curr]
 			state = trans[int(state)*stride+int(c)]
 			if state == ir.InvalidState {
 				break
 			}
 
-			ctx = re.calculateContext(b, idx+i+1)
+			ctx = re.calculateContext(b, curr+1)
 			state = re.applyContextToState(state, ctx)
 
 			if accepting[state] {
-				return true
+				matched = true
+				break
 			}
+			curr++
 		}
-		b = b[idx+1:]
+		if matched {
+			return true
+		}
+		i++
 	}
+	return false
 }
 
 func (re *Regexp) applyContextToState(state ir.StateID, op syntax.EmptyOp) ir.StateID {
