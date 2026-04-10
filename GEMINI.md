@@ -28,17 +28,21 @@ To maximize throughput, the engine MUST select the most efficient execution loop
 - **0-Pass (Literal Bypass)**: Selected for pure constant strings. Bypasses all regex engines using SIMD-accelerated standard library search (e.g., `bytes.Index`).
 - **Fast Path (Pure DFA)**: Automatically selected for patterns without anchors. It utilizes a minimalist execution loop with zero boundary/context checks to approach raw memory bandwidth speeds.
 - **Extended Path (Virtual Byte Insertion)**: Selected for patterns with anchors (e.g., `^`, `$`, `\b`). It employs "Virtual Bytes" (indices 256+) injected at character boundaries to process empty-width assertions within the DFA's $O(n)$ framework.
-- **Submatch Path (Hybrid 2-Pass)**: Selected when submatches are requested. It utilizes a high-speed DFA scan to identify match boundaries, followed by an optimized NFA second pass for precise submatch extraction.
+- **Submatch Path (Path-Guided 2-Pass DFA)**: Selected when submatches are requested. It utilizes a high-speed DFA scan to identify match boundaries, followed by a guided DFA second pass for efficient submatch extraction.
 
-### 2.5 Submatch Extraction Architecture (Final Hybrid 2-Pass Strategy)
-The engine adopts a **Hybrid 2-Pass** architecture as its final and definitive strategy for submatch extraction. This deliberate architectural choice prioritizes system stability, code maintainability, and memory predictability over the theoretical (but practically risky) ideal of 1-pass submatch resolution (TDFA).
+### 2.5 Submatch Extraction Architecture (Path-Guided 2nd Pass DFA)
+The engine adopts a **Path-Guided 2nd Pass DFA** architecture as its definitive strategy for submatch extraction. This architecture prioritizes DFA throughput even during submatch resolution, ensuring $O(n)$ predictability and minimal CPU overhead.
 
-- **Intentional Exclusion of TDFA**: Full TDFA implementation is explicitly excluded from the project roadmap. The risk of catastrophic state explosion and the extreme implementation complexity required to mitigate it are deemed incompatible with the project's goal of a lean, high-performance engine.
-- **Phase 1: DFA Boundary Scan**: A specialized DFA identifies the overall match boundaries `[start, end]`. By keeping DFA states free of internal submatch tags, we guarantee $O(n)$ execution and constant memory overhead. **DFA MUST respect NFA-style priorities (leftmost-first) to determine the correct boundary `[start, end]` compatible with the standard library.**
-- **Phase 2: Targeted Byte-Oriented NFA Rescan**: An optimized NFA rescans ONLY within the identified `[start, end]` bounds.
-  - **Eliminate Rune Decoding**: The NFA rescan MUST operate directly on raw bytes. Use of `utf8.DecodeRune` or any rune-based logic is strictly prohibited to maintain consistency with the DFA's performance characteristics.
-  - **Bit-Parallel Optimization**: If the NFA has 64 or fewer states, the engine MUST use a bit-parallel implementation.
-  - **Pike VM Fallback**: Traditional NFA for patterns exceeding machine word size, refactored for byte-level transitions.
+- **Intentional Exclusion of TDFA**: Full Tagged DFA (TDFA) with 1-pass resolution is explicitly excluded to avoid catastrophic state explosion.
+- **Phase 1: Boundary Discovery & Winner Identification**:
+  - A specialized DFA scan identifies match boundaries `[start, end]`.
+  - The engine tracks **Absolute Priority** (cumulative transition increments + state match priority) to identify the "winning" NFA path according to leftmost-first semantics.
+- **Phase 2: Path-Guided DFA Rescan (Primary)**:
+  - If the winning path corresponds to the highest priority (Priority 0), the engine rescans the `[start, end]` range using the same DFA table.
+  - Submatch tags are collected directly from DFA transition edges (`PreTags` and `PostTags`), eliminating NFA thread management overhead.
+- **Phase 2: Targeted NFA Rescan (Fallback)**:
+  - If a lower priority path won (common in complex greedy loops, `targetPriority > 0`), the engine falls back to an optimized NFA rescan ONLY within the identified `[start, end]` bounds.
+  - **Eliminate Rune Decoding**: The NFA fallback MUST operate directly on raw bytes to maintain performance consistency.
 
 ### 2.6 Prefix-Skip Optimization (SIMD Acceleration)
 To maximize throughput for patterns with literal prefixes, the engine MUST utilize a **Prefix-Skip** optimization:
@@ -70,9 +74,9 @@ To ensure system stability and prevent Out-Of-Memory (OOM) conditions during com
 ### 2.12 DFA Minimization (Moore's Algorithm)
 - **Equivalence-Based Merging**: After the initial transition table construction, the DFA MUST be minimized using Moore's algorithm (Partition Refinement).
 - **Equivalence Criteria**: Two states are equivalent if and only if they share identical:
-  1. Acceptance properties (Accepting, MatchPriority, IsBestMatch).
+  1. Acceptance properties (Accepting, MatchPriority, MatchTags, IsBestMatch).
   2. Transition targets (mapped to equivalent groups).
-  3. Priority increments for every possible byte.
+  3. Priority increments AND transition tags for every possible byte.
 
 ### 2.13 Syntax-Level Factoring & Trie Optimization
 Before NFA/DFA compilation, the syntax tree (especially `OpAlternate`) MUST be optimized to reduce redundancy and mitigate state explosion.
@@ -85,7 +89,7 @@ Before NFA/DFA compilation, the syntax tree (especially `OpAlternate`) MUST be o
 ### 3.1 Supported Features
 - **Standard Syntax Compatibility**: Accept `syntax.Prog` instruction sequences from the standard Go parser.
 - **Anchors & Boundaries**: Support `^`, `$`, `\b`, `\B` and multiline anchors via the **Virtual Byte Insertion** mechanism.
-- **Capturing Groups**: Support extraction via the **Hybrid 2-Pass Strategy**.
+- **Capturing Groups**: Support extraction via the **Path-Guided 2-Pass DFA Strategy**.
 - **Fixed-Length Lookahead/Lookbehind**: Support assertions that can be statically integrated into the DFA transition graph during compilation.
 
 ### 3.2 Excluded Features
@@ -95,14 +99,13 @@ Before NFA/DFA compilation, the syntax tree (especially `OpAlternate`) MUST be o
 - **Longest Match**: The `Longest()` method is not provided. The engine's matching priority is fixed at compile-time to maintain $O(n)$ and cache-locality mandates.
 
 ### 3.3 Interface Compatibility Policy
-- **Compile-time Safety Over Runtime Panic**: For functions and methods in the standard `regexp` package that cannot be supported under our $O(n)$ and state-explosion-free mandates, we intentionally omit them from the API. This ensures that users are notified of incompatibilities at compile-time rather than encountering unexpected runtime panics or incorrect behavior.
-- **Functional Completeness**: We aim to provide a compatible interface for the most commonly used features (Find, Replace, Split, etc.) while adhering to our performance-first philosophy.
+- **Interface Consistency**: We aim to provide a compatible interface for the most commonly used features (Find, Replace, Split, etc.) while adhering to our performance-first philosophy.
 
 ## 4. Engineering & Validation Standards
 - **Performance-First Benchmarking**: Any change must be validated against the standard `regexp` package. Significant throughput regressions are unacceptable.
 - **Scalability for Large Pattern Sets**: Ensure the engine maintains $O(n)$ performance even when merging tens of thousands of patterns.
 - **SIMD Utilization**: Proactively use fast-skipping logic (e.g., `bytes.Index`) for pattern prefix matching before engaging the DFA. Aim for 5x to 100x higher throughput.
-- **Submatch Isolation Diagnostics**: When submatch discrepancies occur, use isolation tests to determine if the error lies in Phase 1 (DFA boundary detection) or Phase 2 (NFA submatch extraction). DFA boundaries MUST strictly match the standard library's leftmost-first boundaries.
+- **Submatch Isolation Diagnostics**: When submatch discrepancies occur, use isolation tests to determine if the error lies in Phase 1 (DFA boundary detection) or Phase 2 (DFA/NFA submatch extraction).
 
 ## 5. Coding Conventions
 - **Explicit Aliasing for Standard Regexp Packages**: To avoid confusion between this engine and the standard library, always use explicit aliases when importing Go's standard `regexp` packages:

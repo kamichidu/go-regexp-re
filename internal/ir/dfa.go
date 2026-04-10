@@ -29,17 +29,35 @@ type nfaState struct {
 type nfaPath struct {
 	nfaState
 	Priority int
+	PreTags  uint64
+	PostTags uint64
+}
+
+// TagRecord represents a set of tags encountered at a specific position.
+type TagRecord struct {
+	Tags uint64
+	Pos  int
 }
 
 // DFA represents a Deterministic Finite Automaton.
 type DFA struct {
-	transitions            []StateID // Flattened table for better cache locality: table[state * stride + byte]
-	transPriorityIncrement []int32   // Priority shift for each transition
-	stride                 int       // 256 or 257
-	numStates              int
-	startState             StateID
-	hasAnchors             bool
-	numSubexp              int
+	transitions            []StateID
+	transPriorityIncrement []int32
+
+	// Simple Tagged DFA: record only the tags passed by the BEST path.
+	// For greedy loops, Phase 1 correctly finds the winning priority.
+	// If we build the DFA correctly, Priority 0 in each transition will be the best path.
+	transPreTags  []uint64
+	transPostTags []uint64
+
+	// Start tags for the best path.
+	startTags uint64
+
+	stride     int
+	numStates  int
+	startState StateID
+	hasAnchors bool
+	numSubexp  int
 
 	// Cached trie roots for each instruction
 	trieRoots [][]*utf8Node
@@ -47,19 +65,18 @@ type DFA struct {
 	// Accepting info
 	accepting          []bool
 	stateMatchPriority []int
+	stateMatchTags     []uint64
 	stateIsBestMatch   []bool
 }
 
 const (
-	// Virtual bytes for different anchor types.
-	// Order MUST match gosyntax.EmptyOp bits for applyContextToState.
-	VirtualBeginLine      = 256 + iota // bit 0 (1)
-	VirtualEndLine                     // bit 1 (2)
-	VirtualBeginText                   // bit 2 (4)
-	VirtualEndText                     // bit 3 (8)
-	VirtualWordBoundary                // bit 4 (16)
-	VirtualNoWordBoundary              // bit 5 (32)
-	numVirtualBytes       = 6
+	VirtualBeginLine = 256 + iota
+	VirtualEndLine
+	VirtualBeginText
+	VirtualEndText
+	VirtualWordBoundary
+	VirtualNoWordBoundary
+	numVirtualBytes = 6
 )
 
 func NewDFA(prog *syntax.Prog) (*DFA, error) {
@@ -90,7 +107,11 @@ func (d *DFA) Next(current StateID, b int) StateID {
 	if current < 0 || int(current) >= d.numStates || b < 0 || b >= d.stride {
 		return InvalidState
 	}
-	return d.transitions[int(current)*d.stride+b]
+	offset := int(current)*d.stride + b
+	if offset >= len(d.transitions) {
+		return InvalidState
+	}
+	return d.transitions[offset]
 }
 
 func (d *DFA) Transitions() []StateID {
@@ -99,6 +120,14 @@ func (d *DFA) Transitions() []StateID {
 
 func (d *DFA) PriorityIncrements() []int32 {
 	return d.transPriorityIncrement
+}
+
+func (d *DFA) PreTags() []uint64 {
+	return d.transPreTags
+}
+
+func (d *DFA) PostTags() []uint64 {
+	return d.transPostTags
 }
 
 func (d *DFA) Stride() int {
@@ -127,6 +156,10 @@ func (d *DFA) StartState() StateID {
 	return d.startState
 }
 
+func (d *DFA) StartTags() uint64 {
+	return d.startTags
+}
+
 func (d *DFA) HasAnchors() bool {
 	return d.hasAnchors
 }
@@ -146,10 +179,15 @@ func (d *DFA) AcceptingPriority(s StateID) int {
 	return d.stateMatchPriority[s]
 }
 
+func (d *DFA) MatchTags(s StateID) uint64 {
+	if s < 0 || int(s) >= d.numStates {
+		return 0
+	}
+	return d.stateMatchTags[s]
+}
+
 var ErrStateExplosion = fmt.Errorf("regexp: pattern too large or ambiguous")
 
-// MaxDFAMemory is the maximum estimated memory for the DFA transition table.
-// Default is 64MB, which corresponds to roughly 32,000 states.
 const MaxDFAMemory = 64 * 1024 * 1024
 
 func (d *DFA) build(ctx context.Context, prog *syntax.Prog, withSearch bool) error {
@@ -198,14 +236,11 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, withSearch bool) err
 			return InvalidState
 		}
 
-		// Estimate memory: (numStates+1) * stride * 8 bytes (transitions + increments)
 		if (d.numStates+1)*d.stride*8 > MaxDFAMemory {
 			errBuild = ErrStateExplosion
 			return InvalidState
 		}
 
-		// Priority Normalization: Keep relative order to avoid state explosion
-		// during search/matching when priorities increment.
 		if len(closure) > 0 {
 			minP := closure[0].Priority
 			for i := 1; i < len(closure); i++ {
@@ -220,7 +255,6 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, withSearch bool) err
 			}
 		}
 
-		// Canonical sorting for state key
 		sort.Slice(closure, func(i, j int) bool {
 			if closure[i].ID != closure[j].ID {
 				return closure[i].ID < closure[j].ID
@@ -245,10 +279,19 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, withSearch bool) err
 
 		id := StateID(len(dfaToNfa))
 		nfaToDfa[key] = id
-		dfaToNfa = append(dfaToNfa, closure)
+
+		cleanClosure := make([]nfaPath, len(closure))
+		for i, p := range closure {
+			cleanClosure[i] = nfaPath{
+				nfaState: p.nfaState,
+				Priority: p.Priority,
+			}
+		}
+		dfaToNfa = append(dfaToNfa, cleanClosure)
 
 		isAccepting := false
 		matchPriority := 1<<30 - 1
+		var matchTags uint64
 		minPathPriority := 1<<30 - 1
 		for _, s := range closure {
 			if s.Priority < minPathPriority {
@@ -258,27 +301,31 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, withSearch bool) err
 				isAccepting = true
 				if s.Priority < matchPriority {
 					matchPriority = s.Priority
+					matchTags = s.PostTags
 				}
 			}
 		}
 		d.accepting = append(d.accepting, isAccepting)
 		d.stateMatchPriority = append(d.stateMatchPriority, matchPriority)
-		// If the best matching NFA path has the same priority as the best active path,
-		// then we've found the best possible match for this start position.
+		d.stateMatchTags = append(d.stateMatchTags, matchTags)
 		d.stateIsBestMatch = append(d.stateIsBestMatch, isAccepting && (matchPriority == minPathPriority))
 
 		for i := 0; i < d.stride; i++ {
 			d.transitions = append(d.transitions, InvalidState)
 			d.transPriorityIncrement = append(d.transPriorityIncrement, 0)
+			d.transPreTags = append(d.transPreTags, 0)
+			d.transPostTags = append(d.transPostTags, 0)
 		}
 		d.numStates++
 		return id
 	}
 
-	// 1. Initial start state
-	initialPaths := []nfaPath{{nfaState: nfaState{ID: uint32(prog.Start)}}}
+	initialPaths := []nfaPath{{nfaState: nfaState{ID: uint32(prog.Start)}, PreTags: 0, PostTags: 0}}
 	defaultStartClosure := epsilonClosure(initialPaths, prog, 0)
 	d.startState = addDfaState(defaultStartClosure)
+	if len(defaultStartClosure) > 0 {
+		d.startTags = defaultStartClosure[0].PostTags
+	}
 	if errBuild != nil {
 		return errBuild
 	}
@@ -294,18 +341,19 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, withSearch bool) err
 		currentClosure := dfaToNfa[i]
 		currentDfaID := StateID(i)
 
-		var searchClosure []nfaPath
+		var searchPaths []nfaPath
 		if withSearch {
-			// To support implicit .*? (O(n) search), always try starting a new match.
-			searchClosure = make([]nfaPath, len(currentClosure)+len(defaultStartClosure))
-			copy(searchClosure, currentClosure)
+			searchPaths = make([]nfaPath, len(currentClosure)+len(defaultStartClosure))
+			copy(searchPaths, currentClosure)
 			for j, p := range defaultStartClosure {
-				p.Priority += 1000000 // Very low priority
-				searchClosure[len(currentClosure)+j] = p
+				p.Priority += 1000000
+				searchPaths[len(currentClosure)+j] = p
 			}
 		} else {
-			searchClosure = currentClosure
+			searchPaths = currentClosure
 		}
+
+		searchClosure := epsilonClosure(searchPaths, prog, 0)
 
 		for b := 0; b < 256; b++ {
 			var nextPaths []nfaPath
@@ -362,6 +410,8 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, withSearch bool) err
 						np := nfaPath{
 							nfaState: nfaState{ID: out},
 							Priority: p.Priority,
+							PreTags:  p.PreTags | p.PostTags,
+							PostTags: 0,
 						}
 						nextPaths = append(nextPaths, np)
 					}
@@ -369,6 +419,8 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, withSearch bool) err
 						np := nfaPath{
 							nfaState: nfaState{ID: s.ID, node: node},
 							Priority: p.Priority,
+							PreTags:  p.PreTags | p.PostTags,
+							PostTags: 0,
 						}
 						nextPaths = append(nextPaths, np)
 					}
@@ -377,7 +429,7 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, withSearch bool) err
 
 			if foundMatch {
 				nextClosure := epsilonClosure(nextPaths, prog, 0)
-				// Calculate normalization minP
+
 				minP := 0
 				if len(nextClosure) > 0 {
 					minP = nextClosure[0].Priority
@@ -395,6 +447,10 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, withSearch bool) err
 				idx := int(currentDfaID)*d.stride + b
 				d.transitions[idx] = nextDfaID
 				d.transPriorityIncrement[idx] = int32(minP)
+				if len(nextClosure) > 0 {
+					d.transPreTags[idx] = nextClosure[0].PreTags
+					d.transPostTags[idx] = nextClosure[0].PostTags
+				}
 			}
 		}
 
@@ -408,11 +464,15 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, withSearch bool) err
 						initialPaths[j] = nfaPath{
 							nfaState: p.nfaState,
 							Priority: p.Priority,
+							PreTags:  p.PreTags,
+							PostTags: p.PostTags,
 						}
 					}
 					initialPaths[len(currentClosure)] = nfaPath{
 						nfaState: nfaState{ID: uint32(prog.Start)},
 						Priority: 1000000,
+						PreTags:  0,
+						PostTags: 0,
 					}
 				} else {
 					initialPaths = make([]nfaPath, len(currentClosure))
@@ -420,12 +480,13 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, withSearch bool) err
 						initialPaths[j] = nfaPath{
 							nfaState: p.nfaState,
 							Priority: p.Priority,
+							PreTags:  p.PreTags,
+							PostTags: p.PostTags,
 						}
 					}
 				}
 				nextClosure := epsilonClosure(initialPaths, prog, op)
 				if serializeSet(nextClosure) != serializeSet(currentClosure) {
-					// Calculate normalization minP
 					minP := 0
 					if len(nextClosure) > 0 {
 						minP = nextClosure[0].Priority
@@ -443,6 +504,10 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, withSearch bool) err
 					idx := int(currentDfaID)*d.stride + 256 + bit
 					d.transitions[idx] = nextDfaID
 					d.transPriorityIncrement[idx] = int32(minP)
+					if len(nextClosure) > 0 {
+						d.transPreTags[idx] = nextClosure[0].PreTags
+						d.transPostTags[idx] = nextClosure[0].PostTags
+					}
 				}
 			}
 		}
@@ -458,8 +523,6 @@ func (d *DFA) minimize() {
 		return
 	}
 
-	// Moore's Algorithm (Partition Refinement)
-	// 1. Initial partition based on acceptance properties.
 	stateToGroup := make([]int32, d.numStates)
 	type groupSig struct {
 		acc       bool
@@ -480,7 +543,6 @@ func (d *DFA) minimize() {
 		stateToGroup[i] = g
 	}
 
-	// 2. Refine partition.
 	for {
 		type splitKey struct {
 			oldGroup int32
@@ -491,24 +553,27 @@ func (d *DFA) minimize() {
 		nextNumGroups := int32(0)
 
 		for i := 0; i < d.numStates; i++ {
-			// Transition signature: (targetGroup, priorityIncrement) for each byte.
-			buf := make([]byte, d.stride*8)
+			buf := make([]byte, d.stride*20)
 			for b := 0; b < d.stride; b++ {
 				idx := i*d.stride + b
 				target := d.transitions[idx]
 				inc := d.transPriorityIncrement[idx]
-
+				pre := d.transPreTags[idx]
+				post := d.transPostTags[idx]
 				var targetGroup int32 = -1
 				if target != InvalidState {
 					targetGroup = stateToGroup[target]
 				}
 
-				off := b * 8
-				*(*int32)(unsafe.Pointer(&buf[off])) = targetGroup
-				*(*int32)(unsafe.Pointer(&buf[off+4])) = inc
+				off := b * 20
+				*(*int16)(unsafe.Pointer(&buf[off])) = int16(targetGroup)
+				*(*int16)(unsafe.Pointer(&buf[off+2])) = int16(inc)
+				*(*uint64)(unsafe.Pointer(&buf[off+4])) = pre
+				*(*uint64)(unsafe.Pointer(&buf[off+12])) = post
 			}
 
 			key := splitKey{stateToGroup[i], string(buf)}
+
 			g, ok := newGroups[key]
 			if !ok {
 				g = nextNumGroups
@@ -525,7 +590,6 @@ func (d *DFA) minimize() {
 		numGroups = nextNumGroups
 	}
 
-	// 3. Rebuild DFA with minimal states.
 	groupToFirstState := make([]int, numGroups)
 	for i, g := range stateToGroup {
 		groupToFirstState[g] = i
@@ -533,14 +597,18 @@ func (d *DFA) minimize() {
 
 	newTransitions := make([]StateID, int(numGroups)*d.stride)
 	newIncrements := make([]int32, int(numGroups)*d.stride)
+	newPre := make([]uint64, int(numGroups)*d.stride)
+	newPost := make([]uint64, int(numGroups)*d.stride)
 	newAccepting := make([]bool, numGroups)
 	newPrio := make([]int, numGroups)
+	newMatchTags := make([]uint64, numGroups)
 	newBest := make([]bool, numGroups)
 
 	for g := int32(0); g < numGroups; g++ {
 		oldS := groupToFirstState[g]
 		newAccepting[g] = d.accepting[oldS]
 		newPrio[g] = d.stateMatchPriority[oldS]
+		newMatchTags[g] = d.stateMatchTags[oldS]
 		newBest[g] = d.stateIsBestMatch[oldS]
 
 		for b := 0; b < d.stride; b++ {
@@ -552,13 +620,18 @@ func (d *DFA) minimize() {
 				newTransitions[int(g)*d.stride+b] = InvalidState
 			}
 			newIncrements[int(g)*d.stride+b] = d.transPriorityIncrement[oldIdx]
+			newPre[int(g)*d.stride+b] = d.transPreTags[oldIdx]
+			newPost[int(g)*d.stride+b] = d.transPostTags[oldIdx]
 		}
 	}
 
 	d.transitions = newTransitions
 	d.transPriorityIncrement = newIncrements
+	d.transPreTags = newPre
+	d.transPostTags = newPost
 	d.accepting = newAccepting
 	d.stateMatchPriority = newPrio
+	d.stateMatchTags = newMatchTags
 	d.stateIsBestMatch = newBest
 	d.numStates = int(numGroups)
 	d.startState = StateID(stateToGroup[d.startState])
@@ -600,8 +673,6 @@ func epsilonClosure(paths []nfaPath, prog *syntax.Prog, context syntax.EmptyOp) 
 		stack = stack[:len(stack)-1]
 		p := ph.p
 
-		// Static Priority Resolution:
-		// If we already have a path to this instruction with better priority, skip.
 		k := key{p.ID, p.node}
 		if existing, ok := best[k]; ok {
 			if p.Priority >= existing.Priority {
@@ -614,14 +685,13 @@ func epsilonClosure(paths []nfaPath, prog *syntax.Prog, context syntax.EmptyOp) 
 			inst := prog.Inst[p.ID]
 
 			if inst.Op == syntax.InstMatch {
-				// Record the best priority that results in a match at the current position.
 				if p.Priority < minMatchPriority {
 					minMatchPriority = p.Priority
 				}
 				continue
 			}
 
-			push := func(nextID uint32, nextPriority int) {
+			push := func(nextID uint32, nextPriority int, preTags, postTags uint64) {
 				for _, id := range ph.history {
 					if id == nextID {
 						return
@@ -634,6 +704,8 @@ func epsilonClosure(paths []nfaPath, prog *syntax.Prog, context syntax.EmptyOp) 
 					p: nfaPath{
 						nfaState: nfaState{ID: nextID},
 						Priority: nextPriority,
+						PreTags:  preTags,
+						PostTags: postTags,
 					},
 					history: newHistory,
 				})
@@ -641,16 +713,19 @@ func epsilonClosure(paths []nfaPath, prog *syntax.Prog, context syntax.EmptyOp) 
 
 			switch inst.Op {
 			case syntax.InstAlt, syntax.InstAltMatch:
-				// First branch (Out) has higher priority in standard Go regexp
-				push(inst.Arg, p.Priority+1)
-				push(inst.Out, p.Priority)
+				push(inst.Arg, p.Priority+1, p.PreTags, p.PostTags)
+				push(inst.Out, p.Priority, p.PreTags, p.PostTags)
 			case syntax.InstCapture:
-				push(inst.Out, p.Priority)
+				newPostTags := p.PostTags
+				if inst.Arg < 64 {
+					newPostTags |= (1 << inst.Arg)
+				}
+				push(inst.Out, p.Priority, p.PreTags, newPostTags)
 			case syntax.InstNop:
-				push(inst.Out, p.Priority)
+				push(inst.Out, p.Priority, p.PreTags, p.PostTags)
 			case syntax.InstEmptyWidth:
 				if syntax.EmptyOp(inst.Arg)&context == syntax.EmptyOp(inst.Arg) {
-					push(inst.Out, p.Priority)
+					push(inst.Out, p.Priority, p.PreTags, p.PostTags)
 				}
 			}
 		}
@@ -658,17 +733,11 @@ func epsilonClosure(paths []nfaPath, prog *syntax.Prog, context syntax.EmptyOp) 
 
 	var result []nfaPath
 	for _, p := range best {
-		// Static Priority Resolution:
-		// Any path with priority worse than the best match found in this closure is useless
-		// for finding the leftmost-first match. Because priorities are assigned at branches
-		// and never decrease along a path, a higher priority match (lower numerical value)
-		// will always shadow any matches from lower priority branches starting at the same position.
 		if p.Priority <= minMatchPriority {
 			result = append(result, p)
 		}
 	}
 
-	// Canonical sort for state key
 	sort.Slice(result, func(i, j int) bool {
 		if result[i].Priority != result[j].Priority {
 			return result[i].Priority < result[j].Priority
@@ -693,8 +762,6 @@ func serializeSet(set []nfaPath) string {
 	if len(set) == 0 {
 		return ""
 	}
-	// Binary serialization for speed and memory efficiency.
-	// Each path is 12 bytes: ID(4), nodeID(4), Priority(4).
 	buf := make([]byte, len(set)*12)
 	for i, s := range set {
 		off := i * 12

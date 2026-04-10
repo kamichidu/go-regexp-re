@@ -22,7 +22,7 @@ type Regexp struct {
 	prog        *syntax.Prog
 	dfa         *ir.DFA // DFA with search closure (.*?) for Match
 	dfaMatch    *ir.DFA // DFA without search closure for Find boundaries
-	match       func([]byte) (int, int)
+	match       func([]byte) (int, int, int)
 	subexpNames []string
 }
 
@@ -101,33 +101,33 @@ func CompileContext(ctx context.Context, expr string) (*Regexp, error) {
 
 	if complete && numSubexp == 0 {
 		// literal match optimization
-		res.match = func(b []byte) (int, int) {
+		res.match = func(b []byte) (int, int, int) {
 			if res.anchorStart && res.anchorEnd {
 				if bytes.Equal(b, res.prefix) {
-					return 0, len(b)
+					return 0, len(b), 0
 				}
-				return -1, -1
+				return -1, -1, -1
 			}
 			if res.anchorStart {
 				if bytes.HasPrefix(b, res.prefix) {
-					return 0, len(res.prefix)
+					return 0, len(res.prefix), 0
 				}
-				return -1, -1
+				return -1, -1, -1
 			}
 			if res.anchorEnd {
 				if bytes.HasSuffix(b, res.prefix) {
-					return len(b) - len(res.prefix), len(b)
+					return len(b) - len(res.prefix), len(b), 0
 				}
-				return -1, -1
+				return -1, -1, -1
 			}
 			i := bytes.Index(b, res.prefix)
 			if i >= 0 {
-				return i, i + len(res.prefix)
+				return i, i + len(res.prefix), 0
 			}
-			return -1, -1
+			return -1, -1, -1
 		}
 	} else {
-		res.match = func(b []byte) (int, int) {
+		res.match = func(b []byte) (int, int, int) {
 			if res.dfa.HasAnchors() {
 				return res.doMatchExtended(b)
 			}
@@ -139,7 +139,7 @@ func CompileContext(ctx context.Context, expr string) (*Regexp, error) {
 
 // Match reports whether the byte slice b contains any match of the regular expression re.
 func (re *Regexp) Match(b []byte) bool {
-	i, _ := re.match(b)
+	i, _, _ := re.match(b)
 	return i >= 0
 }
 
@@ -164,43 +164,88 @@ func (re *Regexp) LiteralPrefix() (prefix string, complete bool) {
 // FindSubmatchIndex returns a slice holding the index pairs identifying the leftmost match of
 // the regular expression of b and the matches, if any, of its subexpressions.
 func (re *Regexp) FindSubmatchIndex(b []byte) []int {
-	start, end := re.match(b)
+	start, end, targetPriority := re.match(b)
 	if start < 0 {
 		return nil
 	}
 
-	regs := ir.NFAMatch(re.prog, re.dfa.TrieRoots(), b, start, end, re.numSubexp)
-	if regs == nil {
-		// This should not happen if re.match found a match, but as a fallback:
-		res := make([]int, (re.numSubexp+1)*2)
-		for i := range res {
-			res[i] = -1
+	// Special Case: Greedy loop resolution for simple DFA.
+	// If targetPriority > 0, we use NFA rescan because a simple Tagged DFA
+	// only records the tags for Priority 0 (the best path in each state).
+	if targetPriority > 0 {
+		regs := ir.NFAMatch(re.prog, re.dfa.TrieRoots(), b, start, end, re.numSubexp)
+		if regs != nil {
+			regs[0], regs[1] = start, end
+			return regs
 		}
-		res[0], res[1] = start, end
-		return res
 	}
 
-	// Explicitly set the overall match boundaries from the DFA result.
-	// This ensures Phase 1 (DFA) determines the match range, and
-	// Phase 2 (NFA) identifies submatches within that range.
+	// Phase 2: Simple Tagged DFA Rescan (O(n) for Priority 0 matches).
+	regs := make([]int, (re.numSubexp+1)*2)
+	for i := range regs {
+		regs[i] = -1
+	}
 	regs[0] = start
 	regs[1] = end
+
+	dfa := re.dfaMatch
+	trans := dfa.Transitions()
+	stride := dfa.Stride()
+	preTags := dfa.PreTags()
+	postTags := dfa.PostTags()
+	startState := dfa.StartState()
+
+	recordTags := func(t uint64, pos int) {
+		if t == 0 {
+			return
+		}
+		for i := 0; i < 64; i++ {
+			if (t & (1 << i)) != 0 {
+				if i < len(regs) {
+					regs[i] = pos
+				}
+			}
+		}
+	}
+
+	recordTags(dfa.StartTags(), start)
+
+	ctx := ir.CalculateContext(b, start)
+	state := re.applyContextToState(dfa, startState, ctx, func(t uint64) {
+		recordTags(t, start)
+	})
+
+	currState := state
+	for i := start; i < end; i++ {
+		idx := int(currState)*stride + int(b[i])
+		recordTags(preTags[idx], i)
+		recordTags(postTags[idx], i+1)
+
+		next := trans[idx]
+		if next == ir.InvalidState {
+			break
+		}
+		currState = re.applyContextToState(dfa, next, ir.CalculateContext(b, i+1), func(t uint64) {
+			recordTags(t, i+1)
+		})
+	}
+
+	if currState != ir.InvalidState && dfa.IsAccepting(currState) {
+		recordTags(dfa.MatchTags(currState), end)
+	}
+
 	return regs
 }
 
-func (re *Regexp) applyContextToState(d *ir.DFA, state ir.StateID, context syntax.EmptyOp) ir.StateID {
+func (re *Regexp) applyContextToState(d *ir.DFA, state ir.StateID, context syntax.EmptyOp, record func(uint64)) ir.StateID {
 	if state == ir.InvalidState || context == 0 || d.Stride() <= 256 {
 		return state
 	}
 	trans := d.Transitions()
 	stride := d.Stride()
-	// gosyntax.EmptyOp bits:
-	// 0: EmptyBeginLine (1)
-	// 1: EmptyEndLine (2)
-	// 2: EmptyBeginText (4)
-	// 3: EmptyEndText (8)
-	// 4: EmptyWordBoundary (16)
-	// 5: EmptyNoWordBoundary (32)
+	preTags := d.PreTags()
+	postTags := d.PostTags()
+
 	virtualBytes := [6]int{
 		ir.VirtualBeginLine,
 		ir.VirtualEndLine,
@@ -217,6 +262,10 @@ func (re *Regexp) applyContextToState(d *ir.DFA, state ir.StateID, context synta
 				if idx < len(trans) {
 					next := trans[idx]
 					if next != ir.InvalidState && next != state {
+						if record != nil {
+							record(preTags[idx])
+							record(postTags[idx])
+						}
 						state = next
 						changed = true
 					}
@@ -243,7 +292,7 @@ func (re *Regexp) String() string {
 	return re.expr
 }
 
-func (re *Regexp) doMatchFast(b []byte) (int, int) {
+func (re *Regexp) doMatchFast(b []byte) (int, int, int) {
 	dfa := re.dfa
 	trans := dfa.Transitions()
 	stride := dfa.Stride()
@@ -252,7 +301,7 @@ func (re *Regexp) doMatchFast(b []byte) (int, int) {
 	// Optimization: Prefix skip
 	if len(re.prefix) > 0 {
 		if bytes.Index(b, re.prefix) < 0 {
-			return -1, -1
+			return -1, -1, -1
 		}
 	}
 
@@ -263,51 +312,38 @@ func (re *Regexp) doMatchFast(b []byte) (int, int) {
 	}
 
 	for i := 0; i < len(b); i++ {
-		// Transition on byte b[i].
-		// re.dfa is built with withSearch=true, so it already handles restarting.
 		state = trans[int(state)*stride+int(b[i])]
 		if state == ir.InvalidState {
-			// This should not happen with search DFA unless there's an error in construction,
-			// but we fallback to start state just in case.
 			state = dfa.StartState()
 		}
 
 		if accepting[state] {
-			// Found SOME match ending at i+1.
-			// findBoundary will find the leftmost-longest one.
 			return re.findBoundary(b)
 		}
 	}
-	return -1, -1
+	return -1, -1, -1
 }
 
-func (re *Regexp) doMatchExtended(b []byte) (int, int) {
+func (re *Regexp) doMatchExtended(b []byte) (int, int, int) {
 	dfa := re.dfa
 	trans := dfa.Transitions()
 	stride := dfa.Stride()
 	accepting := dfa.Accepting()
 
-	// Patterns with anchors.
 	state := dfa.StartState()
 	for i := 0; i <= len(b); i++ {
-		// 1. Check if the current state + context is accepting.
 		ctx := ir.CalculateContext(b, i)
-		s := re.applyContextToState(dfa, state, ctx)
+		s := re.applyContextToState(dfa, state, ctx, nil)
 		if s != ir.InvalidState && accepting[s] {
 			return re.findBoundary(b)
 		}
 
 		if i < len(b) {
-			// 2. Transition on byte b[i].
-			// Apply context (for anchors like ^ that can precede a character)
-			state = re.applyContextToState(dfa, state, ctx)
+			state = re.applyContextToState(dfa, state, ctx, nil)
 			state = trans[int(state)*stride+int(b[i])]
 			if state == ir.InvalidState {
-				// Search closure: restart if stuck.
-				// dfa is built withSearch=true.
 				state = dfa.StartState()
-				// Try transitioning from start again for this byte.
-				state = re.applyContextToState(dfa, state, ctx)
+				state = re.applyContextToState(dfa, state, ctx, nil)
 				state = trans[int(state)*stride+int(b[i])]
 				if state == ir.InvalidState {
 					state = dfa.StartState()
@@ -315,10 +351,10 @@ func (re *Regexp) doMatchExtended(b []byte) (int, int) {
 			}
 		}
 	}
-	return -1, -1
+	return -1, -1, -1
 }
 
-func (re *Regexp) findBoundary(b []byte) (int, int) {
+func (re *Regexp) findBoundary(b []byte) (int, int, int) {
 	dfa := re.dfaMatch
 	trans := dfa.Transitions()
 	increments := dfa.PriorityIncrements()
@@ -326,13 +362,11 @@ func (re *Regexp) findBoundary(b []byte) (int, int) {
 	accepting := dfa.Accepting()
 	startState := dfa.StartState()
 
-	// Find the leftmost-best match.
 	for i := 0; i <= len(b); i++ {
-		// Optimization: Prefix skip
 		if len(re.prefix) > 0 {
 			if re.anchorStart {
 				if i > 0 || !bytes.HasPrefix(b, re.prefix) {
-					return -1, -1
+					return -1, -1, -1
 				}
 			} else {
 				if i < len(b) {
@@ -342,7 +376,6 @@ func (re *Regexp) findBoundary(b []byte) (int, int) {
 					}
 					i += idx
 				} else if len(b) == 0 && len(re.prefix) == 0 {
-					// allowed for empty string match
 				} else {
 					break
 				}
@@ -350,7 +383,7 @@ func (re *Regexp) findBoundary(b []byte) (int, int) {
 		}
 
 		ctx := ir.CalculateContext(b, i)
-		state := re.applyContextToState(dfa, startState, ctx)
+		state := re.applyContextToState(dfa, startState, ctx, nil)
 		lastAcceptingEnd := -1
 		bestAbsolutePriority := 1<<30 - 1
 
@@ -358,7 +391,7 @@ func (re *Regexp) findBoundary(b []byte) (int, int) {
 			lastAcceptingEnd = i
 			bestAbsolutePriority = dfa.AcceptingPriority(state)
 			if dfa.IsBestMatch(state) {
-				return i, lastAcceptingEnd
+				return i, lastAcceptingEnd, bestAbsolutePriority
 			}
 		}
 
@@ -373,13 +406,11 @@ func (re *Regexp) findBoundary(b []byte) (int, int) {
 				}
 				cumulativeIncrement += int(increments[idx])
 
-				currState = re.applyContextToState(dfa, next, ir.CalculateContext(b, j+1))
+				currState = re.applyContextToState(dfa, next, ir.CalculateContext(b, j+1), nil)
 				if currState == ir.InvalidState {
 					break
 				}
 				if accepting[currState] {
-					// Absolute priority is the cumulative shift plus the normalized
-					// match priority of the current state.
 					priority := cumulativeIncrement + dfa.AcceptingPriority(currState)
 					if priority < bestAbsolutePriority {
 						bestAbsolutePriority = priority
@@ -396,17 +427,14 @@ func (re *Regexp) findBoundary(b []byte) (int, int) {
 		}
 
 		if lastAcceptingEnd != -1 {
-			// Found the leftmost match!
-			// (Because i increases, the first i that gives a match is the leftmost start).
-			// And for that i, lastAcceptingEnd is the best according to priority.
-			return i, lastAcceptingEnd
+			return i, lastAcceptingEnd, bestAbsolutePriority
 		}
 
 		if re.anchorStart {
 			break
 		}
 	}
-	return -1, -1
+	return -1, -1, -1
 }
 
 func (re *Regexp) FindStringSubmatchIndex(s string) []int {

@@ -226,7 +226,7 @@ func TestRegexp_FindSubmatchIndex(t *testing.T) {
 
 			// Phase 1: DFA Boundary check
 			b := []byte(tt.input)
-			start, end := re.match(b)
+			start, end, _ := re.match(b)
 			if want == nil {
 				if start >= 0 {
 					t.Errorf("  [Diagnostic] DFA mismatch: found match [%d, %d], but want no match", start, end)

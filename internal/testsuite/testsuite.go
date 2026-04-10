@@ -51,7 +51,7 @@ var (
 
 	// Compatibility reporting
 	EnableCompatibilityReport bool
-	registry                 CompatibilityRegistry
+	registry                  CompatibilityRegistry
 )
 
 type CompatibilityRegistry struct {
