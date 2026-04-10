@@ -80,12 +80,13 @@ type DFA struct {
 
 const (
 	// Virtual bytes for different anchor types.
-	VirtualBeginLine = 256 + iota
-	VirtualEndLine
-	VirtualBeginText
-	VirtualEndText
-	VirtualWordBoundary
-	VirtualNoWordBoundary
+	// Order MUST match gosyntax.EmptyOp bits for applyContextToState.
+	VirtualBeginLine = 256 + iota // bit 0 (1)
+	VirtualEndLine                // bit 1 (2)
+	VirtualBeginText              // bit 2 (4)
+	VirtualEndText                // bit 3 (8)
+	VirtualWordBoundary           // bit 4 (16)
+	VirtualNoWordBoundary         // bit 5 (32)
 	numVirtualBytes = 6
 )
 

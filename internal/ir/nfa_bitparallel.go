@@ -17,9 +17,6 @@ func nfaMatchBitParallel(prog *syntax.Prog, b []byte, start, end int, numSubexp 
 	curr := make([]thread, 0, numInst)
 	next := make([]thread, 0, numInst)
 
-	// In byte-oriented NFA, a thread state is (PC, utf8Node).
-	// For bit-parallelism to work with visited tracking, we'd need to map each trie node to a bit.
-	// Since this is a 2nd pass and numInst is small, we use a map for visited for simplicity.
 	type visitedKey struct {
 		pc   uint32
 		node *utf8Node
@@ -64,7 +61,6 @@ func nfaMatchBitParallel(prog *syntax.Prog, b []byte, start, end int, numSubexp 
 		case syntax.InstMatch:
 			*q = append(*q, thread{pc: pc, node: nil, regs: regs, priority: priority})
 		default:
-			// Rune instructions
 			var roots []*utf8Node
 			switch inst.Op {
 			case syntax.InstRune, syntax.InstRune1:
@@ -76,7 +72,7 @@ func nfaMatchBitParallel(prog *syntax.Prog, b []byte, start, end int, numSubexp 
 				roots = anyRuneTrie(false)
 			}
 			for _, root := range roots {
-				*q = append(*q, thread{pc: pc, node: root, regs: regs, priority: priority})
+				addThread(q, pc, root, regs, priority, pos, context)
 			}
 		}
 	}
@@ -89,70 +85,70 @@ func nfaMatchBitParallel(prog *syntax.Prog, b []byte, start, end int, numSubexp 
 	ctx := CalculateContext(b, start)
 	addThread(&curr, uint32(prog.Start), nil, initialRegs, 0, start, ctx)
 
-	var bestMatchRegs []int
+	bestMatchRegs := make([]int, numRegs)
+	for i := range bestMatchRegs {
+		bestMatchRegs[i] = -1
+	}
 	bestPriority := 1 << 30
+	foundMatch := false
 
 	for pos := start; ; {
-		if len(curr) == 0 {
+		if len(curr) == 0 && len(next) == 0 {
 			break
 		}
 
-		// Check for matches at current position
 		for _, t := range curr {
 			if prog.Inst[t.pc].Op == syntax.InstMatch && t.node == nil {
-				if t.priority < bestPriority {
+				if t.priority <= bestPriority {
 					bestPriority = t.priority
-					bestMatchRegs = make([]int, numRegs)
+					foundMatch = true
 					copy(bestMatchRegs, t.regs)
 					if len(bestMatchRegs) >= 2 {
 						bestMatchRegs[0] = start
 						bestMatchRegs[1] = pos
 					}
-				} else if t.priority == bestPriority {
-					// For same priority, prefer later match (greedy).
-					if len(bestMatchRegs) >= 2 {
-						bestMatchRegs[1] = pos
-					}
 				}
-				break
 			}
 		}
 
-		if pos < len(b) {
-			c := b[pos]
-			nextCtx := CalculateContext(b, pos+1)
-			clear(visited)
-
-			for _, t := range curr {
-				if t.node == nil {
-					continue
-				}
-
-				inst := prog.Inst[t.pc]
-				fold := inst.Op == syntax.InstRune && (inst.Arg&uint32(syntax.FoldCase) != 0)
-				match := matchesByte
-				if fold {
-					match = matchesByteFold
-				}
-
-				if match(t.node, c) {
-					if t.node.next == nil {
-						addThread(&next, inst.Out, nil, t.regs, t.priority, pos+1, nextCtx)
-					} else {
-						for _, child := range t.node.next {
-							addThread(&next, t.pc, child, t.regs, t.priority, pos+1, nextCtx)
-						}
-					}
-				}
-			}
-			pos++
-		} else {
+		if pos >= end {
 			break
 		}
+
+		c := b[pos]
+		nextCtx := CalculateContext(b, pos+1)
+		clear(visited)
+
+		for _, t := range curr {
+			if t.node == nil {
+				continue
+			}
+
+			inst := prog.Inst[t.pc]
+			fold := inst.Op == syntax.InstRune && (inst.Arg&uint32(syntax.FoldCase) != 0)
+			match := matchesByte
+			if fold {
+				match = matchesByteFold
+			}
+
+			if match(t.node, c) {
+				if t.node.next == nil {
+					addThread(&next, inst.Out, nil, t.regs, t.priority, pos+1, nextCtx)
+				} else {
+					for _, child := range t.node.next {
+						addThread(&next, t.pc, child, t.regs, t.priority, pos+1, nextCtx)
+					}
+				}
+			}
+		}
+		pos++
 
 		curr, next = next, curr
 		next = next[:0]
 	}
 
+	if !foundMatch {
+		return nil
+	}
 	return bestMatchRegs
 }

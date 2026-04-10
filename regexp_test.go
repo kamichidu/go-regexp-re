@@ -5,6 +5,8 @@ import (
 	goregexp "regexp"
 	"strings"
 	"testing"
+
+	"github.com/kamichidu/go-regexp-re/internal/ir"
 )
 
 var goldenPatterns []struct {
@@ -159,6 +161,10 @@ func TestRegexp_FindSubmatchIndex(t *testing.T) {
 		{`(a){0}`, ""},
 		{`(a)?b`, "b"},
 		{`(([^xyz]*)(d))`, "abcd"},
+		{`a(b*)b`, "abbb"},
+		{`(a|ab)b`, "abb"},
+		{`((a)(b)c)`, "abc"},
+		{`(a*)(a*)`, "aaa"},
 	}
 
 	for _, tt := range tests {
@@ -171,8 +177,30 @@ func TestRegexp_FindSubmatchIndex(t *testing.T) {
 			stdRe := goregexp.MustCompile(tt.pattern)
 			want := stdRe.FindSubmatchIndex([]byte(tt.input))
 
-			if !reflect.DeepEqual(got, want) {
-				t.Errorf("FindStringSubmatchIndex(%q, %q) = %v; want %v", tt.pattern, tt.input, got, want)
+			if reflect.DeepEqual(got, want) {
+				return // Success
+			}
+
+			// Failure diagnostics
+			t.Errorf("FindStringSubmatchIndex(%q, %q) = %v; want %v", tt.pattern, tt.input, got, want)
+
+			// Phase 1: DFA Boundary check
+			b := []byte(tt.input)
+			start, end := re.match(b)
+			if want == nil {
+				if start >= 0 {
+					t.Errorf("  [Diagnostic] DFA mismatch: found match [%d, %d], but want no match", start, end)
+				}
+			} else {
+				if start < 0 {
+					t.Errorf("  [Diagnostic] DFA mismatch: no match found, but want match at [%d, %d]", want[0], want[1])
+				} else if start != want[0] || end != want[1] {
+					t.Errorf("  [Diagnostic] DFA mismatch: got [%d, %d], want [%d, %d]", start, end, want[0], want[1])
+				} else {
+					// DFA was correct, so it must be NFA
+					regs := ir.NFAMatch(re.prog, re.dfa.TrieRoots(), b, start, end, re.numSubexp)
+					t.Errorf("  [Diagnostic] NFA mismatch: got %v, want %v (with correct boundaries [%d, %d])", regs, want, start, end)
+				}
 			}
 		})
 	}
@@ -184,5 +212,24 @@ func TestRegexp_FindStringSubmatch(t *testing.T) {
 	want := []string{"abc", "a", "b"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("FindStringSubmatch = %v; want %v", got, want)
+	}
+}
+
+func TestHTTP11Anchor(t *testing.T) {
+	re := MustCompile(`HTTP/1.1$`)
+	tests := []struct {
+		input string
+		want  bool
+	}{
+		{"HTTP/1.1", true},
+		{"GET / HTTP/1.1", true},
+		{"HTTP/1.1\n", true}, // $ matches before newline
+		{"HTTP/1.1 ", false},
+		{"HTTP/1.0", false},
+	}
+	for _, tt := range tests {
+		if got := re.MatchString(tt.input); got != tt.want {
+			t.Errorf("MatchString(%q) = %v; want %v", tt.input, got, tt.want)
+		}
 	}
 }

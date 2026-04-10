@@ -10,14 +10,19 @@ func CalculateContext(b []byte, i int) syntax.EmptyOp {
 	if i == 0 {
 		r1 = -1
 	} else {
-		r1 = rune(b[i-1]) // Simplified, only works for ASCII. For UTF-8, would need proper decoding.
+		r1 = rune(b[i-1])
 	}
 	if i == len(b) {
 		r2 = -1
 	} else {
 		r2 = rune(b[i])
 	}
-	return CalculateContextBetween(r1, r2)
+	op := CalculateContextBetween(r1, r2)
+	if r2 == '\n' && i == len(b)-1 {
+		// Go's $ (EmptyEndText) also matches before a newline at the end of text.
+		op |= syntax.EmptyEndText
+	}
+	return op
 }
 
 // CalculateContextBetween returns the empty-width assertions that are true

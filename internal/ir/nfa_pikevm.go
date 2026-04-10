@@ -13,9 +13,6 @@ func nfaMatchPikeVM(prog *syntax.Prog, trieRoots [][]*utf8Node, b []byte, start,
 	next := make([]thread, 0, 64)
 
 	maxPC := len(prog.Inst)
-	// Track visited per PC and per trie node ID.
-	// Since nodeID is small and node matching is infrequent compared to epsilon steps,
-	// we use a simplified visited check.
 	visited := make([]int, maxPC)
 	visitedGen := 1
 
@@ -52,9 +49,6 @@ func nfaMatchPikeVM(prog *syntax.Prog, trieRoots [][]*utf8Node, b []byte, start,
 			case syntax.InstNop:
 				stack = append(stack, workItem{inst.Out, nil, item.regs, item.priority})
 			case syntax.InstAlt, syntax.InstAltMatch:
-				// Arg is lower priority than Out.
-				// We use a binary tree scheme to maintain stable priorities.
-				// Out is left child (2*p), Arg is right child (2*p + 1).
 				stack = append(stack, workItem{inst.Arg, nil, item.regs, item.priority*2 + 1})
 				stack = append(stack, workItem{inst.Out, nil, item.regs, item.priority * 2})
 			case syntax.InstCapture:
@@ -89,87 +83,73 @@ func nfaMatchPikeVM(prog *syntax.Prog, trieRoots [][]*utf8Node, b []byte, start,
 	}
 
 	ctx := CalculateContext(b, start)
-	// Initial thread has priority 0.
-	// Note: if there were multiple entry points, they would have different priorities.
 	addThread(&curr, uint32(prog.Start), nil, initialRegs, 0, start, ctx)
 
-	var bestMatchRegs []int
+	bestMatchRegs := make([]int, numRegs)
+	for i := range bestMatchRegs {
+		bestMatchRegs[i] = -1
+	}
 	bestPriority := 1 << 30
+	foundMatch := false
 
 	for pos := start; ; {
-		if len(curr) == 0 {
+		if len(curr) == 0 && len(next) == 0 {
 			break
 		}
 
 		// Check for matches at current position
 		for _, t := range curr {
 			if prog.Inst[t.pc].Op == syntax.InstMatch && t.node == nil {
-				if t.priority < bestPriority {
+				if t.priority <= bestPriority {
 					bestPriority = t.priority
-					bestMatchRegs = make([]int, numRegs)
+					foundMatch = true
 					copy(bestMatchRegs, t.regs)
 					if len(bestMatchRegs) >= 2 {
 						bestMatchRegs[0] = start
 						bestMatchRegs[1] = pos
 					}
-				} else if t.priority == bestPriority {
-					// For same priority, prefer later match (greedy).
-					if len(bestMatchRegs) >= 2 {
-						bestMatchRegs[1] = pos
-					}
 				}
-
-				if t.priority == 0 {
-					// Highest priority path reached a match.
-					// Can we stop? Only if it can't match MORE.
-					// But we don't know that. However, for non-greedy alternatives,
-					// the 'exit' branch would have been priority 0 and we should stop.
-					// For greedy loops, the 'match more' branch would have been priority 0
-					// and we must continue.
-				}
-				break
 			}
 		}
 
-		if pos < len(b) {
-			c := b[pos]
-			nextCtx := CalculateContext(b, pos+1)
-			visitedGen++
-
-			for _, t := range curr {
-				if t.node == nil {
-					continue
-				}
-
-				inst := prog.Inst[t.pc]
-				fold := inst.Op == syntax.InstRune && (inst.Arg&uint32(syntax.FoldCase) != 0)
-				match := matchesByte
-				if fold {
-					match = matchesByteFold
-				}
-
-				if match(t.node, c) {
-					if t.node.next == nil {
-						// Character completed, maintains priority
-						addThread(&next, inst.Out, nil, t.regs, t.priority, pos+1, nextCtx)
-					} else {
-						// Continue through the trie
-						for _, child := range t.node.next {
-							addThread(&next, t.pc, child, t.regs, t.priority, pos+1, nextCtx)
-						}
-					}
-				}
-			}
-			pos++
-		} else {
+		if pos >= end {
 			break
 		}
+
+		c := b[pos]
+		nextCtx := CalculateContext(b, pos+1)
+		visitedGen++
+
+		for _, t := range curr {
+			if t.node == nil {
+				continue
+			}
+
+			inst := prog.Inst[t.pc]
+			fold := inst.Op == syntax.InstRune && (inst.Arg&uint32(syntax.FoldCase) != 0)
+			match := matchesByte
+			if fold {
+				match = matchesByteFold
+			}
+
+			if match(t.node, c) {
+				if t.node.next == nil {
+					addThread(&next, inst.Out, nil, t.regs, t.priority, pos+1, nextCtx)
+				} else {
+					for _, child := range t.node.next {
+						addThread(&next, t.pc, child, t.regs, t.priority, pos+1, nextCtx)
+					}
+				}
+			}
+		}
+		pos++
 
 		curr, next = next, curr
 		next = next[:0]
 	}
 
-	if bestMatchRegs != nil {
+	if !foundMatch {
+		return nil
 	}
 	return bestMatchRegs
 }
