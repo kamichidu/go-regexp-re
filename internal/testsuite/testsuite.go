@@ -174,7 +174,7 @@ func RunCompatibility(t *testing.T) {
 	for _, engine := range engines {
 		t.Run(engine.Name, func(t *testing.T) {
 			for _, tt := range findTests {
-				t.Run(fmt.Sprintf("pat=%s/text=%s", tt.pat, tt.text), func(t *testing.T) {
+				t.Run(fmt.Sprintf("pat=%q/text=%q", tt.pat, tt.text), func(t *testing.T) {
 					if strings.Contains(tt.pat, "\uFFFD") || strings.Contains(tt.pat, "\\x{fffd}") {
 						t.Skip("skipping U+FFFD test")
 					}
@@ -188,7 +188,7 @@ func RunCompatibility(t *testing.T) {
 					wantMatch := len(tt.matches) > 0
 					gotMatch := re.MatchString(tt.text)
 					if gotMatch != wantMatch {
-						t.Errorf("MatchString(%q, %q) = %v; want %v", tt.pat, tt.text, gotMatch, wantMatch)
+						t.Errorf("MatchString() failed\npattern: %q\ninput:   %q\ngot:     %v\nwant:    %v", tt.pat, tt.text, gotMatch, wantMatch)
 					}
 				})
 			}
@@ -220,7 +220,7 @@ func RunSubmatchCompatibility(t *testing.T) {
 		}
 		t.Run(engine.Name, func(t *testing.T) {
 			for _, tt := range findTests {
-				t.Run(fmt.Sprintf("pat=%s/text=%s", tt.pat, tt.text), func(t *testing.T) {
+				t.Run(fmt.Sprintf("pat=%q/text=%q", tt.pat, tt.text), func(t *testing.T) {
 					if strings.Contains(tt.pat, "\uFFFD") || strings.Contains(tt.pat, "\\x{fffd}") {
 						t.Skip("skipping U+FFFD test")
 					}
@@ -241,7 +241,7 @@ func RunSubmatchCompatibility(t *testing.T) {
 					got := re.FindStringSubmatchIndex(tt.text)
 
 					if !reflect.DeepEqual(got, want) {
-						t.Errorf("FindStringSubmatchIndex(%q, %q) = %v; want %v", tt.pat, tt.text, got, want)
+						t.Errorf("FindStringSubmatchIndex() failed\npattern: %q\ninput:   %q\ngot:     %v\nwant:    %v", tt.pat, tt.text, got, want)
 					}
 				})
 			}
@@ -266,19 +266,21 @@ func RunFowler(t *testing.T) {
 						if strings.Contains(tt.Pattern, `\(`) || strings.Contains(tt.Pattern, `\)`) {
 							continue
 						}
-
-						re, err := engine.Compile(tt.Pattern)
-						if err != nil {
-							continue
-						}
-						if !tt.ShouldCompile {
-							t.Errorf("line %d: %#q should not compile", tt.Line, tt.Pattern)
-							continue
-						}
-						match := re.MatchString(tt.Text)
-						if match != tt.ShouldMatch {
-							t.Errorf("line %d: %#q.Match(%#q) = %v, want %v", tt.Line, tt.Pattern, tt.Text, match, tt.ShouldMatch)
-						}
+						t.Run(fmt.Sprintf("pat=%q/text=%q", tt.Pattern, tt.Text), func(t *testing.T) {
+							re, err := engine.Compile(tt.Pattern)
+							if err != nil {
+								t.Skipf("failed to compile %q: %v", tt.Pattern, err)
+								return
+							}
+							if !tt.ShouldCompile {
+								t.Errorf("line %d: should not compile\npattern: %q", tt.Line, tt.Pattern)
+								return
+							}
+							match := re.MatchString(tt.Text)
+							if match != tt.ShouldMatch {
+								t.Errorf("line %d: MatchString() failed\npattern: %q\ninput:   %q\ngot:     %v\nwant:    %v", tt.Line, tt.Pattern, tt.Text, match, tt.ShouldMatch)
+							}
+						})
 					}
 				})
 			}
@@ -301,7 +303,7 @@ func RunRE2Search(t *testing.T) {
 				for _, tt := range group.Tests {
 					gotMatch := re.MatchString(tt.Text)
 					if gotMatch != tt.Matches {
-						t.Errorf("line %d: %q.Match(%q) = %v, want %v", group.Line, group.Regexp, tt.Text, gotMatch, tt.Matches)
+						t.Errorf("line %d: MatchString() failed\npattern: %q\ninput:   %q\ngot:     %v\nwant:    %v", group.Line, group.Regexp, tt.Text, gotMatch, tt.Matches)
 					}
 				}
 			}
