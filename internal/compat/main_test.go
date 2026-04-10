@@ -33,5 +33,6 @@ func TestMain(m *testing.M) {
 		},
 	})
 
+	testsuite.EnableCompatibilityReport = true
 	testsuite.Main(m)
 }

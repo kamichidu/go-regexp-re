@@ -13,8 +13,10 @@ import (
 	"reflect"
 	goregexp "regexp"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -46,7 +48,111 @@ var (
 	httpLogs    string
 
 	initialized bool
+
+	// Compatibility reporting
+	EnableCompatibilityReport bool
+	registry                 CompatibilityRegistry
 )
+
+type CompatibilityRegistry struct {
+	mu       sync.Mutex
+	total    int
+	passed   int
+	failed   int            // Match mismatch
+	incompat map[string]int // Error message -> count
+}
+
+func (r *CompatibilityRegistry) record(engineName string, err error, passed bool) {
+	if engineName == "GoRegexp" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.total++
+	if err != nil {
+		if r.incompat == nil {
+			r.incompat = make(map[string]int)
+		}
+		msg := err.Error()
+		// Clean up error message for aggregation
+		if strings.Contains(msg, "stack overflow") {
+			msg = "stack overflow"
+		} else if strings.Contains(msg, "pattern too large or ambiguous") {
+			msg = "pattern too large or ambiguous (state explosion)"
+		}
+		r.incompat[msg]++
+		return
+	}
+
+	if passed {
+		r.passed++
+	} else {
+		r.failed++
+	}
+}
+
+func (r *CompatibilityRegistry) Report() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.total == 0 {
+		return
+	}
+
+	fmt.Printf("\n--- Compatibility Report ---\n")
+	fmt.Printf("Total Tests: %d\n", r.total)
+	fmt.Printf("Passed:      %d (%.1f%%)\n", r.passed, float64(r.passed)/float64(r.total)*100)
+	fmt.Printf("Failed:      %d (Mismatch)\n", r.failed)
+
+	if len(r.incompat) > 0 {
+		fmt.Printf("Incompatible (Compile Error): %d\n", r.total-r.passed-r.failed)
+
+		// Known vs Unexpected
+		knownErrors := []string{
+			"backref",
+			"POSIX",
+			"invalid repeat size", // Usually very large {n,m} that we might not want to support if it explodes
+		}
+
+		type entry struct {
+			msg   string
+			count int
+		}
+		var known, unexpected []entry
+		for msg, count := range r.incompat {
+			isKnown := false
+			for _, k := range knownErrors {
+				if strings.Contains(strings.ToLower(msg), strings.ToLower(k)) {
+					isKnown = true
+					break
+				}
+			}
+			if isKnown {
+				known = append(known, entry{msg, count})
+			} else {
+				unexpected = append(unexpected, entry{msg, count})
+			}
+		}
+
+		sort.Slice(known, func(i, j int) bool { return known[i].count > known[j].count })
+		sort.Slice(unexpected, func(i, j int) bool { return unexpected[i].count > unexpected[j].count })
+
+		if len(known) > 0 {
+			fmt.Printf("  [Known Incompatibilities]\n")
+			for _, e := range known {
+				fmt.Printf("    - %s: %d\n", e.msg, e.count)
+			}
+		}
+		if len(unexpected) > 0 {
+			fmt.Printf("  [Unexpected Incompatibilities]\n")
+			for _, e := range unexpected {
+				fmt.Printf("    - %s: %d\n", e.msg, e.count)
+			}
+		}
+	}
+	fmt.Printf("----------------------------\n\n")
+}
 
 // Register registers a regex engine for the test suite.
 func Register(engine Engine) {
@@ -163,7 +269,11 @@ func parsePostalCodes(csvData string) []string {
 // Main is the entry point for testing.M.
 func Main(m *testing.M) {
 	initialize()
-	os.Exit(m.Run())
+	code := m.Run()
+	if EnableCompatibilityReport {
+		registry.Report()
+	}
+	os.Exit(code)
 }
 
 // RunCompatibility runs find_test.go compatibility tests for all registered engines.
@@ -181,13 +291,20 @@ func RunCompatibility(t *testing.T) {
 
 					re, err := engine.Compile(tt.pat)
 					if err != nil {
+						if EnableCompatibilityReport {
+							registry.record(engine.Name, err, false)
+						}
 						t.Skipf("failed to compile %q: %v", tt.pat, err)
 						return
 					}
 
 					wantMatch := len(tt.matches) > 0
 					gotMatch := re.MatchString(tt.text)
-					if gotMatch != wantMatch {
+					passed := gotMatch == wantMatch
+					if EnableCompatibilityReport {
+						registry.record(engine.Name, nil, passed)
+					}
+					if !passed {
 						t.Errorf("MatchString() failed\npattern: %q\ninput:   %q\ngot:     %v\nwant:    %v", tt.pat, tt.text, gotMatch, wantMatch)
 					}
 				})
@@ -227,6 +344,9 @@ func RunSubmatchCompatibility(t *testing.T) {
 
 					re, err := engine.Compile(tt.pat)
 					if err != nil {
+						if EnableCompatibilityReport {
+							registry.record(engine.Name, err, false)
+						}
 						t.Skipf("failed to compile %q: %v", tt.pat, err)
 						return
 					}
@@ -239,8 +359,12 @@ func RunSubmatchCompatibility(t *testing.T) {
 
 					want := refRe.FindStringSubmatchIndex(tt.text)
 					got := re.FindStringSubmatchIndex(tt.text)
+					passed := reflect.DeepEqual(got, want)
+					if EnableCompatibilityReport {
+						registry.record(engine.Name, nil, passed)
+					}
 
-					if !reflect.DeepEqual(got, want) {
+					if !passed {
 						t.Errorf("FindStringSubmatchIndex() failed\npattern: %q\ninput:   %q\ngot:     %v\nwant:    %v", tt.pat, tt.text, got, want)
 					}
 				})
@@ -269,15 +393,25 @@ func RunFowler(t *testing.T) {
 						t.Run(fmt.Sprintf("pat=%q/text=%q", tt.Pattern, tt.Text), func(t *testing.T) {
 							re, err := engine.Compile(tt.Pattern)
 							if err != nil {
+								if EnableCompatibilityReport {
+									registry.record(engine.Name, err, false)
+								}
 								t.Skipf("failed to compile %q: %v", tt.Pattern, err)
 								return
 							}
 							if !tt.ShouldCompile {
+								if EnableCompatibilityReport {
+									registry.record(engine.Name, fmt.Errorf("should not compile"), false)
+								}
 								t.Errorf("line %d: should not compile\npattern: %q", tt.Line, tt.Pattern)
 								return
 							}
 							match := re.MatchString(tt.Text)
-							if match != tt.ShouldMatch {
+							passed := match == tt.ShouldMatch
+							if EnableCompatibilityReport {
+								registry.record(engine.Name, nil, passed)
+							}
+							if !passed {
 								t.Errorf("line %d: MatchString() failed\npattern: %q\ninput:   %q\ngot:     %v\nwant:    %v", tt.Line, tt.Pattern, tt.Text, match, tt.ShouldMatch)
 							}
 						})
@@ -302,7 +436,11 @@ func RunRE2Search(t *testing.T) {
 				}
 				for _, tt := range group.Tests {
 					gotMatch := re.MatchString(tt.Text)
-					if gotMatch != tt.Matches {
+					passed := gotMatch == tt.Matches
+					if EnableCompatibilityReport {
+						registry.record(engine.Name, nil, passed)
+					}
+					if !passed {
 						t.Errorf("line %d: MatchString() failed\npattern: %q\ninput:   %q\ngot:     %v\nwant:    %v", group.Line, group.Regexp, tt.Text, gotMatch, tt.Matches)
 					}
 				}
