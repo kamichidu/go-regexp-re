@@ -74,9 +74,11 @@ To ensure system stability and prevent Out-Of-Memory (OOM) conditions during com
   2. Transition targets (mapped to equivalent groups).
   3. Priority increments for every possible byte.
 
-### 2.13 Syntax-Level Trie Optimization
-- **Prefix Merging**: Before NFA/DFA compilation, the syntax tree (especially `OpAlternate`) MUST be optimized to merge common prefixes into a Trie-like structure (e.g., `apple|applejuice` -> `apple(?:juice|)`).
-- **Semantics Preservation**: This optimization MUST preserve the original leftmost-first priority order of the sub-expressions.
+### 2.13 Syntax-Level Factoring & Trie Optimization
+Before NFA/DFA compilation, the syntax tree (especially `OpAlternate`) MUST be optimized to reduce redundancy and mitigate state explosion.
+- **Prefix/Suffix Factoring**: Identical AST nodes at the beginning or end of alternative branches MUST be extracted (e.g., `a*c|b*c` -> `(?:a*|b*)c`). This unifies the exploration of common trailing or leading structures.
+- **Literal Trie Optimization**: Sequences of literals within an alternation MUST be merged into a Trie-like structure (e.g., `apple|applejuice` -> `apple(?:juice|)`).
+- **Semantics Preservation**: These optimizations MUST preserve the original leftmost-first priority order, ensuring compatibility with Go's standard library matching behavior.
 
 ## 3. Feature Selection Policy (Performance over Features)
 

@@ -56,18 +56,18 @@ func Optimize(re *Regexp) *Regexp {
 	}
 
 	if re.Op == OpAlternate {
-		return optimizeAlternate(re)
+		re = factorAlternate(re)
 	}
 
 	return re
 }
 
-func optimizeAlternate(re *Regexp) *Regexp {
+func factorAlternate(re *Regexp) *Regexp {
 	if len(re.Sub) <= 1 {
 		return re
 	}
 
-	// 1. Flatten nested alternates and collect subs
+	// 1. Flatten nested alternates
 	var subs []*Regexp
 	for _, sub := range re.Sub {
 		if sub.Op == OpAlternate {
@@ -77,101 +77,187 @@ func optimizeAlternate(re *Regexp) *Regexp {
 		}
 	}
 
-	// 2. Group by prefix while preserving first-appearance order
-	type group struct {
-		prefix []rune
-		flags  Flags
-		items  []*Regexp
-	}
-	type entry struct {
-		isGroup bool
-		group   *group
-		other   *Regexp
-	}
+	// 2. Prefix factoring
+	subs = factorPrefix(subs)
 
-	var entries []*entry
-	groupMap := make(map[string]*group)
+	// 3. Suffix factoring
+	subs = factorSuffix(subs)
 
-	for _, sub := range subs {
-		prefix, flags, rest := getLeadingLiteral(sub)
-		if len(prefix) > 0 {
-			key := string(prefix) + "|" + string(rune(flags))
-			if g, ok := groupMap[key]; ok {
-				g.items = append(g.items, rest)
-			} else {
-				g := &group{prefix, flags, []*Regexp{rest}}
-				groupMap[key] = g
-				entries = append(entries, &entry{isGroup: true, group: g})
-			}
-		} else {
-			entries = append(entries, &entry{other: sub})
-		}
+	if len(subs) == 1 {
+		return subs[0]
 	}
-
-	// 3. Rebuild alternate with merged prefixes
-	var newSubs []*Regexp
-	for _, e := range entries {
-		if e.isGroup {
-			if len(e.group.items) == 1 {
-				newSubs = append(newSubs, concatPrefix(e.group.prefix, e.group.flags, e.group.items[0]))
-			} else {
-				alt := &Regexp{Op: OpAlternate}
-				alt.Sub = e.group.items
-				newSubs = append(newSubs, concatPrefix(e.group.prefix, e.group.flags, Optimize(alt)))
-			}
-		} else {
-			newSubs = append(newSubs, e.other)
-		}
-	}
-
-	if len(newSubs) == 1 {
-		return newSubs[0]
-	}
-	re.Sub = newSubs
+	re.Sub = subs
 	return re
 }
 
-func getLeadingLiteral(re *Regexp) (prefix []rune, flags Flags, rest *Regexp) {
-	switch re.Op {
-	case OpLiteral:
-		if len(re.Rune) > 1 {
-			return re.Rune[:1], re.Flags, &Regexp{Op: OpLiteral, Rune: re.Rune[1:], Flags: re.Flags}
-		}
-		return re.Rune, re.Flags, &Regexp{Op: OpEmptyMatch}
-	case OpConcat:
-		if len(re.Sub) > 0 {
-			p, f, r := getLeadingLiteral(re.Sub[0])
-			if len(p) > 0 {
-				var newRest *Regexp
-				if r.Op == OpEmptyMatch {
-					if len(re.Sub) == 2 {
-						newRest = re.Sub[1]
-					} else {
-						newRest = &Regexp{Op: OpConcat, Sub: re.Sub[1:]}
-					}
-				} else {
-					newRest = &Regexp{Op: OpConcat}
-					newRest.Sub = append([]*Regexp{r}, re.Sub[1:]...)
-				}
-				return p, f, newRest
+func factorPrefix(subs []*Regexp) []*Regexp {
+	if len(subs) <= 1 {
+		return subs
+	}
+
+	type group struct {
+		head  *Regexp
+		items []*Regexp
+	}
+	var groups []*group
+	hasCommon := false
+	for _, sub := range subs {
+		head, rest := splitHead(sub)
+		found := false
+		for _, g := range groups {
+			if head.Op != OpEmptyMatch && equal(g.head, head) {
+				g.items = append(g.items, rest)
+				found = true
+				hasCommon = true
+				break
 			}
 		}
+		if !found {
+			groups = append(groups, &group{head, []*Regexp{rest}})
+		}
 	}
-	return nil, 0, nil
+
+	if !hasCommon {
+		return subs
+	}
+
+	var newSubs []*Regexp
+	for _, g := range groups {
+		if len(g.items) == 1 {
+			newSubs = append(newSubs, combineHead(g.head, g.items[0]))
+		} else {
+			alt := &Regexp{Op: OpAlternate, Sub: g.items}
+			newSubs = append(newSubs, combineHead(g.head, Optimize(alt)))
+		}
+	}
+	return newSubs
 }
 
-func concatPrefix(prefix []rune, flags Flags, rest *Regexp) *Regexp {
-	pre := &Regexp{Op: OpLiteral, Rune: prefix, Flags: flags}
+func factorSuffix(subs []*Regexp) []*Regexp {
+	if len(subs) <= 1 {
+		return subs
+	}
+
+	type group struct {
+		tail  *Regexp
+		items []*Regexp
+	}
+	var groups []*group
+	hasCommon := false
+	for _, sub := range subs {
+		rest, tail := splitTail(sub)
+		found := false
+		for _, g := range groups {
+			if tail.Op != OpEmptyMatch && equal(g.tail, tail) {
+				g.items = append(g.items, rest)
+				found = true
+				hasCommon = true
+				break
+			}
+		}
+		if !found {
+			groups = append(groups, &group{tail, []*Regexp{rest}})
+		}
+	}
+
+	if !hasCommon {
+		return subs
+	}
+
+	var newSubs []*Regexp
+	for _, g := range groups {
+		if len(g.items) == 1 {
+			newSubs = append(newSubs, combineTail(g.items[0], g.tail))
+		} else {
+			alt := &Regexp{Op: OpAlternate, Sub: g.items}
+			newSubs = append(newSubs, combineTail(Optimize(alt), g.tail))
+		}
+	}
+	return newSubs
+}
+
+func splitHead(re *Regexp) (head, rest *Regexp) {
+	if re.Op == OpConcat && len(re.Sub) > 0 {
+		head = re.Sub[0]
+		if len(re.Sub) == 2 {
+			rest = re.Sub[1]
+		} else {
+			rest = &Regexp{Op: OpConcat, Sub: re.Sub[1:]}
+		}
+		return head, rest
+	}
+	return re, &Regexp{Op: OpEmptyMatch}
+}
+
+func combineHead(head, rest *Regexp) *Regexp {
 	if rest.Op == OpEmptyMatch {
-		return pre
+		return head
 	}
 	res := &Regexp{Op: OpConcat}
 	if rest.Op == OpConcat {
-		res.Sub = append([]*Regexp{pre}, rest.Sub...)
+		res.Sub = append([]*Regexp{head}, rest.Sub...)
 	} else {
-		res.Sub = []*Regexp{pre, rest}
+		res.Sub = []*Regexp{head, rest}
 	}
 	return res
+}
+
+func splitTail(re *Regexp) (rest, tail *Regexp) {
+	if re.Op == OpConcat && len(re.Sub) > 0 {
+		tail = re.Sub[len(re.Sub)-1]
+		if len(re.Sub) == 2 {
+			rest = re.Sub[0]
+		} else {
+			rest = &Regexp{Op: OpConcat, Sub: re.Sub[:len(re.Sub)-1]}
+		}
+		return rest, tail
+	}
+	return re, &Regexp{Op: OpEmptyMatch}
+}
+
+func combineTail(rest, tail *Regexp) *Regexp {
+	if rest.Op == OpEmptyMatch {
+		return tail
+	}
+	res := &Regexp{Op: OpConcat}
+	if rest.Op == OpConcat {
+		res.Sub = append(rest.Sub, tail)
+	} else {
+		res.Sub = []*Regexp{rest, tail}
+	}
+	return res
+}
+
+func equal(a, b *Regexp) bool {
+	if a == b {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	if a.Op != b.Op || a.Flags != b.Flags {
+		return false
+	}
+	if len(a.Rune) != len(b.Rune) {
+		return false
+	}
+	for i := range a.Rune {
+		if a.Rune[i] != b.Rune[i] {
+			return false
+		}
+	}
+	if a.Min != b.Min || a.Max != b.Max || a.Cap != b.Cap || a.Name != b.Name {
+		return false
+	}
+	if len(a.Sub) != len(b.Sub) {
+		return false
+	}
+	for i := range a.Sub {
+		if !equal(a.Sub[i], b.Sub[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 // Compile compiles the regular expression to a program.
