@@ -1,6 +1,7 @@
 package ir
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"unsafe"
@@ -62,24 +63,24 @@ const (
 )
 
 func NewDFA(prog *syntax.Prog) (*DFA, error) {
-	return NewDFAForSearch(prog)
+	return NewDFAForSearch(context.Background(), prog)
 }
 
-func NewDFAForSearch(prog *syntax.Prog) (*DFA, error) {
+func NewDFAForSearch(ctx context.Context, prog *syntax.Prog) (*DFA, error) {
 	d := &DFA{
 		numSubexp: prog.NumCap / 2,
 	}
-	if err := d.build(prog, true); err != nil {
+	if err := d.build(ctx, prog, true); err != nil {
 		return nil, fmt.Errorf("failed to build DFA: %w", err)
 	}
 	return d, nil
 }
 
-func NewDFAForMatch(prog *syntax.Prog) (*DFA, error) {
+func NewDFAForMatch(ctx context.Context, prog *syntax.Prog) (*DFA, error) {
 	d := &DFA{
 		numSubexp: prog.NumCap / 2,
 	}
-	if err := d.build(prog, false); err != nil {
+	if err := d.build(ctx, prog, false); err != nil {
 		return nil, fmt.Errorf("failed to build DFA: %w", err)
 	}
 	return d, nil
@@ -145,7 +146,13 @@ func (d *DFA) AcceptingPriority(s StateID) int {
 	return d.stateMatchPriority[s]
 }
 
-func (d *DFA) build(prog *syntax.Prog, withSearch bool) error {
+var ErrStateExplosion = fmt.Errorf("regexp: pattern too large or ambiguous")
+
+// MaxDFAMemory is the maximum estimated memory for the DFA transition table.
+// Default is 64MB, which corresponds to roughly 32,000 states.
+const MaxDFAMemory = 64 * 1024 * 1024
+
+func (d *DFA) build(ctx context.Context, prog *syntax.Prog, withSearch bool) error {
 	cache := newUTF8NodeCache()
 
 	d.hasAnchors = false
@@ -185,7 +192,18 @@ func (d *DFA) build(prog *syntax.Prog, withSearch bool) error {
 	nfaToDfa := make(map[string]StateID)
 	dfaToNfa := make([][]nfaPath, 0)
 
+	var errBuild error
 	addDfaState := func(closure []nfaPath) StateID {
+		if errBuild != nil {
+			return InvalidState
+		}
+
+		// Estimate memory: (numStates+1) * stride * 8 bytes (transitions + increments)
+		if (d.numStates+1)*d.stride*8 > MaxDFAMemory {
+			errBuild = ErrStateExplosion
+			return InvalidState
+		}
+
 		// Priority Normalization: Keep relative order to avoid state explosion
 		// during search/matching when priorities increment.
 		if len(closure) > 0 {
@@ -261,8 +279,18 @@ func (d *DFA) build(prog *syntax.Prog, withSearch bool) error {
 	initialPaths := []nfaPath{{nfaState: nfaState{ID: uint32(prog.Start)}}}
 	defaultStartClosure := epsilonClosure(initialPaths, prog, 0)
 	d.startState = addDfaState(defaultStartClosure)
+	if errBuild != nil {
+		return errBuild
+	}
 
 	for i := 0; i < len(dfaToNfa); i++ {
+		if i%100 == 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+		}
 		currentClosure := dfaToNfa[i]
 		currentDfaID := StateID(i)
 
@@ -361,6 +389,9 @@ func (d *DFA) build(prog *syntax.Prog, withSearch bool) error {
 				}
 
 				nextDfaID := addDfaState(nextClosure)
+				if errBuild != nil {
+					return errBuild
+				}
 				idx := int(currentDfaID)*d.stride + b
 				d.transitions[idx] = nextDfaID
 				d.transPriorityIncrement[idx] = int32(minP)
@@ -406,6 +437,9 @@ func (d *DFA) build(prog *syntax.Prog, withSearch bool) error {
 					}
 
 					nextDfaID := addDfaState(nextClosure)
+					if errBuild != nil {
+						return errBuild
+					}
 					idx := int(currentDfaID)*d.stride + 256 + bit
 					d.transitions[idx] = nextDfaID
 					d.transPriorityIncrement[idx] = int32(minP)

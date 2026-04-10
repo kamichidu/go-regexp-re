@@ -2,6 +2,7 @@ package regexp
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"unsafe"
 
@@ -28,6 +29,11 @@ type Regexp struct {
 // Compile parses a regular expression and returns, if successful,
 // a Regexp object that can be used to match against text.
 func Compile(expr string) (*Regexp, error) {
+	return CompileContext(context.Background(), expr)
+}
+
+// CompileContext is like Compile but accepts a context to allow cancellation.
+func CompileContext(ctx context.Context, expr string) (*Regexp, error) {
 	re, err := syntax.Parse(expr, syntax.Perl)
 	if err != nil {
 		return nil, err
@@ -59,11 +65,11 @@ func Compile(expr string) (*Regexp, error) {
 	if err != nil {
 		return nil, err
 	}
-	dfa, err := ir.NewDFAForSearch(prog)
+	dfa, err := ir.NewDFAForSearch(ctx, prog)
 	if err != nil {
 		return nil, err
 	}
-	dfaMatch, err := ir.NewDFAForMatch(prog)
+	dfaMatch, err := ir.NewDFAForMatch(ctx, prog)
 	if err != nil {
 		return nil, err
 	}

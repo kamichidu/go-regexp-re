@@ -61,14 +61,20 @@ To achieve Go-compatible leftmost-first matching without state explosion:
 ### 2.10 Early Exit Optimization (IsBestMatch)
 - **Deterministic Finality**: If a DFA state contains a match whose priority is equal to the minimum priority of all active NFA paths in that state (`IsBestMatch == true`), the engine MUST stop scanning for the current start position. This guarantees that no better priority match can be found by continuing, providing a critical performance boost for non-greedy patterns and early-exit scenarios.
 
-### 2.11 DFA Minimization (Moore's Algorithm)
+### 2.11 State Explosion Protection (Resource Limits)
+To ensure system stability and prevent Out-Of-Memory (OOM) conditions during compilation, the engine enforces a strict resource limit on DFA construction.
+- **Memory-Based Threshold**: The DFA transition table is limited to a maximum estimated size (default 64MB, approx. 32,000 states).
+- **Graceful Failure**: If a pattern is too complex or highly ambiguous (leading to state explosion), `Compile` MUST NOT crash the process. Instead, it MUST return the error `regexp: pattern too large or ambiguous`.
+- **Cancellable Compilation**: Compilation supports `context.Context` via `CompileContext` to allow callers to abort resource-intensive builds.
+
+### 2.12 DFA Minimization (Moore's Algorithm)
 - **Equivalence-Based Merging**: After the initial transition table construction, the DFA MUST be minimized using Moore's algorithm (Partition Refinement).
 - **Equivalence Criteria**: Two states are equivalent if and only if they share identical:
   1. Acceptance properties (Accepting, MatchPriority, IsBestMatch).
   2. Transition targets (mapped to equivalent groups).
   3. Priority increments for every possible byte.
 
-### 2.12 Syntax-Level Trie Optimization
+### 2.13 Syntax-Level Trie Optimization
 - **Prefix Merging**: Before NFA/DFA compilation, the syntax tree (especially `OpAlternate`) MUST be optimized to merge common prefixes into a Trie-like structure (e.g., `apple|applejuice` -> `apple(?:juice|)`).
 - **Semantics Preservation**: This optimization MUST preserve the original leftmost-first priority order of the sub-expressions.
 

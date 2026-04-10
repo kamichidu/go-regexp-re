@@ -1,10 +1,13 @@
 package regexp
 
 import (
+	"context"
 	"reflect"
 	goregexp "regexp"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kamichidu/go-regexp-re/internal/ir"
 )
@@ -270,6 +273,67 @@ func TestHTTP11Anchor(t *testing.T) {
 	for _, tt := range tests {
 		if got := re.MatchString(tt.input); got != tt.want {
 			t.Errorf("MatchString(%q) = %v; want %v", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestStateExplosion(t *testing.T) {
+	pattern := "(a|b)*c|(a|ab)*c"
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	type result struct {
+		re  *Regexp
+		err error
+	}
+	resChan := make(chan result, 1)
+
+	// Limit to 512MB of heap allocation
+	const memLimit = 512 * 1024 * 1024
+
+	go func() {
+		re, err := CompileContext(ctx, pattern)
+		resChan <- result{re, err}
+	}()
+
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case res := <-resChan:
+			if res.err != nil {
+				if strings.Contains(res.err.Error(), "pattern too large or ambiguous") {
+					t.Logf("Expected state explosion error caught: %v", res.err)
+					return
+				}
+				if ctx.Err() != nil {
+					t.Fatalf("Compile(%q) aborted due to resource limits: %v", pattern, res.err)
+				}
+				t.Fatalf("Compile(%q) failed: %v", pattern, res.err)
+			}
+			re := res.re
+			numStates := re.dfa.TotalStates()
+			t.Logf("Pattern %q has %d DFA states", pattern, numStates)
+			if numStates > 100 {
+				t.Errorf("Pattern %q has too many DFA states: %d", pattern, numStates)
+			}
+			numMatchStates := re.dfaMatch.TotalStates()
+			t.Logf("Pattern %q has %d DFA Match states", pattern, numMatchStates)
+			if numMatchStates > 100 {
+				t.Errorf("Pattern %q has too many DFA Match states: %d", pattern, numMatchStates)
+			}
+			return
+		case <-ticker.C:
+			var m runtime.MemStats
+			runtime.ReadMemStats(&m)
+			if m.Alloc > memLimit {
+				cancel()
+				// Wait for goroutine to return
+				res := <-resChan
+				t.Fatalf("Memory limit exceeded (%d bytes), aborted compilation: %v", m.Alloc, res.err)
+			}
 		}
 	}
 }
