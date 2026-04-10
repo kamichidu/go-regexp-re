@@ -3,8 +3,6 @@ package ir
 import (
 	"fmt"
 	"sort"
-	"strconv"
-	"strings"
 
 	"github.com/kamichidu/go-regexp-re/syntax"
 )
@@ -204,26 +202,24 @@ func (d *DFA) build(prog *syntax.Prog, withSearch bool) error {
 		}
 
 		// Canonical sorting for state key
-		sorted := make([]nfaPath, len(closure))
-		copy(sorted, closure)
-		sort.Slice(sorted, func(i, j int) bool {
-			if sorted[i].ID != sorted[j].ID {
-				return sorted[i].ID < sorted[j].ID
+		sort.Slice(closure, func(i, j int) bool {
+			if closure[i].ID != closure[j].ID {
+				return closure[i].ID < closure[j].ID
 			}
-			if sorted[i].node != sorted[j].node {
+			if closure[i].node != closure[j].node {
 				idI, idJ := 0, 0
-				if sorted[i].node != nil {
-					idI = sorted[i].node.ID
+				if closure[i].node != nil {
+					idI = closure[i].node.ID
 				}
-				if sorted[j].node != nil {
-					idJ = sorted[j].node.ID
+				if closure[j].node != nil {
+					idJ = closure[j].node.ID
 				}
 				return idI < idJ
 			}
-			return sorted[i].Priority < sorted[j].Priority
+			return closure[i].Priority < closure[j].Priority
 		})
 
-		key := serializeSet(sorted)
+		key := serializeSet(closure)
 		if id, ok := nfaToDfa[key]; ok {
 			return id
 		}
@@ -439,6 +435,7 @@ func epsilonClosure(paths []nfaPath, prog *syntax.Prog, context syntax.EmptyOp) 
 		node *utf8Node
 	}
 	best := make(map[key]nfaPath)
+	minMatchPriority := 1<<30 - 1
 
 	type pathWithHistory struct {
 		p       nfaPath
@@ -455,6 +452,8 @@ func epsilonClosure(paths []nfaPath, prog *syntax.Prog, context syntax.EmptyOp) 
 		stack = stack[:len(stack)-1]
 		p := ph.p
 
+		// Static Priority Resolution:
+		// If we already have a path to this instruction with better priority, skip.
 		k := key{p.ID, p.node}
 		if existing, ok := best[k]; ok {
 			if p.Priority >= existing.Priority {
@@ -465,6 +464,14 @@ func epsilonClosure(paths []nfaPath, prog *syntax.Prog, context syntax.EmptyOp) 
 
 		if p.node == nil {
 			inst := prog.Inst[p.ID]
+
+			if inst.Op == syntax.InstMatch {
+				// Record the best priority that results in a match at the current position.
+				if p.Priority < minMatchPriority {
+					minMatchPriority = p.Priority
+				}
+				continue
+			}
 
 			push := func(nextID uint32, nextPriority int) {
 				for _, id := range ph.history {
@@ -486,6 +493,7 @@ func epsilonClosure(paths []nfaPath, prog *syntax.Prog, context syntax.EmptyOp) 
 
 			switch inst.Op {
 			case syntax.InstAlt, syntax.InstAltMatch:
+				// First branch (Out) has higher priority in standard Go regexp
 				push(inst.Arg, p.Priority+1)
 				push(inst.Out, p.Priority)
 			case syntax.InstCapture:
@@ -496,16 +504,23 @@ func epsilonClosure(paths []nfaPath, prog *syntax.Prog, context syntax.EmptyOp) 
 				if syntax.EmptyOp(inst.Arg)&context == syntax.EmptyOp(inst.Arg) {
 					push(inst.Out, p.Priority)
 				}
-			case syntax.InstMatch:
-				continue
 			}
 		}
 	}
 
 	var result []nfaPath
 	for _, p := range best {
-		result = append(result, p)
+		// Static Priority Resolution:
+		// Any path with priority worse than the best match found in this closure is useless
+		// for finding the leftmost-first match. Because priorities are assigned at branches
+		// and never decrease along a path, a higher priority match (lower numerical value)
+		// will always shadow any matches from lower priority branches starting at the same position.
+		if p.Priority <= minMatchPriority {
+			result = append(result, p)
+		}
 	}
+
+	// Canonical sort for state key
 	sort.Slice(result, func(i, j int) bool {
 		if result[i].Priority != result[j].Priority {
 			return result[i].Priority < result[j].Priority
@@ -527,18 +542,34 @@ func epsilonClosure(paths []nfaPath, prog *syntax.Prog, context syntax.EmptyOp) 
 }
 
 func serializeSet(set []nfaPath) string {
-	var sb strings.Builder
-	for i, s := range set {
-		if i > 0 {
-			sb.WriteByte(',')
-		}
-		sb.WriteString(strconv.FormatUint(uint64(s.ID), 10))
-		if s.node != nil {
-			sb.WriteByte(':')
-			sb.WriteString(strconv.Itoa(s.node.ID))
-		}
-		sb.WriteByte('@')
-		sb.WriteString(strconv.Itoa(s.Priority))
+	if len(set) == 0 {
+		return ""
 	}
-	return sb.String()
+	// Binary serialization for speed and memory efficiency.
+	// Each path is 12 bytes: ID(4), nodeID(4), Priority(4).
+	buf := make([]byte, len(set)*12)
+	for i, s := range set {
+		off := i * 12
+		id := s.ID
+		buf[off] = byte(id)
+		buf[off+1] = byte(id >> 8)
+		buf[off+2] = byte(id >> 16)
+		buf[off+3] = byte(id >> 24)
+
+		var nodeID uint32
+		if s.node != nil {
+			nodeID = uint32(s.node.ID)
+		}
+		buf[off+4] = byte(nodeID)
+		buf[off+5] = byte(nodeID >> 8)
+		buf[off+6] = byte(nodeID >> 16)
+		buf[off+7] = byte(nodeID >> 24)
+
+		p := uint32(s.Priority)
+		buf[off+8] = byte(p)
+		buf[off+9] = byte(p >> 8)
+		buf[off+10] = byte(p >> 16)
+		buf[off+11] = byte(p >> 24)
+	}
+	return string(buf)
 }
