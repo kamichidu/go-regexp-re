@@ -34,7 +34,7 @@ To maximize throughput, the engine MUST select the most efficient execution loop
 The engine adopts a **Hybrid 2-Pass** architecture as its final and definitive strategy for submatch extraction. This deliberate architectural choice prioritizes system stability, code maintainability, and memory predictability over the theoretical (but practically risky) ideal of 1-pass submatch resolution (TDFA).
 
 - **Intentional Exclusion of TDFA**: Full TDFA implementation is explicitly excluded from the project roadmap. The risk of catastrophic state explosion and the extreme implementation complexity required to mitigate it are deemed incompatible with the project's goal of a lean, high-performance engine.
-- **Phase 1: DFA Boundary Scan**: A specialized DFA identifies the overall match boundaries `[start, end]`. By keeping DFA states free of internal submatch tags, we guarantee $O(n)$ execution and constant memory overhead. **NFA MUST NOT be used for the initial search.**
+- **Phase 1: DFA Boundary Scan**: A specialized DFA identifies the overall match boundaries `[start, end]`. By keeping DFA states free of internal submatch tags, we guarantee $O(n)$ execution and constant memory overhead. **DFA MUST respect NFA-style priorities (leftmost-first) to determine the correct boundary `[start, end]` compatible with the standard library.**
 - **Phase 2: Targeted Byte-Oriented NFA Rescan**: An optimized NFA rescans ONLY within the identified `[start, end]` bounds.
   - **Eliminate Rune Decoding**: The NFA rescan MUST operate directly on raw bytes. Use of `utf8.DecodeRune` or any rune-based logic is strictly prohibited to maintain consistency with the DFA's performance characteristics.
   - **Bit-Parallel Optimization**: If the NFA has 64 or fewer states, the engine MUST use a bit-parallel implementation.
@@ -51,6 +51,14 @@ To maximize throughput for patterns with literal prefixes, the engine MUST utili
 
 ### 2.8 Pure Go (No CGO)
 - **Zero Overhead**: CGO is strictly prohibited to avoid context-switching overhead and maintain Go's native portability and build simplicity.
+
+### 2.9 Priority Normalization & Absolute Tracking
+To achieve Go-compatible leftmost-first matching without state explosion:
+- **Priority Normalization**: During DFA construction, NFA path priorities within each state MUST be normalized (subtracting the minimum priority) to prevent infinite state generation in patterns like `a*?`.
+- **Absolute Priority Tracking**: The values subtracted during normalization MUST be stored as `transPriorityIncrement` on transitions. The execution engine MUST accumulate these increments to reconstruct the **Absolute Priority** of any match, ensuring the correct leftmost-first alternative is selected across different match lengths.
+
+### 2.10 Early Exit Optimization (IsBestMatch)
+- **Deterministic Finality**: If a DFA state contains a match whose priority is equal to the minimum priority of all active NFA paths in that state (`IsBestMatch == true`), the engine MUST stop scanning for the current start position. This guarantees that no better priority match can be found by continuing, providing a critical performance boost for non-greedy patterns and early-exit scenarios.
 
 ## 3. Feature Selection Policy (Performance over Features)
 
@@ -74,6 +82,7 @@ To maximize throughput for patterns with literal prefixes, the engine MUST utili
 - **Performance-First Benchmarking**: Any change must be validated against the standard `regexp` package. Significant throughput regressions are unacceptable.
 - **Scalability for Large Pattern Sets**: Ensure the engine maintains $O(n)$ performance even when merging tens of thousands of patterns.
 - **SIMD Utilization**: Proactively use fast-skipping logic (e.g., `bytes.Index`) for pattern prefix matching before engaging the DFA. Aim for 5x to 100x higher throughput.
+- **Submatch Isolation Diagnostics**: When submatch discrepancies occur, use isolation tests to determine if the error lies in Phase 1 (DFA boundary detection) or Phase 2 (NFA submatch extraction). DFA boundaries MUST strictly match the standard library's leftmost-first boundaries.
 
 ## 5. Coding Conventions
 - **Explicit Aliasing for Standard Regexp Packages**: To avoid confusion between this engine and the standard library, always use explicit aliases when importing Go's standard `regexp` packages:

@@ -165,8 +165,19 @@ func (re *Regexp) FindSubmatchIndex(b []byte) []int {
 	regs := ir.NFAMatch(re.prog, re.dfa.TrieRoots(), b, start, end, re.numSubexp)
 	if regs == nil {
 		// This should not happen if re.match found a match, but as a fallback:
-		return []int{start, end}
+		res := make([]int, (re.numSubexp+1)*2)
+		for i := range res {
+			res[i] = -1
+		}
+		res[0], res[1] = start, end
+		return res
 	}
+
+	// Explicitly set the overall match boundaries from the DFA result.
+	// This ensures Phase 1 (DFA) determines the match range, and
+	// Phase 2 (NFA) identifies submatches within that range.
+	regs[0] = start
+	regs[1] = end
 	return regs
 }
 
@@ -303,11 +314,12 @@ func (re *Regexp) doMatchExtended(b []byte) (int, int) {
 func (re *Regexp) findBoundary(b []byte) (int, int) {
 	dfa := re.dfaMatch
 	trans := dfa.Transitions()
+	increments := dfa.PriorityIncrements()
 	stride := dfa.Stride()
 	accepting := dfa.Accepting()
 	startState := dfa.StartState()
 
-	// Find the leftmost-longest match.
+	// Find the leftmost-best match.
 	for i := 0; i <= len(b); i++ {
 		// Optimization: Prefix skip
 		if len(re.prefix) > 0 {
@@ -333,23 +345,45 @@ func (re *Regexp) findBoundary(b []byte) (int, int) {
 		ctx := ir.CalculateContext(b, i)
 		state := re.applyContextToState(dfa, startState, ctx)
 		lastAcceptingEnd := -1
+		bestAbsolutePriority := 1<<30 - 1
+
 		if state != ir.InvalidState && accepting[state] {
 			lastAcceptingEnd = i
+			bestAbsolutePriority = dfa.AcceptingPriority(state)
+			if dfa.IsBestMatch(state) {
+				return i, lastAcceptingEnd
+			}
 		}
 
 		if state != ir.InvalidState {
 			currState := state
+			cumulativeIncrement := 0
 			for j := i; j < len(b); j++ {
-				next := trans[int(currState)*stride+int(b[j])]
+				idx := int(currState)*stride + int(b[j])
+				next := trans[idx]
 				if next == ir.InvalidState {
 					break
 				}
+				cumulativeIncrement += int(increments[idx])
+
 				currState = re.applyContextToState(dfa, next, ir.CalculateContext(b, j+1))
 				if currState == ir.InvalidState {
 					break
 				}
 				if accepting[currState] {
-					lastAcceptingEnd = j + 1
+					// Absolute priority is the cumulative shift plus the normalized
+					// match priority of the current state.
+					priority := cumulativeIncrement + dfa.AcceptingPriority(currState)
+					if priority < bestAbsolutePriority {
+						bestAbsolutePriority = priority
+						lastAcceptingEnd = j + 1
+					} else if priority == bestAbsolutePriority {
+						lastAcceptingEnd = j + 1
+					}
+
+					if dfa.IsBestMatch(currState) {
+						break
+					}
 				}
 			}
 		}
@@ -357,7 +391,7 @@ func (re *Regexp) findBoundary(b []byte) (int, int) {
 		if lastAcceptingEnd != -1 {
 			// Found the leftmost match!
 			// (Because i increases, the first i that gives a match is the leftmost start).
-			// And for that i, lastAcceptingEnd is the longest.
+			// And for that i, lastAcceptingEnd is the best according to priority.
 			return i, lastAcceptingEnd
 		}
 

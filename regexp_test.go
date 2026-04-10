@@ -143,28 +143,68 @@ func TestRegexp_FindSubmatchIndex(t *testing.T) {
 		pattern string
 		input   string
 	}{
+		// Basic matching and capturing
 		{`a`, "a"},
 		{`(a)`, "a"},
 		{`(a)b`, "ab"},
 		{`a(b)c`, "abc"},
 		{`(a)(b)c`, "abc"},
-		{`(a*)b`, "aaab"},
+		{`((a)(b)c)`, "abc"},
 		{`(a|b)c`, "ac"},
 		{`(a|b)c`, "bc"},
+
+		// Quantifiers (Greedy vs Lazy)
+		{`(a*)b`, "aaab"},
+		{"a*", "aaaa"},
+		{"a*?", "aaaa"},
+		{"a+", "aaaa"},
+		{"a+?", "aaaa"},
+		{"a*a", "aaaa"},
+		{"a*?a", "aaaa"},
+		{"a*(a)", "aaaa"},
+		{"a*?(a)", "aaaa"},
+		{"(a*)", "aaaa"},
+		{"(a*?)", "aaaa"},
+		{"(a+)", "aaaa"},
+		{"(a+?)", "aaaa"},
+		{"(a*)a", "aaaa"},
+		{"(a*?)a", "aaaa"},
+
+		// Alternation and Priorities
+		{"a|aa", "aaaa"},
+		{"aa|a", "aaaa"},
+		{"(a)|(aa)", "aaaa"},
+		{"(aa)|(a)", "aaaa"},
+		{`(a|ab)`, "ab"},
+		{`(a|ab)b`, "abb"},
+		{`a*(|(b))c*`, "aacc"},
+
+		// Anchors and Boundaries
 		{`^(a)b$`, "ab"},
 		{`^(a)b`, "ab"},
 		{`(a)b$`, "ab"},
 		{`\b(abc)\b`, "abc"},
+		{"$^", ""},
+		{"$", "abcde"},
+
+		// Dot and Repetition
+		{"(.*)a", "baaa"},
+		{"(.*?)a", "baaa"},
+		{"(.*)", "abcd"},
+		{"(.*?)", "abcd"},
+		{"(.*).*", "ab"},
+
+		// Nested and Multiple Groups
+		{`(([^xyz]*)(d))`, "abcd"},
+		{`(a*)(a*)`, "aaa"},
+		{"a(b*)", "abbaab"},
+		{`a(b*)b`, "abbb"},
+
+		// Zero-length / Optional matches
 		{`(|a)*`, "a"},
 		{`(|a)*`, ""},
-		{`(a|ab)`, "ab"},
 		{`(a){0}`, ""},
 		{`(a)?b`, "b"},
-		{`(([^xyz]*)(d))`, "abcd"},
-		{`a(b*)b`, "abbb"},
-		{`(a|ab)b`, "abb"},
-		{`((a)(b)c)`, "abc"},
-		{`(a*)(a*)`, "aaa"},
 	}
 
 	for _, tt := range tests {

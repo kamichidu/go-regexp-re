@@ -54,13 +54,14 @@ type nfaPath struct {
 
 // DFA represents a Deterministic Finite Automaton.
 type DFA struct {
-	transitions []StateID // Flattened table for better cache locality: table[state * stride + byte]
-	stride      int       // 256 or 257
-	numStates   int
-	startState  StateID
-	hasAnchors  bool
-	dfaToNfa    [][]nfaPath // List of NFA paths for each DFA state
-	numSubexp   int
+	transitions            []StateID // Flattened table for better cache locality: table[state * stride + byte]
+	transPriorityIncrement []int32   // Priority shift for each transition
+	stride                 int       // 256 or 257
+	numStates              int
+	startState             StateID
+	hasAnchors             bool
+	dfaToNfa               [][]nfaPath // List of NFA paths for each DFA state
+	numSubexp              int
 
 	// Cached trie roots for each instruction
 	trieRoots [][]*utf8Node
@@ -76,18 +77,19 @@ type DFA struct {
 	// Accepting info
 	accepting          []bool
 	stateMatchPriority []int
+	stateIsBestMatch   []bool
 }
 
 const (
 	// Virtual bytes for different anchor types.
 	// Order MUST match gosyntax.EmptyOp bits for applyContextToState.
-	VirtualBeginLine = 256 + iota // bit 0 (1)
-	VirtualEndLine                // bit 1 (2)
-	VirtualBeginText              // bit 2 (4)
-	VirtualEndText                // bit 3 (8)
-	VirtualWordBoundary           // bit 4 (16)
-	VirtualNoWordBoundary         // bit 5 (32)
-	numVirtualBytes = 6
+	VirtualBeginLine      = 256 + iota // bit 0 (1)
+	VirtualEndLine                     // bit 1 (2)
+	VirtualBeginText                   // bit 2 (4)
+	VirtualEndText                     // bit 3 (8)
+	VirtualWordBoundary                // bit 4 (16)
+	VirtualNoWordBoundary              // bit 5 (32)
+	numVirtualBytes       = 6
 )
 
 func NewDFA(prog *syntax.Prog) (*DFA, error) {
@@ -125,6 +127,10 @@ func (d *DFA) Transitions() []StateID {
 	return d.transitions
 }
 
+func (d *DFA) PriorityIncrements() []int32 {
+	return d.transPriorityIncrement
+}
+
 func (d *DFA) Stride() int {
 	return d.stride
 }
@@ -138,6 +144,13 @@ func (d *DFA) IsAccepting(s StateID) bool {
 		return false
 	}
 	return d.accepting[s]
+}
+
+func (d *DFA) IsBestMatch(s StateID) bool {
+	if s < 0 || int(s) >= d.numStates {
+		return false
+	}
+	return d.stateIsBestMatch[s]
 }
 
 func (d *DFA) StartState() StateID {
@@ -276,6 +289,22 @@ func (d *DFA) build(prog *syntax.Prog, withSearch bool) error {
 	allTransInfo := make([]transInfo, 0)
 
 	addDfaState := func(closure []nfaPath) StateID {
+		// Priority Normalization: Keep relative order to avoid state explosion
+		// during search/matching when priorities increment.
+		if len(closure) > 0 {
+			minP := closure[0].Priority
+			for i := 1; i < len(closure); i++ {
+				if closure[i].Priority < minP {
+					minP = closure[i].Priority
+				}
+			}
+			if minP > 0 {
+				for i := range closure {
+					closure[i].Priority -= minP
+				}
+			}
+		}
+
 		sorted := make([]nfaPath, len(closure))
 		copy(sorted, closure)
 		sort.Slice(sorted, func(i, j int) bool {
@@ -297,7 +326,11 @@ func (d *DFA) build(prog *syntax.Prog, withSearch bool) error {
 
 		isAccepting := false
 		matchPriority := 1<<30 - 1
+		minPathPriority := 1<<30 - 1
 		for _, s := range closure {
+			if s.Priority < minPathPriority {
+				minPathPriority = s.Priority
+			}
 			if prog.Inst[s.ID].Op == syntax.InstMatch && s.node == nil {
 				isAccepting = true
 				if s.Priority < matchPriority {
@@ -307,9 +340,13 @@ func (d *DFA) build(prog *syntax.Prog, withSearch bool) error {
 		}
 		d.accepting = append(d.accepting, isAccepting)
 		d.stateMatchPriority = append(d.stateMatchPriority, matchPriority)
+		// If the best matching NFA path has the same priority as the best active path,
+		// then we've found the best possible match for this start position.
+		d.stateIsBestMatch = append(d.stateIsBestMatch, isAccepting && (matchPriority == minPathPriority))
 
 		for i := 0; i < d.stride; i++ {
 			d.transitions = append(d.transitions, InvalidState)
+			d.transPriorityIncrement = append(d.transPriorityIncrement, 0)
 			allTransInfo = append(allTransInfo, transInfo{})
 		}
 		d.numStates++
@@ -433,9 +470,21 @@ func (d *DFA) build(prog *syntax.Prog, withSearch bool) error {
 
 			if foundMatch {
 				nextClosure, _ := epsilonClosure(nextPaths, prog, 0)
+				// Calculate normalization minP
+				minP := 0
+				if len(nextClosure) > 0 {
+					minP = nextClosure[0].Priority
+					for i := 1; i < len(nextClosure); i++ {
+						if nextClosure[i].Priority < minP {
+							minP = nextClosure[i].Priority
+						}
+					}
+				}
+
 				nextDfaID := addDfaState(nextClosure)
 				idx := int(currentDfaID)*d.stride + b
 				d.transitions[idx] = nextDfaID
+				d.transPriorityIncrement[idx] = int32(minP)
 
 				ti := transInfo{
 					sources: make([]int16, len(nextClosure)),
@@ -483,9 +532,22 @@ func (d *DFA) build(prog *syntax.Prog, withSearch bool) error {
 				}
 				nextClosure, _ := epsilonClosure(initialPaths, prog, op)
 				if serializeSet(nextClosure) != serializeSet(currentClosure) {
+					// Calculate normalization minP
+					minP := 0
+					if len(nextClosure) > 0 {
+						minP = nextClosure[0].Priority
+						for i := 1; i < len(nextClosure); i++ {
+							if nextClosure[i].Priority < minP {
+								minP = nextClosure[i].Priority
+							}
+						}
+					}
+
 					nextDfaID := addDfaState(nextClosure)
 					idx := int(currentDfaID)*d.stride + 256 + bit
 					d.transitions[idx] = nextDfaID
+					d.transPriorityIncrement[idx] = int32(minP)
+
 					ti := transInfo{
 						sources: make([]int16, len(nextClosure)),
 						tags:    make([][]TagOp, len(nextClosure)),
@@ -646,6 +708,8 @@ func serializeSet(set []nfaPath) string {
 			sb.WriteByte(':')
 			sb.WriteString(fmt.Sprintf("%p", s.node))
 		}
+		sb.WriteByte('@')
+		sb.WriteString(strconv.Itoa(s.Priority))
 	}
 	return sb.String()
 }
