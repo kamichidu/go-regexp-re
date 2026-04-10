@@ -44,6 +44,136 @@ func Simplify(re *Regexp) *Regexp {
 	return re.Simplify()
 }
 
+// Optimize returns an optimized version of the regular expression.
+// It merges common prefixes in alternations to reduce the number of DFA states.
+func Optimize(re *Regexp) *Regexp {
+	if re == nil {
+		return nil
+	}
+
+	for i, sub := range re.Sub {
+		re.Sub[i] = Optimize(sub)
+	}
+
+	if re.Op == OpAlternate {
+		return optimizeAlternate(re)
+	}
+
+	return re
+}
+
+func optimizeAlternate(re *Regexp) *Regexp {
+	if len(re.Sub) <= 1 {
+		return re
+	}
+
+	// 1. Flatten nested alternates and collect subs
+	var subs []*Regexp
+	for _, sub := range re.Sub {
+		if sub.Op == OpAlternate {
+			subs = append(subs, sub.Sub...)
+		} else {
+			subs = append(subs, sub)
+		}
+	}
+
+	// 2. Group by prefix while preserving first-appearance order
+	type group struct {
+		prefix []rune
+		flags  Flags
+		items  []*Regexp
+	}
+	type entry struct {
+		isGroup bool
+		group   *group
+		other   *Regexp
+	}
+
+	var entries []*entry
+	groupMap := make(map[string]*group)
+
+	for _, sub := range subs {
+		prefix, flags, rest := getLeadingLiteral(sub)
+		if len(prefix) > 0 {
+			key := string(prefix) + "|" + string(rune(flags))
+			if g, ok := groupMap[key]; ok {
+				g.items = append(g.items, rest)
+			} else {
+				g := &group{prefix, flags, []*Regexp{rest}}
+				groupMap[key] = g
+				entries = append(entries, &entry{isGroup: true, group: g})
+			}
+		} else {
+			entries = append(entries, &entry{other: sub})
+		}
+	}
+
+	// 3. Rebuild alternate with merged prefixes
+	var newSubs []*Regexp
+	for _, e := range entries {
+		if e.isGroup {
+			if len(e.group.items) == 1 {
+				newSubs = append(newSubs, concatPrefix(e.group.prefix, e.group.flags, e.group.items[0]))
+			} else {
+				alt := &Regexp{Op: OpAlternate}
+				alt.Sub = e.group.items
+				newSubs = append(newSubs, concatPrefix(e.group.prefix, e.group.flags, Optimize(alt)))
+			}
+		} else {
+			newSubs = append(newSubs, e.other)
+		}
+	}
+
+	if len(newSubs) == 1 {
+		return newSubs[0]
+	}
+	re.Sub = newSubs
+	return re
+}
+
+func getLeadingLiteral(re *Regexp) (prefix []rune, flags Flags, rest *Regexp) {
+	switch re.Op {
+	case OpLiteral:
+		if len(re.Rune) > 1 {
+			return re.Rune[:1], re.Flags, &Regexp{Op: OpLiteral, Rune: re.Rune[1:], Flags: re.Flags}
+		}
+		return re.Rune, re.Flags, &Regexp{Op: OpEmptyMatch}
+	case OpConcat:
+		if len(re.Sub) > 0 {
+			p, f, r := getLeadingLiteral(re.Sub[0])
+			if len(p) > 0 {
+				var newRest *Regexp
+				if r.Op == OpEmptyMatch {
+					if len(re.Sub) == 2 {
+						newRest = re.Sub[1]
+					} else {
+						newRest = &Regexp{Op: OpConcat, Sub: re.Sub[1:]}
+					}
+				} else {
+					newRest = &Regexp{Op: OpConcat}
+					newRest.Sub = append([]*Regexp{r}, re.Sub[1:]...)
+				}
+				return p, f, newRest
+			}
+		}
+	}
+	return nil, 0, nil
+}
+
+func concatPrefix(prefix []rune, flags Flags, rest *Regexp) *Regexp {
+	pre := &Regexp{Op: OpLiteral, Rune: prefix, Flags: flags}
+	if rest.Op == OpEmptyMatch {
+		return pre
+	}
+	res := &Regexp{Op: OpConcat}
+	if rest.Op == OpConcat {
+		res.Sub = append([]*Regexp{pre}, rest.Sub...)
+	} else {
+		res.Sub = []*Regexp{pre, rest}
+	}
+	return res
+}
+
 // Compile compiles the regular expression to a program.
 func Compile(re *Regexp) (*Prog, error) {
 	return gosyntax.Compile(re)

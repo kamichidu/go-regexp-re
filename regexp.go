@@ -52,6 +52,7 @@ func Compile(expr string) (*Regexp, error) {
 	}
 
 	re = syntax.Simplify(re)
+	re = syntax.Optimize(re)
 	prefixStr, complete := syntax.Prefix(re)
 
 	prog, err := syntax.Compile(re)
