@@ -3,6 +3,7 @@ package ir
 import (
 	"fmt"
 	"sort"
+	"unsafe"
 
 	"github.com/kamichidu/go-regexp-re/syntax"
 )
@@ -413,7 +414,120 @@ func (d *DFA) build(prog *syntax.Prog, withSearch bool) error {
 		}
 	}
 
+	d.minimize()
+
 	return nil
+}
+
+func (d *DFA) minimize() {
+	if d.numStates <= 1 {
+		return
+	}
+
+	// Moore's Algorithm (Partition Refinement)
+	// 1. Initial partition based on acceptance properties.
+	stateToGroup := make([]int32, d.numStates)
+	type groupSig struct {
+		acc       bool
+		prio      int
+		bestMatch bool
+	}
+	sigToGroup := make(map[groupSig]int32)
+	numGroups := int32(0)
+
+	for i := 0; i < d.numStates; i++ {
+		sig := groupSig{d.accepting[i], d.stateMatchPriority[i], d.stateIsBestMatch[i]}
+		g, ok := sigToGroup[sig]
+		if !ok {
+			g = numGroups
+			numGroups++
+			sigToGroup[sig] = g
+		}
+		stateToGroup[i] = g
+	}
+
+	// 2. Refine partition.
+	for {
+		type splitKey struct {
+			oldGroup int32
+			transSig string
+		}
+		newGroups := make(map[splitKey]int32)
+		nextStateToGroup := make([]int32, d.numStates)
+		nextNumGroups := int32(0)
+
+		for i := 0; i < d.numStates; i++ {
+			// Transition signature: (targetGroup, priorityIncrement) for each byte.
+			buf := make([]byte, d.stride*8)
+			for b := 0; b < d.stride; b++ {
+				idx := i*d.stride + b
+				target := d.transitions[idx]
+				inc := d.transPriorityIncrement[idx]
+
+				var targetGroup int32 = -1
+				if target != InvalidState {
+					targetGroup = stateToGroup[target]
+				}
+
+				off := b * 8
+				*(*int32)(unsafe.Pointer(&buf[off])) = targetGroup
+				*(*int32)(unsafe.Pointer(&buf[off+4])) = inc
+			}
+
+			key := splitKey{stateToGroup[i], string(buf)}
+			g, ok := newGroups[key]
+			if !ok {
+				g = nextNumGroups
+				nextNumGroups++
+				newGroups[key] = g
+			}
+			nextStateToGroup[i] = g
+		}
+
+		if nextNumGroups == numGroups {
+			break
+		}
+		stateToGroup = nextStateToGroup
+		numGroups = nextNumGroups
+	}
+
+	// 3. Rebuild DFA with minimal states.
+	groupToFirstState := make([]int, numGroups)
+	for i, g := range stateToGroup {
+		groupToFirstState[g] = i
+	}
+
+	newTransitions := make([]StateID, int(numGroups)*d.stride)
+	newIncrements := make([]int32, int(numGroups)*d.stride)
+	newAccepting := make([]bool, numGroups)
+	newPrio := make([]int, numGroups)
+	newBest := make([]bool, numGroups)
+
+	for g := int32(0); g < numGroups; g++ {
+		oldS := groupToFirstState[g]
+		newAccepting[g] = d.accepting[oldS]
+		newPrio[g] = d.stateMatchPriority[oldS]
+		newBest[g] = d.stateIsBestMatch[oldS]
+
+		for b := 0; b < d.stride; b++ {
+			oldIdx := oldS*d.stride + b
+			target := d.transitions[oldIdx]
+			if target != InvalidState {
+				newTransitions[int(g)*d.stride+b] = StateID(stateToGroup[target])
+			} else {
+				newTransitions[int(g)*d.stride+b] = InvalidState
+			}
+			newIncrements[int(g)*d.stride+b] = d.transPriorityIncrement[oldIdx]
+		}
+	}
+
+	d.transitions = newTransitions
+	d.transPriorityIncrement = newIncrements
+	d.accepting = newAccepting
+	d.stateMatchPriority = newPrio
+	d.stateIsBestMatch = newBest
+	d.numStates = int(numGroups)
+	d.startState = StateID(stateToGroup[d.startState])
 }
 
 func matchesByte(node *utf8Node, b byte) bool {

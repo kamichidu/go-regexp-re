@@ -52,13 +52,25 @@ To maximize throughput for patterns with literal prefixes, the engine MUST utili
 ### 2.8 Pure Go (No CGO)
 - **Zero Overhead**: CGO is strictly prohibited to avoid context-switching overhead and maintain Go's native portability and build simplicity.
 
-### 2.9 Priority Normalization & Absolute Tracking
+### 2.9 Priority Normalization & Static Priority Resolution
 To achieve Go-compatible leftmost-first matching without state explosion:
 - **Priority Normalization**: During DFA construction, NFA path priorities within each state MUST be normalized (subtracting the minimum priority) to prevent infinite state generation in patterns like `a*?`.
 - **Absolute Priority Tracking**: The values subtracted during normalization MUST be stored as `transPriorityIncrement` on transitions. The execution engine MUST accumulate these increments to reconstruct the **Absolute Priority** of any match, ensuring the correct leftmost-first alternative is selected across different match lengths.
+- **Static Priority Resolution (Pruning)**: During `epsilonClosure` (DFA state construction), any NFA path whose priority is numerically greater (lower priority) than a confirmed match at the same position MUST be pruned. This "shadowed path" removal is critical to preventing state explosion in complex alternations.
 
 ### 2.10 Early Exit Optimization (IsBestMatch)
 - **Deterministic Finality**: If a DFA state contains a match whose priority is equal to the minimum priority of all active NFA paths in that state (`IsBestMatch == true`), the engine MUST stop scanning for the current start position. This guarantees that no better priority match can be found by continuing, providing a critical performance boost for non-greedy patterns and early-exit scenarios.
+
+### 2.11 DFA Minimization (Moore's Algorithm)
+- **Equivalence-Based Merging**: After the initial transition table construction, the DFA MUST be minimized using Moore's algorithm (Partition Refinement).
+- **Equivalence Criteria**: Two states are equivalent if and only if they share identical:
+  1. Acceptance properties (Accepting, MatchPriority, IsBestMatch).
+  2. Transition targets (mapped to equivalent groups).
+  3. Priority increments for every possible byte.
+
+### 2.12 Syntax-Level Trie Optimization
+- **Prefix Merging**: Before NFA/DFA compilation, the syntax tree (especially `OpAlternate`) MUST be optimized to merge common prefixes into a Trie-like structure (e.g., `apple|applejuice` -> `apple(?:juice|)`).
+- **Semantics Preservation**: This optimization MUST preserve the original leftmost-first priority order of the sub-expressions.
 
 ## 3. Feature Selection Policy (Performance over Features)
 
