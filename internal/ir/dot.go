@@ -26,15 +26,6 @@ func ToDOT(d *DFA) string {
 			labels[0] += " (start)"
 		}
 
-		// Show NFA state IDs if available
-		if i < len(d.dfaToNfa) {
-			var nfaIDs []string
-			for idx, p := range d.dfaToNfa[i] {
-				nfaIDs = append(nfaIDs, fmt.Sprintf("%d:%d", idx, p.ID))
-			}
-			labels = append(labels, "NFA(idx:id): "+strings.Join(nfaIDs, ","))
-		}
-
 		// Show accepting priority
 		if d.IsAccepting(s) {
 			labels = append(labels, fmt.Sprintf("Priority: %d", d.AcceptingPriority(s)))
@@ -43,10 +34,9 @@ func ToDOT(d *DFA) string {
 		label := strings.Join(labels, "\n")
 		sb.WriteString(fmt.Sprintf("  %d [label=%q, shape=%s];\n", i, label, shape))
 
-		// Group transitions by (targetState, tagsMapping)
+		// Group transitions by targetState
 		type edgeKey struct {
 			target StateID
-			tags   string
 		}
 
 		type edgeInfo struct {
@@ -59,17 +49,7 @@ func ToDOT(d *DFA) string {
 		for b := 0; b < d.stride; b++ {
 			next := d.Next(s, b)
 			if next != InvalidState {
-				sources, tags := d.TransitionInfo(s, b)
-				var tParts []string
-				for k, src := range sources {
-					if len(tags[k]) > 0 {
-						tParts = append(tParts, fmt.Sprintf("%d>%d%s", src, k, formatTags(tags[k])))
-					} else {
-						tParts = append(tParts, fmt.Sprintf("%d>%d", src, k))
-					}
-				}
-				tStr := strings.Join(tParts, "|")
-				key := edgeKey{next, tStr}
+				key := edgeKey{next}
 				if _, ok := groupedEdges[key]; !ok {
 					groupedEdges[key] = &edgeInfo{}
 					keys = append(keys, key)
@@ -80,39 +60,18 @@ func ToDOT(d *DFA) string {
 
 		// Sort keys for deterministic output
 		sort.Slice(keys, func(i, j int) bool {
-			if keys[i].target != keys[j].target {
-				return keys[i].target < keys[j].target
-			}
-			return keys[i].tags < keys[j].tags
+			return keys[i].target < keys[j].target
 		})
 
 		for _, key := range keys {
 			info := groupedEdges[key]
 			edgeLabel := formatBytes(info.bytes)
-			if key.tags != "" {
-				edgeLabel += " / " + key.tags
-			}
 			sb.WriteString(fmt.Sprintf("  %d -> %d [label=%q];\n", i, key.target, edgeLabel))
 		}
 	}
 
 	sb.WriteString("}\n")
 	return sb.String()
-}
-
-func formatTags(tags []TagOp) string {
-	if len(tags) == 0 {
-		return ""
-	}
-	var res []string
-	for _, t := range tags {
-		after := ""
-		if t.After() {
-			after = "a"
-		}
-		res = append(res, fmt.Sprintf("%d%s", t.Index(), after))
-	}
-	return "{" + strings.Join(res, ",") + "}"
 }
 
 func formatBytes(bytes []int) string {

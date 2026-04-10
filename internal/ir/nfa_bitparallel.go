@@ -14,6 +14,7 @@ func nfaMatchBitParallel(prog *syntax.Prog, b []byte, start, end int, numSubexp 
 		return nil
 	}
 
+	cache := newUTF8NodeCache()
 	curr := make([]thread, 0, numInst)
 	next := make([]thread, 0, numInst)
 
@@ -65,11 +66,11 @@ func nfaMatchBitParallel(prog *syntax.Prog, b []byte, start, end int, numSubexp 
 			switch inst.Op {
 			case syntax.InstRune, syntax.InstRune1:
 				foldCase := inst.Op == syntax.InstRune && (inst.Arg&uint32(syntax.FoldCase) != 0)
-				roots = runeRangesToUTF8Trie(inst.Rune, foldCase)
+				roots = cache.runeRangesToUTF8Trie(inst.Rune, foldCase)
 			case syntax.InstRuneAny:
-				roots = anyRuneTrie(true)
+				roots = cache.anyRuneTrie(true)
 			case syntax.InstRuneAnyNotNL:
-				roots = anyRuneTrie(false)
+				roots = cache.anyRuneTrie(false)
 			}
 			for _, root := range roots {
 				addThread(q, pc, root, regs, priority, pos, context)
