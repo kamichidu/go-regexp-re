@@ -5,6 +5,10 @@ import (
 	"testing"
 )
 
+func BenchmarkStandardSuite(b *testing.B) {
+	testsuite.BenchmarkStandardSuite(b)
+}
+
 func BenchmarkLargeAlternation(b *testing.B) {
 	testsuite.BenchmarkLargeAlternation(b)
 }

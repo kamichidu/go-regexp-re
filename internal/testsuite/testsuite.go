@@ -309,6 +309,21 @@ func RunRE2Search(t *testing.T) {
 	}
 }
 
+func runOnEngines(b *testing.B, f func(b *testing.B, engine Engine)) {
+	if len(engines) == 0 {
+		b.Fatal("no engines registered")
+	}
+	for _, engine := range engines {
+		if len(engines) == 1 {
+			f(b, engine)
+		} else {
+			b.Run(engine.Name, func(b *testing.B) {
+				f(b, engine)
+			})
+		}
+	}
+}
+
 // BenchmarkStandardSuite benchmarks engines using re2-search.txt.
 func BenchmarkStandardSuite(b *testing.B) {
 	if re2SearchSet == nil {
@@ -332,9 +347,9 @@ func BenchmarkStandardSuite(b *testing.B) {
 		}
 	}
 
-	for _, engine := range engines {
+	runOnEngines(b, func(b *testing.B, engine Engine) {
 		for i, tc := range cases {
-			b.Run(fmt.Sprintf("%s/Case%d", engine.Name, i), func(b *testing.B) {
+			b.Run(fmt.Sprintf("Case%d", i), func(b *testing.B) {
 				re, err := engine.Compile(tc.Regexp)
 				if err != nil {
 					b.Skip()
@@ -346,29 +361,29 @@ func BenchmarkStandardSuite(b *testing.B) {
 				}
 			})
 		}
-	}
+	})
 }
 
 // BenchmarkLargeAlternation benchmarks engines with thousands of postal codes.
 func BenchmarkLargeAlternation(b *testing.B) {
 	initialize()
 	counts := []int{10, 100, 1000, 10000}
-	for _, count := range counts {
-		var patterns []string
-		if len(postalCodes) >= count {
-			patterns = postalCodes[:count]
-		} else {
-			// Fallback to generated if not enough or not loaded
-			patterns = make([]string, count)
-			for i := 0; i < count; i++ {
-				patterns[i] = fmt.Sprintf("%03d-%04d", i/10000, i%10000)
+	runOnEngines(b, func(b *testing.B, engine Engine) {
+		for _, count := range counts {
+			var patterns []string
+			if len(postalCodes) >= count {
+				patterns = postalCodes[:count]
+			} else {
+				// Fallback to generated if not enough or not loaded
+				patterns = make([]string, count)
+				for i := 0; i < count; i++ {
+					patterns[i] = fmt.Sprintf("%03d-%04d", i/10000, i%10000)
+				}
 			}
-		}
-		pattern := strings.Join(patterns, "|")
-		payload := fmt.Sprintf("My postal code is %s.", patterns[count-1])
+			pattern := strings.Join(patterns, "|")
+			payload := fmt.Sprintf("My postal code is %s.", patterns[count-1])
 
-		for _, engine := range engines {
-			b.Run(fmt.Sprintf("%s/Count=%d", engine.Name, count), func(b *testing.B) {
+			b.Run(fmt.Sprintf("Count=%d", count), func(b *testing.B) {
 				re, err := engine.Compile(pattern)
 				if err != nil {
 					b.Skip()
@@ -379,7 +394,7 @@ func BenchmarkLargeAlternation(b *testing.B) {
 				}
 			})
 		}
-	}
+	})
 }
 
 // BenchmarkLiteralScan benchmarks literal patterns with Sherlock.
@@ -394,22 +409,20 @@ func BenchmarkLiteralScan(b *testing.B) {
 		"The Adventure of the Speckled Band", // Long
 	}
 
-	for _, pattern := range patterns {
-		b.Run(fmt.Sprintf("pat=%s", pattern), func(b *testing.B) {
-			for _, engine := range engines {
-				b.Run(engine.Name, func(b *testing.B) {
-					re, err := engine.Compile(pattern)
-					if err != nil {
-						b.Skip()
-					}
-					b.ResetTimer()
-					for i := 0; i < b.N; i++ {
-						re.MatchString(sherlock)
-					}
-				})
-			}
-		})
-	}
+	runOnEngines(b, func(b *testing.B, engine Engine) {
+		for _, pattern := range patterns {
+			b.Run(fmt.Sprintf("pat=%s", pattern), func(b *testing.B) {
+				re, err := engine.Compile(pattern)
+				if err != nil {
+					b.Skip()
+				}
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					re.MatchString(sherlock)
+				}
+			})
+		}
+	})
 }
 
 // BenchmarkAnchors benchmarks anchor patterns with HTTP logs.
@@ -425,22 +438,20 @@ func BenchmarkAnchors(b *testing.B) {
 		"\\bGET\\b",  // Word boundary
 	}
 
-	for _, pattern := range patterns {
-		b.Run(fmt.Sprintf("pat=%s", pattern), func(b *testing.B) {
-			for _, engine := range engines {
-				b.Run(engine.Name, func(b *testing.B) {
-					re, err := engine.Compile(pattern)
-					if err != nil {
-						b.Skip()
-					}
-					b.ResetTimer()
-					for i := 0; i < b.N; i++ {
-						re.MatchString(httpLogs)
-					}
-				})
-			}
-		})
-	}
+	runOnEngines(b, func(b *testing.B, engine Engine) {
+		for _, pattern := range patterns {
+			b.Run(fmt.Sprintf("pat=%s", pattern), func(b *testing.B) {
+				re, err := engine.Compile(pattern)
+				if err != nil {
+					b.Skip()
+				}
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					re.MatchString(httpLogs)
+				}
+			})
+		}
+	})
 }
 
 // BenchmarkCapturing benchmarks capturing groups with Email/URL patterns.
@@ -457,22 +468,20 @@ func BenchmarkCapturing(b *testing.B) {
 		{"URI", `^([a-zA-Z][a-zA-Z0-9+.-]*):(\/\/([^/?#]*))?([^?#]*)(\?([^#]*))?(#(.*))?`},
 	}
 
-	for _, tc := range patterns {
-		b.Run(tc.name, func(b *testing.B) {
-			for _, engine := range engines {
-				b.Run(engine.Name, func(b *testing.B) {
-					re, err := engine.Compile(tc.pat)
-					if err != nil {
-						b.Skip()
-					}
-					b.ResetTimer()
-					for i := 0; i < b.N; i++ {
-						re.FindStringSubmatchIndex(input)
-					}
-				})
-			}
-		})
-	}
+	runOnEngines(b, func(b *testing.B, engine Engine) {
+		for _, tc := range patterns {
+			b.Run(tc.name, func(b *testing.B) {
+				re, err := engine.Compile(tc.pat)
+				if err != nil {
+					b.Skip()
+				}
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					re.FindStringSubmatchIndex(input)
+				}
+			})
+		}
+	})
 }
 
 // BenchmarkNFAWorstCase benchmarks (a+)+b against a...ac.
@@ -481,18 +490,16 @@ func BenchmarkNFAWorstCase(b *testing.B) {
 	pattern := `(a+)+b`
 	input := strings.Repeat("a", 25) + "c"
 
-	for _, engine := range engines {
-		b.Run(engine.Name, func(b *testing.B) {
-			re, err := engine.Compile(pattern)
-			if err != nil {
-				b.Skip()
-			}
-			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
-				re.MatchString(input)
-			}
-		})
-	}
+	runOnEngines(b, func(b *testing.B, engine Engine) {
+		re, err := engine.Compile(pattern)
+		if err != nil {
+			b.Skip()
+		}
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			re.MatchString(input)
+		}
+	})
 }
 
 // Internal data loaders
