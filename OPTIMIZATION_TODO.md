@@ -31,8 +31,8 @@ This document tracks the remaining optimization tasks based on the project's hig
 - [x] **Impact**: Reduces DFA state count and speeds up compilation for large alternation sets.
 
 ## 5. Branch & BCE Verification (Compiler Guardrails)
-- [ ] **Task**: Use `go tool compile -S` to verify the quality of monomorphized loops.
-- [ ] **Goal**:
-    - Ensure `execLoop` instances are free of unnecessary `runtime.panicIndex` (Bounds Check Elimination).
-    - Confirm that trait-based conditions (e.g., `trait.HasAnchors()`) are completely eliminated in the assembly.
-- [ ] **Impact**: Minimizes Instruction Per Byte (IPB) by ensuring optimal machine code generation.
+- [x] **Task**: Use `go tool compile -S` to verify the quality of monomorphized loops.
+- [x] **Goal**:
+    - [x] Ensure `execLoop` instances are free of unnecessary `runtime.panicIndex` (Bounds Check Elimination).
+    - [x] Confirm that trait-based conditions (e.g., `trait.HasAnchors()`) are completely eliminated in the assembly.
+- [x] **Impact**: Minimizes Instruction Per Byte (IPB) by ensuring optimal machine code generation. Hot loops are now verified to be free of bounds check overhead.

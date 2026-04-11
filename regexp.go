@@ -315,27 +315,64 @@ func execLoop[T loopTrait](re *Regexp, b []byte) (int, int, int) {
 	warpPoints := dfa.WarpPoints()
 	warpPointState := dfa.WarpPointStates()
 
+	numStates := dfa.TotalStates()
+	numBytes := len(b)
+	lb := b[:numBytes] // BCE hint
+
 	if trait.HasAnchors() {
 		state := dfa.SearchState()
-		for i := 0; i <= len(b); i++ {
-			ctx := ir.CalculateContext(b, i)
+		for i := 0; i <= numBytes; i++ {
+			ctx := ir.CalculateContext(lb, i)
 			s := re.applyContextToState(dfa, state, ctx, nil)
-			if s != ir.InvalidState && (accepting[s] || isAlwaysTrue(s)) {
-				return re.findBoundary(b)
+			if s != ir.InvalidState {
+				idx := int(s)
+				if idx >= 0 && idx < len(accepting) {
+					if accepting[idx] || isAlwaysTrue(s) {
+						return re.findBoundary(lb)
+					}
+				}
 			}
 
-			if i < len(b) {
-				// SIMD Warp for extended loop (only if current state is not anchor-sensitive)
-				// For now, only warp if the state is NOT affected by virtual bytes.
-				// However, determining this statically is complex, so we skip warp in extended loop for safety.
-				// In a future optimization, we can check if ALL transitions from this state lead to the same target for ALL virtual bytes.
-
+			if i < numBytes {
 				state = re.applyContextToState(dfa, state, ctx, nil)
-				state = trans[int(state)*stride+int(b[i])]
+				sidx := int(state)
+				// Explicit check for BCE
+				if i >= 0 && i < len(lb) {
+					bval := int(lb[i])
+					if sidx >= 0 && sidx < numStates && bval >= 0 && bval < stride {
+						off := sidx*stride + bval
+						if off >= 0 && off < len(trans) {
+							state = trans[off]
+						} else {
+							state = ir.InvalidState
+						}
+					} else {
+						state = ir.InvalidState
+					}
+				} else {
+					state = ir.InvalidState
+				}
+
 				if state == ir.InvalidState {
 					state = dfa.SearchState()
 					state = re.applyContextToState(dfa, state, ctx, nil)
-					state = trans[int(state)*stride+int(b[i])]
+					sidx = int(state)
+					if i >= 0 && i < len(lb) {
+						bval := int(lb[i])
+						if sidx >= 0 && sidx < numStates && bval >= 0 && bval < stride {
+							off := sidx*stride + bval
+							if off >= 0 && off < len(trans) {
+								state = trans[off]
+							} else {
+								state = ir.InvalidState
+							}
+						} else {
+							state = ir.InvalidState
+						}
+					} else {
+						state = ir.InvalidState
+					}
+
 					if state == ir.InvalidState {
 						state = dfa.SearchState()
 					}
@@ -345,7 +382,7 @@ func execLoop[T loopTrait](re *Regexp, b []byte) (int, int, int) {
 	} else {
 		i := 0
 		if len(re.prefix) > 0 {
-			idx := bytes.Index(b, re.prefix)
+			idx := bytes.Index(lb, re.prefix)
 			if idx < 0 {
 				return -1, -1, -1
 			}
@@ -353,28 +390,54 @@ func execLoop[T loopTrait](re *Regexp, b []byte) (int, int, int) {
 		}
 
 		state := dfa.SearchState()
-		if accepting[state] || isAlwaysTrue(state) {
-			return re.findBoundary(b)
+		sidx := int(state)
+		if sidx >= 0 && sidx < len(accepting) {
+			if accepting[sidx] || isAlwaysTrue(state) {
+				return re.findBoundary(lb)
+			}
 		}
 
-		for ; i < len(b); i++ {
-			// SIMD Warp
-			if wp := warpPoints[state]; wp != -1 {
-				idx := bytes.IndexByte(b[i:], byte(wp))
-				if idx < 0 {
-					return -1, -1, -1
-				}
-				i += idx
-				state = warpPointState[state]
-			} else {
-				state = trans[int(state)*stride+int(b[i])]
-				if state == ir.InvalidState {
-					state = dfa.SearchState()
+		for ; i < numBytes; i++ {
+			sidx = int(state)
+			if sidx >= 0 && sidx < len(warpPoints) {
+				// SIMD Warp
+				if wp := warpPoints[sidx]; wp != -1 {
+					idx := bytes.IndexByte(lb[i:], byte(wp))
+					if idx < 0 {
+						return -1, -1, -1
+					}
+					i += idx
+					if sidx >= 0 && sidx < len(warpPointState) {
+						state = warpPointState[sidx]
+					}
+				} else {
+					if i >= 0 && i < len(lb) {
+						bval := int(lb[i])
+						if sidx >= 0 && sidx < numStates && bval >= 0 && bval < stride {
+							off := sidx*stride + bval
+							if off >= 0 && off < len(trans) {
+								state = trans[off]
+							} else {
+								state = ir.InvalidState
+							}
+						} else {
+							state = ir.InvalidState
+						}
+					} else {
+						state = ir.InvalidState
+					}
+
+					if state == ir.InvalidState {
+						state = dfa.SearchState()
+					}
 				}
 			}
 
-			if accepting[state] || isAlwaysTrue(state) {
-				return re.findBoundary(b)
+			sidx = int(state)
+			if sidx >= 0 && sidx < len(accepting) {
+				if accepting[sidx] || isAlwaysTrue(state) {
+					return re.findBoundary(lb)
+				}
 			}
 		}
 	}

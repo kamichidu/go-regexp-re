@@ -21,6 +21,7 @@ Every implementation must adhere to these pillars to ensure maximum performance:
 
 ### 2.3 Cache Locality Optimization
 - **Flattened Memory Layout**: Transition tables MUST be stored as a single, contiguous `int32` array. Access must use `table[state * stride + byte]` to eliminate pointer chasing and maximize L1/L2 cache hit rates.
+- **Unified Transition Table**: To minimize memory footprint, states for Search (with restart closure) and Match (without restart) MUST be unified into a single physical transition table. This improves L3 cache hit rates and halves the memory requirements for compiled regular expressions.
 - **Minimize Memory Latency**: Keep core data structures small enough to fit within L2/L3 caches even for large pattern sets.
 
 ### 2.4 Execution Switching Strategy
@@ -97,6 +98,11 @@ DFA construction is divided into two distinct phases to balance correctness and 
 - **Phase 2: Optimization Pass**: Analyze the constructed graph to identify high-performance execution hints:
   - **Warp Point Detection**: Identify states where only a single byte leads to progress (common in literals). These are marked as candidates for SIMD-accelerated skipping using `bytes.Index`.
   - **SCC Analysis**: Identify Strongly Connected Components where acceptance is guaranteed (Always True) to enable early loop exit.
+
+### 2.16 Zero-Overhead Hot Loops
+To maximize scan speed, `execLoop` and other hot loops MUST be free of `runtime.panicIndex` overhead:
+- **Explicit BCE (Bounds Check Elimination)**: Hot loops MUST use explicit local slice variables and index checks to provide the compiler with enough hints to prove that every array access is safe.
+- **Assembly Verification**: Critical matching loops MUST be periodically verified using `go tool compile -S` to ensure that `panicIndex` calls have been successfully eliminated from the hot path.
 
 ## 3. Feature Selection Policy (Performance over Features)
 

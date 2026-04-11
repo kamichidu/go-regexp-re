@@ -86,11 +86,13 @@ func (d *DFA) IsAlwaysTrue(s StateID) bool {
 }
 
 func (d *DFA) IsAlwaysTrueFunc() func(StateID) bool {
+	isAlwaysTrue := d.isAlwaysTrue
 	return func(s StateID) bool {
-		if s < 0 || int(s) >= d.numStates || d.isAlwaysTrue == nil {
-			return false
+		idx := int(s)
+		if isAlwaysTrue != nil && idx >= 0 && idx < len(isAlwaysTrue) {
+			return isAlwaysTrue[idx]
 		}
-		return d.isAlwaysTrue[s]
+		return false
 	}
 }
 
