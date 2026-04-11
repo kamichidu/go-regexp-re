@@ -38,7 +38,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	dfa, err := ir.NewDFA(prog)
+	dfa, err := ir.NewDFAForSearch(context.Background(), prog)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error building DFA: %v\n", err)
 		os.Exit(1)

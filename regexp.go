@@ -127,12 +127,7 @@ func CompileContext(ctx context.Context, expr string) (*Regexp, error) {
 			return -1, -1, -1
 		}
 	} else {
-		res.match = func(b []byte) (int, int, int) {
-			if res.dfa.HasAnchors() {
-				return res.doMatchExtended(b)
-			}
-			return res.doMatchFast(b)
-		}
+		res.bindMatchLoop()
 	}
 	return res, nil
 }
@@ -292,64 +287,82 @@ func (re *Regexp) String() string {
 	return re.expr
 }
 
-func (re *Regexp) doMatchFast(b []byte) (int, int, int) {
-	dfa := re.dfa
-	trans := dfa.Transitions()
-	stride := dfa.Stride()
-	accepting := dfa.Accepting()
-
-	i := 0
-	if len(re.prefix) > 0 {
-		idx := bytes.Index(b, re.prefix)
-		if idx < 0 {
-			return -1, -1, -1
+func (re *Regexp) bindMatchLoop() {
+	if re.dfa.HasAnchors() {
+		re.match = func(b []byte) (int, int, int) {
+			return execLoop[extendedLoopTrait](re, b)
 		}
-		i = idx
-	}
-
-	state := dfa.StartState()
-	// Check for empty match at the beginning
-	if accepting[state] {
-		return re.findBoundary(b)
-	}
-
-	for ; i < len(b); i++ {
-		state = trans[int(state)*stride+int(b[i])]
-		if state == ir.InvalidState {
-			state = dfa.StartState()
-		}
-
-		if accepting[state] {
-			return re.findBoundary(b)
+	} else {
+		re.match = func(b []byte) (int, int, int) {
+			return execLoop[fastLoopTrait](re, b)
 		}
 	}
-	return -1, -1, -1
 }
 
-func (re *Regexp) doMatchExtended(b []byte) (int, int, int) {
+type loopTrait interface {
+	HasAnchors() bool
+}
+
+type fastLoopTrait struct{}
+
+func (fastLoopTrait) HasAnchors() bool { return false }
+
+type extendedLoopTrait struct{}
+
+func (extendedLoopTrait) HasAnchors() bool { return true }
+
+func execLoop[T loopTrait](re *Regexp, b []byte) (int, int, int) {
+	var trait T
 	dfa := re.dfa
 	trans := dfa.Transitions()
 	stride := dfa.Stride()
 	accepting := dfa.Accepting()
 
-	state := dfa.StartState()
-	for i := 0; i <= len(b); i++ {
-		ctx := ir.CalculateContext(b, i)
-		s := re.applyContextToState(dfa, state, ctx, nil)
-		if s != ir.InvalidState && accepting[s] {
-			return re.findBoundary(b)
-		}
+	if trait.HasAnchors() {
+		state := dfa.StartState()
+		for i := 0; i <= len(b); i++ {
+			ctx := ir.CalculateContext(b, i)
+			s := re.applyContextToState(dfa, state, ctx, nil)
+			if s != ir.InvalidState && accepting[s] {
+				return re.findBoundary(b)
+			}
 
-		if i < len(b) {
-			state = re.applyContextToState(dfa, state, ctx, nil)
-			state = trans[int(state)*stride+int(b[i])]
-			if state == ir.InvalidState {
-				state = dfa.StartState()
+			if i < len(b) {
 				state = re.applyContextToState(dfa, state, ctx, nil)
 				state = trans[int(state)*stride+int(b[i])]
 				if state == ir.InvalidState {
 					state = dfa.StartState()
+					state = re.applyContextToState(dfa, state, ctx, nil)
+					state = trans[int(state)*stride+int(b[i])]
+					if state == ir.InvalidState {
+						state = dfa.StartState()
+					}
 				}
+			}
+		}
+	} else {
+		i := 0
+		if len(re.prefix) > 0 {
+			idx := bytes.Index(b, re.prefix)
+			if idx < 0 {
+				return -1, -1, -1
+			}
+			i = idx
+		}
+
+		state := dfa.StartState()
+		if accepting[state] {
+			return re.findBoundary(b)
+		}
+
+		for ; i < len(b); i++ {
+			state = trans[int(state)*stride+int(b[i])]
+			if state == ir.InvalidState {
+				state = dfa.StartState()
+			}
+
+			if accepting[state] {
+				return re.findBoundary(b)
 			}
 		}
 	}

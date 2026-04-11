@@ -1,6 +1,7 @@
 package ir_test
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -11,7 +12,7 @@ import (
 func TestToDOT(t *testing.T) {
 	re, _ := syntax.Parse("a(b|c)*d", syntax.Perl)
 	prog, _ := syntax.Compile(re)
-	dfa, _ := ir.NewDFA(prog)
+	dfa, _ := ir.NewDFAForSearch(context.Background(), prog)
 
 	dot := ir.ToDOT(dfa)
 	if !strings.HasPrefix(dot, "digraph DFA {") {

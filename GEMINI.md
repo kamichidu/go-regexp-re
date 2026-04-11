@@ -26,6 +26,7 @@ Every implementation must adhere to these pillars to ensure maximum performance:
 ### 2.4 Execution Switching Strategy
 To maximize throughput, the engine MUST select the most efficient execution loop based on pattern characteristics:
 - **0-Pass (Literal Bypass)**: Selected for pure constant strings. Bypasses all regex engines using SIMD-accelerated standard library search (e.g., `bytes.Index`).
+- **Trait-based Specialization**: Execution loops MUST be implemented using Go's Generics and interfaces (traits) to achieve Monomorphization. This eliminates dynamic runtime branching for anchors and context checks within hot loops, minimizing Instruction Per Byte (IPB).
 - **Fast Path (Pure DFA)**: Automatically selected for patterns without anchors. It utilizes a minimalist execution loop with zero boundary/context checks to approach raw memory bandwidth speeds.
 - **Extended Path (Virtual Byte Insertion)**: Selected for patterns with anchors (e.g., `^`, `$`, `\b`). It employs "Virtual Bytes" (indices 256+) injected at character boundaries to process empty-width assertions within the DFA's $O(n)$ framework.
 - **Submatch Path (Path-Guided 2-Pass DFA)**: Selected when submatches are requested. It utilizes a high-speed DFA scan to identify match boundaries, followed by a guided DFA second pass for efficient submatch extraction.
@@ -83,6 +84,19 @@ Before NFA/DFA compilation, the syntax tree (especially `OpAlternate`) MUST be o
 - **Prefix/Suffix Factoring**: Identical AST nodes at the beginning or end of alternative branches MUST be extracted (e.g., `a*c|b*c` -> `(?:a*|b*)c`). This unifies the exploration of common trailing or leading structures.
 - **Literal Trie Optimization**: Sequences of literals within an alternation MUST be merged into a Trie-like structure (e.g., `apple|applejuice` -> `apple(?:juice|)`).
 - **Semantics Preservation**: These optimizations MUST preserve the original leftmost-first priority order, ensuring compatibility with Go's standard library matching behavior.
+
+### 2.14 Structural AST Normalization
+To maximize deterministic efficiency, the AST MUST be normalized before DFA construction:
+- **Literal Aggregation**: Consecutive single-character nodes MUST be merged into single `OpLiteral` nodes to minimize DFA state count.
+- **Concat Flattening**: Nested `OpConcat` structures MUST be flattened to expand the scope of literal aggregation and factoring.
+- **Anchor Hoisting**: Common anchors at the start or end of alternations MUST be hoisted out (e.g., `^a|^b` -> `^(?:a|b)`) to fix positioning constraints as early as possible.
+
+### 2.15 Multi-Phase DFA Optimization
+DFA construction is divided into two distinct phases to balance correctness and performance:
+- **Phase 1: Base Construction**: Generate the deterministic state graph, ensuring leftmost-first semantics and absolute priority tracking.
+- **Phase 2: Optimization Pass**: Analyze the constructed graph to identify high-performance execution hints:
+  - **Warp Point Detection**: Identify states where only a single byte leads to progress (common in literals). These are marked as candidates for SIMD-accelerated skipping using `bytes.Index`.
+  - **SCC Analysis**: Identify Strongly Connected Components where acceptance is guaranteed (Always True) to enable early loop exit.
 
 ## 3. Feature Selection Policy (Performance over Features)
 
