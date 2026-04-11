@@ -22,8 +22,11 @@ func ToDOT(d *DFA) string {
 
 		var labels []string
 		labels = append(labels, fmt.Sprintf("S%d", i))
-		if s == d.startState {
-			labels[0] += " (start)"
+		if s == d.searchState {
+			labels[0] += " (search)"
+		}
+		if s == d.matchState {
+			labels[0] += " (match)"
 		}
 
 		// Show accepting priority

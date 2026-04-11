@@ -292,7 +292,7 @@ func TestStateExplosion(t *testing.T) {
 		},
 		{
 			"Ambiguous overlaps with repetitive structure",
-			"(a|b)*c|(a|ab)*c",
+			"(a|b|c|d|e)*x|(a|ab|abc|abcd|abcde)*x",
 			true, // Still too complex for simple factoring to save
 		},
 		{

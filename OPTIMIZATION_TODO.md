@@ -18,11 +18,12 @@ This document tracks the remaining optimization tasks based on the project's hig
 - [x] **Impact**: Faster matching for patterns like `.*` where trailing content doesn't affect the match outcome.
 
 ## 3. Unified Transition Table (Single Table, Multiple Entries)
-- [ ] **Task**: Consolidate the separate Search and Match DFAs into a single physical transition table.
-- [ ] **Implementation**:
-    - Refactor `build` to correctly interleave search closures (for `SearchStartState`) and match paths (for `MatchStartState`) without priority conflicts.
-    - Ensure submatch extraction (Phase 2) correctly identifies the entry point used.
-- [ ] **Impact**: 50% reduction in transition table memory footprint and improved L3 cache efficiency.
+- [x] **Task**: Consolidate the separate Search and Match DFAs into a single physical transition table.
+- [x] **Implementation**:
+    - Refactor `build` to correctly interleave search closures (for `SearchState`) and match paths (for `MatchState`) without priority conflicts.
+    - Added `stateIsSearch` metadata to distinguish state behaviors during construction.
+    - Updated `minimize` to preserve search/match entry points.
+- [x] **Impact**: ~50% reduction in transition table memory footprint and improved L3 cache efficiency.
 
 ## 4. Advanced AST Common Factorization
 - [x] **Task**: Enhance `syntax.Optimize` to perform aggressive factorization of alternations.

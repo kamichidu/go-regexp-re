@@ -1,7 +1,6 @@
 package ir_test
 
 import (
-	"context"
 	"testing"
 
 	"github.com/kamichidu/go-regexp-re/internal/ir"
@@ -18,7 +17,7 @@ func TestDFA_Initialization(t *testing.T) {
 		t.Fatalf("Compile failed: %v", err)
 	}
 
-	dfa, err := ir.NewDFAForSearch(context.Background(), prog)
+	dfa, err := ir.NewDFA(prog)
 	if err != nil {
 		t.Fatalf("NewDFA failed: %v", err)
 	}
@@ -78,13 +77,13 @@ func TestDFA_FoldCase(t *testing.T) {
 				t.Fatalf("Compile failed: %v", err)
 			}
 
-			dfa, err := ir.NewDFAForSearch(context.Background(), prog)
+			dfa, err := ir.NewDFA(prog)
 			if err != nil {
 				t.Fatalf("NewDFA failed: %v", err)
 			}
 
 			for input, wantMatch := range tt.inputs {
-				state := dfa.StartState()
+				state := dfa.SearchState()
 				for i := 0; i < len(input); i++ {
 					state = dfa.Next(state, int(input[i]))
 					if state == ir.InvalidState {

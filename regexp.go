@@ -20,8 +20,7 @@ type Regexp struct {
 	anchorStart bool
 	anchorEnd   bool
 	prog        *syntax.Prog
-	dfa         *ir.DFA // DFA with search closure (.*?) for Match
-	dfaMatch    *ir.DFA // DFA without search closure for Find boundaries
+	dfa         *ir.DFA // Unified DFA for Search and Match
 	match       func([]byte) (int, int, int)
 	subexpNames []string
 }
@@ -65,18 +64,14 @@ func CompileContext(ctx context.Context, expr string) (*Regexp, error) {
 	if err != nil {
 		return nil, err
 	}
-	dfa, err := ir.NewDFAForSearch(ctx, prog)
+	dfa, err := ir.NewDFAContext(ctx, prog)
 	if err != nil {
 		return nil, err
 	}
-	dfaMatch, err := ir.NewDFAForMatch(ctx, prog)
-	if err != nil {
-		return nil, err
-	}
-	var prefixState ir.StateID = dfaMatch.StartState()
+	var prefixState ir.StateID = dfa.MatchState()
 	if prefixStr != "" {
-		trans := dfaMatch.Transitions()
-		stride := dfaMatch.Stride()
+		trans := dfa.Transitions()
+		stride := dfa.Stride()
 		for _, c := range []byte(prefixStr) {
 			prefixState = trans[int(prefixState)*stride+int(c)]
 			if prefixState == ir.InvalidState {
@@ -95,7 +90,6 @@ func CompileContext(ctx context.Context, expr string) (*Regexp, error) {
 		anchorEnd:   anchorEnd,
 		prog:        prog,
 		dfa:         dfa,
-		dfaMatch:    dfaMatch,
 		subexpNames: subexpNames,
 	}
 
@@ -183,12 +177,12 @@ func (re *Regexp) FindSubmatchIndex(b []byte) []int {
 	regs[0] = start
 	regs[1] = end
 
-	dfa := re.dfaMatch
+	dfa := re.dfa
 	trans := dfa.Transitions()
 	stride := dfa.Stride()
 	preTags := dfa.PreTags()
 	postTags := dfa.PostTags()
-	startState := dfa.StartState()
+	matchState := dfa.MatchState()
 
 	recordTags := func(t uint64, pos int) {
 		if t == 0 {
@@ -206,7 +200,7 @@ func (re *Regexp) FindSubmatchIndex(b []byte) []int {
 	recordTags(dfa.StartTags(), start)
 
 	ctx := ir.CalculateContext(b, start)
-	state := re.applyContextToState(dfa, startState, ctx, func(t uint64) {
+	state := re.applyContextToState(dfa, matchState, ctx, func(t uint64) {
 		recordTags(t, start)
 	})
 
@@ -322,7 +316,7 @@ func execLoop[T loopTrait](re *Regexp, b []byte) (int, int, int) {
 	warpPointState := dfa.WarpPointStates()
 
 	if trait.HasAnchors() {
-		state := dfa.StartState()
+		state := dfa.SearchState()
 		for i := 0; i <= len(b); i++ {
 			ctx := ir.CalculateContext(b, i)
 			s := re.applyContextToState(dfa, state, ctx, nil)
@@ -339,11 +333,11 @@ func execLoop[T loopTrait](re *Regexp, b []byte) (int, int, int) {
 				state = re.applyContextToState(dfa, state, ctx, nil)
 				state = trans[int(state)*stride+int(b[i])]
 				if state == ir.InvalidState {
-					state = dfa.StartState()
+					state = dfa.SearchState()
 					state = re.applyContextToState(dfa, state, ctx, nil)
 					state = trans[int(state)*stride+int(b[i])]
 					if state == ir.InvalidState {
-						state = dfa.StartState()
+						state = dfa.SearchState()
 					}
 				}
 			}
@@ -358,7 +352,7 @@ func execLoop[T loopTrait](re *Regexp, b []byte) (int, int, int) {
 			i = idx
 		}
 
-		state := dfa.StartState()
+		state := dfa.SearchState()
 		if accepting[state] || isAlwaysTrue(state) {
 			return re.findBoundary(b)
 		}
@@ -375,7 +369,7 @@ func execLoop[T loopTrait](re *Regexp, b []byte) (int, int, int) {
 			} else {
 				state = trans[int(state)*stride+int(b[i])]
 				if state == ir.InvalidState {
-					state = dfa.StartState()
+					state = dfa.SearchState()
 				}
 			}
 
@@ -388,12 +382,12 @@ func execLoop[T loopTrait](re *Regexp, b []byte) (int, int, int) {
 }
 
 func (re *Regexp) findBoundary(b []byte) (int, int, int) {
-	dfa := re.dfaMatch
+	dfa := re.dfa
 	trans := dfa.Transitions()
 	increments := dfa.PriorityIncrements()
 	stride := dfa.Stride()
 	accepting := dfa.Accepting()
-	startState := dfa.StartState()
+	matchState := dfa.MatchState()
 
 	for i := 0; i <= len(b); i++ {
 		if len(re.prefix) > 0 {
@@ -420,7 +414,7 @@ func (re *Regexp) findBoundary(b []byte) (int, int, int) {
 		}
 
 		ctx := ir.CalculateContext(b, i)
-		state := re.applyContextToState(dfa, startState, ctx, nil)
+		state := re.applyContextToState(dfa, matchState, ctx, nil)
 		lastAcceptingEnd := -1
 		bestAbsolutePriority := 1<<30 - 1
 

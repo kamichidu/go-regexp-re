@@ -1,7 +1,6 @@
 package ir
 
 import (
-	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -36,7 +35,7 @@ func BenchmarkPikeVM_Email(b *testing.B) {
 			start, end := 0, len(input)
 
 			// Setup trie roots as if coming from DFA compilation
-			dfa, _ := NewDFAForSearch(context.Background(), prog)
+			dfa, _ := NewDFA(prog)
 			trieRoots := dfa.TrieRoots()
 
 			b.ResetTimer()

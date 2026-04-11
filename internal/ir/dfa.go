@@ -55,9 +55,13 @@ type DFA struct {
 
 	stride     int
 	numStates  int
-	startState StateID
+	searchState StateID
+	matchState  StateID
 	hasAnchors bool
 	numSubexp  int
+
+	// Metadata for each state
+	stateIsSearch []bool
 
 	// Cached trie roots for each instruction
 	trieRoots [][]*utf8Node
@@ -293,24 +297,20 @@ const (
 )
 
 func NewDFA(prog *syntax.Prog) (*DFA, error) {
-	return NewDFAForSearch(context.Background(), prog)
-}
-
-func NewDFAForSearch(ctx context.Context, prog *syntax.Prog) (*DFA, error) {
 	d := &DFA{
 		numSubexp: prog.NumCap / 2,
 	}
-	if err := d.build(ctx, prog, true); err != nil {
+	if err := d.build(context.Background(), prog); err != nil {
 		return nil, fmt.Errorf("failed to build DFA: %w", err)
 	}
 	return d, nil
 }
 
-func NewDFAForMatch(ctx context.Context, prog *syntax.Prog) (*DFA, error) {
+func NewDFAContext(ctx context.Context, prog *syntax.Prog) (*DFA, error) {
 	d := &DFA{
 		numSubexp: prog.NumCap / 2,
 	}
-	if err := d.build(ctx, prog, false); err != nil {
+	if err := d.build(ctx, prog); err != nil {
 		return nil, fmt.Errorf("failed to build DFA: %w", err)
 	}
 	return d, nil
@@ -365,8 +365,12 @@ func (d *DFA) IsBestMatch(s StateID) bool {
 	return d.stateIsBestMatch[s]
 }
 
-func (d *DFA) StartState() StateID {
-	return d.startState
+func (d *DFA) SearchState() StateID {
+	return d.searchState
+}
+
+func (d *DFA) MatchState() StateID {
+	return d.matchState
 }
 
 func (d *DFA) StartTags() uint64 {
@@ -403,7 +407,12 @@ var ErrStateExplosion = fmt.Errorf("regexp: pattern too large or ambiguous")
 
 const MaxDFAMemory = 64 * 1024 * 1024
 
-func (d *DFA) build(ctx context.Context, prog *syntax.Prog, withSearch bool) error {
+type dfaStateKey struct {
+	nfaKey   string
+	isSearch bool
+}
+
+func (d *DFA) build(ctx context.Context, prog *syntax.Prog) error {
 	cache := newUTF8NodeCache()
 
 	d.hasAnchors = false
@@ -440,11 +449,11 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, withSearch bool) err
 		return roots
 	}
 
-	nfaToDfa := make(map[string]StateID)
+	nfaToDfa := make(map[dfaStateKey]StateID)
 	dfaToNfa := make([][]nfaPath, 0)
 
 	var errBuild error
-	addDfaState := func(closure []nfaPath) StateID {
+	addDfaState := func(closure []nfaPath, isSearch bool) StateID {
 		if errBuild != nil {
 			return InvalidState
 		}
@@ -485,7 +494,7 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, withSearch bool) err
 			return closure[i].Priority < closure[j].Priority
 		})
 
-		key := serializeSet(closure)
+		key := dfaStateKey{serializeSet(closure), isSearch}
 		if id, ok := nfaToDfa[key]; ok {
 			return id
 		}
@@ -501,6 +510,7 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, withSearch bool) err
 			}
 		}
 		dfaToNfa = append(dfaToNfa, cleanClosure)
+		d.stateIsSearch = append(d.stateIsSearch, isSearch)
 
 		isAccepting := false
 		matchPriority := 1<<30 - 1
@@ -535,10 +545,20 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, withSearch bool) err
 
 	initialPaths := []nfaPath{{nfaState: nfaState{ID: uint32(prog.Start)}, PreTags: 0, PostTags: 0}}
 	defaultStartClosure := epsilonClosure(initialPaths, prog, 0)
-	d.startState = addDfaState(defaultStartClosure)
+
+	// Build Match start state
+	d.matchState = addDfaState(defaultStartClosure, false)
 	if len(defaultStartClosure) > 0 {
 		d.startTags = defaultStartClosure[0].PostTags
 	}
+
+	// Build Search start state (includes the restart closure)
+	searchInitialPaths := make([]nfaPath, len(defaultStartClosure))
+	copy(searchInitialPaths, defaultStartClosure)
+	// We don't need to add it here explicitly because it's added in the transition loop
+	// for isSearch=true states. But the start state itself must be search-enabled.
+	d.searchState = addDfaState(defaultStartClosure, true)
+
 	if errBuild != nil {
 		return errBuild
 	}
@@ -553,12 +573,14 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, withSearch bool) err
 		}
 		currentClosure := dfaToNfa[i]
 		currentDfaID := StateID(i)
+		currentIsSearch := d.stateIsSearch[i]
 
 		var searchPaths []nfaPath
-		if withSearch {
+		if currentIsSearch {
 			searchPaths = make([]nfaPath, len(currentClosure)+len(defaultStartClosure))
 			copy(searchPaths, currentClosure)
 			for j, p := range defaultStartClosure {
+				// Priority 1000000 to ensure search paths are lower priority than existing ones.
 				p.Priority += 1000000
 				searchPaths[len(currentClosure)+j] = p
 			}
@@ -653,7 +675,7 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, withSearch bool) err
 					}
 				}
 
-				nextDfaID := addDfaState(nextClosure)
+				nextDfaID := addDfaState(nextClosure, currentIsSearch)
 				if errBuild != nil {
 					return errBuild
 				}
@@ -671,7 +693,7 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, withSearch bool) err
 			for bit := 0; bit < numVirtualBytes; bit++ {
 				op := syntax.EmptyOp(1 << bit)
 				var initialPaths []nfaPath
-				if withSearch {
+				if currentIsSearch {
 					initialPaths = make([]nfaPath, len(currentClosure)+1)
 					for j, p := range currentClosure {
 						initialPaths[j] = nfaPath{
@@ -710,7 +732,7 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, withSearch bool) err
 						}
 					}
 
-					nextDfaID := addDfaState(nextClosure)
+					nextDfaID := addDfaState(nextClosure, currentIsSearch)
 					if errBuild != nil {
 						return errBuild
 					}
@@ -742,12 +764,13 @@ func (d *DFA) minimize() {
 		acc       bool
 		prio      int
 		bestMatch bool
+		isSearch  bool
 	}
 	sigToGroup := make(map[groupSig]int32)
 	numGroups := int32(0)
 
 	for i := 0; i < d.numStates; i++ {
-		sig := groupSig{d.accepting[i], d.stateMatchPriority[i], d.stateIsBestMatch[i]}
+		sig := groupSig{d.accepting[i], d.stateMatchPriority[i], d.stateIsBestMatch[i], d.stateIsSearch[i]}
 		g, ok := sigToGroup[sig]
 		if !ok {
 			g = numGroups
@@ -817,6 +840,7 @@ func (d *DFA) minimize() {
 	newPrio := make([]int, numGroups)
 	newMatchTags := make([]uint64, numGroups)
 	newBest := make([]bool, numGroups)
+	newIsSearch := make([]bool, numGroups)
 
 	for g := int32(0); g < numGroups; g++ {
 		oldS := groupToFirstState[g]
@@ -824,6 +848,7 @@ func (d *DFA) minimize() {
 		newPrio[g] = d.stateMatchPriority[oldS]
 		newMatchTags[g] = d.stateMatchTags[oldS]
 		newBest[g] = d.stateIsBestMatch[oldS]
+		newIsSearch[g] = d.stateIsSearch[oldS]
 
 		for b := 0; b < d.stride; b++ {
 			oldIdx := oldS*d.stride + b
@@ -847,8 +872,10 @@ func (d *DFA) minimize() {
 	d.stateMatchPriority = newPrio
 	d.stateMatchTags = newMatchTags
 	d.stateIsBestMatch = newBest
+	d.stateIsSearch = newIsSearch
 	d.numStates = int(numGroups)
-	d.startState = StateID(stateToGroup[d.startState])
+	d.searchState = StateID(stateToGroup[d.searchState])
+	d.matchState = StateID(stateToGroup[d.matchState])
 }
 
 func matchesByte(node *utf8Node, b byte) bool {
