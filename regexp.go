@@ -25,14 +25,34 @@ type Regexp struct {
 	subexpNames []string
 }
 
+// CompileOption defines options for regex compilation.
+type CompileOption struct {
+	// MaxMemory is the maximum allowed memory for DFA construction.
+	// Defaults to 64 MiB if zero.
+	MaxMemory int
+}
+
 // Compile parses a regular expression and returns, if successful,
 // a Regexp object that can be used to match against text.
 func Compile(expr string) (*Regexp, error) {
 	return CompileContext(context.Background(), expr)
 }
 
+// CompileWithOption is like Compile but allows specifying options.
+func CompileWithOption(expr string, opt CompileOption) (*Regexp, error) {
+	return CompileContextWithOption(context.Background(), expr, opt)
+}
+
 // CompileContext is like Compile but accepts a context to allow cancellation.
 func CompileContext(ctx context.Context, expr string) (*Regexp, error) {
+	return CompileContextWithOption(ctx, expr, CompileOption{})
+}
+
+// CompileContextWithOption is like CompileContext but allows specifying options.
+func CompileContextWithOption(ctx context.Context, expr string, opt CompileOption) (*Regexp, error) {
+	if opt.MaxMemory <= 0 {
+		opt.MaxMemory = ir.MaxDFAMemory
+	}
 	re, err := syntax.Parse(expr, syntax.Perl)
 	if err != nil {
 		return nil, err
@@ -64,7 +84,7 @@ func CompileContext(ctx context.Context, expr string) (*Regexp, error) {
 	if err != nil {
 		return nil, err
 	}
-	dfa, err := ir.NewDFAContext(ctx, prog)
+	dfa, err := ir.NewDFAWithMemoryLimit(ctx, prog, opt.MaxMemory)
 	if err != nil {
 		return nil, err
 	}
@@ -73,9 +93,15 @@ func CompileContext(ctx context.Context, expr string) (*Regexp, error) {
 		trans := dfa.Transitions()
 		stride := dfa.Stride()
 		for _, c := range []byte(prefixStr) {
-			prefixState = trans[int(prefixState)*stride+int(c)]
-			if prefixState == ir.InvalidState {
+			rawNext := trans[int(prefixState)*stride+int(c)]
+			if rawNext == ir.InvalidState {
+				prefixState = ir.InvalidState
 				break
+			}
+			if rawNext < 0 {
+				prefixState = rawNext & 0x7FFFFFFF
+			} else {
+				prefixState = rawNext
 			}
 		}
 	}
@@ -192,9 +218,9 @@ func (re *Regexp) FindSubmatchIndex(b []byte) []int {
 
 	dfa := re.dfa
 	trans := dfa.Transitions()
+	tagUpdateIndices := dfa.TagUpdateIndices()
+	tagUpdates := dfa.TagUpdates()
 	stride := dfa.Stride()
-	preTags := dfa.PreTags()
-	postTags := dfa.PostTags()
 	matchState := dfa.MatchState()
 
 	recordTags := func(t uint64, pos int) {
@@ -220,16 +246,24 @@ func (re *Regexp) FindSubmatchIndex(b []byte) []int {
 	currState := state
 	for i := start; i < end; i++ {
 		idx := int(currState)*stride + int(b[i])
-		recordTags(preTags[idx], i)
-		recordTags(postTags[idx], i+1)
-
-		next := trans[idx]
-		if next == ir.InvalidState {
-			break
+		rawNext := trans[idx]
+		if rawNext < 0 && rawNext != ir.InvalidState {
+			update := tagUpdates[tagUpdateIndices[idx]]
+			recordTags(update.PreTags, i)
+			recordTags(update.PostTags, i+1)
+			next := rawNext & 0x7FFFFFFF
+			currState = re.applyContextToState(dfa, next, ir.CalculateContext(b, i+1), func(t uint64) {
+				recordTags(t, i+1)
+			})
+		} else {
+			if rawNext == ir.InvalidState {
+				currState = ir.InvalidState
+				break
+			}
+			currState = re.applyContextToState(dfa, rawNext, ir.CalculateContext(b, i+1), func(t uint64) {
+				recordTags(t, i+1)
+			})
 		}
-		currState = re.applyContextToState(dfa, next, ir.CalculateContext(b, i+1), func(t uint64) {
-			recordTags(t, i+1)
-		})
 	}
 
 	if currState != ir.InvalidState && dfa.IsAccepting(currState) {
@@ -244,9 +278,9 @@ func (re *Regexp) applyContextToState(d *ir.DFA, state ir.StateID, context synta
 		return state
 	}
 	trans := d.Transitions()
+	tagUpdateIndices := d.TagUpdateIndices()
+	tagUpdates := d.TagUpdates()
 	stride := d.Stride()
-	preTags := d.PreTags()
-	postTags := d.PostTags()
 
 	virtualBytes := [6]int{
 		ir.VirtualBeginLine,
@@ -262,13 +296,18 @@ func (re *Regexp) applyContextToState(d *ir.DFA, state ir.StateID, context synta
 			if (context & (1 << bit)) != 0 {
 				idx := int(state)*stride + virtualBytes[bit]
 				if idx < len(trans) {
-					next := trans[idx]
-					if next != ir.InvalidState && next != state {
-						if record != nil {
-							record(preTags[idx])
-							record(postTags[idx])
+					rawNext := trans[idx]
+					if rawNext != ir.InvalidState && rawNext != state {
+						if rawNext < 0 {
+							if record != nil {
+								update := tagUpdates[tagUpdateIndices[idx]]
+								record(update.PreTags)
+								record(update.PostTags)
+							}
+							state = rawNext & 0x7FFFFFFF
+						} else {
+							state = rawNext
 						}
-						state = next
 						changed = true
 					}
 				}
@@ -310,10 +349,10 @@ func execLoop[T loopTrait](re *Regexp, b []byte) (int, int, int) {
 	var _ T
 	dfa := re.dfa
 	trans := dfa.Transitions()
-	increments := dfa.PriorityIncrements()
+	tagUpdateIndices := dfa.TagUpdateIndices()
+	tagUpdates := dfa.TagUpdates()
 	stride := dfa.Stride()
 	accepting := dfa.Accepting()
-	isAlwaysTrue := dfa.IsAlwaysTrueFunc()
 
 	numStates := dfa.NumStates()
 	numBytes := len(b)
@@ -342,10 +381,6 @@ func execLoop[T loopTrait](re *Regexp, b []byte) (int, int, int) {
 						bestStart = p / ir.SearchRestartPenalty
 					}
 				}
-				if isAlwaysTrue(s) {
-					// AlwaysTrue means we are guaranteed to match eventually.
-					// If we only need Match(), we could return true.
-				}
 			}
 		} else {
 			if re.anchorStart {
@@ -362,8 +397,13 @@ func execLoop[T loopTrait](re *Regexp, b []byte) (int, int, int) {
 				if sidx >= 0 && sidx < numStates && bval >= 0 && bval < stride {
 					off := sidx*stride + bval
 					if off >= 0 && off < len(trans) {
-						currentPriority += int(increments[off])
-						state = trans[off]
+						rawNext := trans[off]
+						if rawNext < 0 && rawNext != ir.InvalidState {
+							state = rawNext & 0x7FFFFFFF
+							currentPriority += int(tagUpdates[tagUpdateIndices[off]].Priority)
+						} else {
+							state = rawNext
+						}
 					} else {
 						state = ir.InvalidState
 					}

@@ -33,32 +33,38 @@ type nfaPath struct {
 	PostTags uint64
 }
 
-// TagRecord represents a set of tags encountered at a specific position.
+// TagRecord represents a set of tags encountered at a position.
 type TagRecord struct {
 	Tags uint64
 	Pos  int
 }
 
+// TransitionUpdate holds information for a tagged transition.
+// This is used when the MSB of a StateID in transitions is set.
+type TransitionUpdate struct {
+	Priority int32
+	PreTags  uint64
+	PostTags uint64
+}
+
+// TaggedStateFlag is the MSB flag for tagged transitions.
+const TaggedStateFlag StateID = -2147483648
+
 // DFA represents a Deterministic Finite Automaton.
 type DFA struct {
-	transitions            []StateID
-	transPriorityIncrement []int32
-
-	// Simple Tagged DFA: record only the tags passed by the BEST path.
-	// For greedy loops, Phase 1 correctly finds the winning priority.
-	// If we build the DFA correctly, Priority 0 in each transition will be the best path.
-	transPreTags  []uint64
-	transPostTags []uint64
+	transitions      []StateID
+	tagUpdateIndices []uint32
+	tagUpdates       []TransitionUpdate
 
 	// Start tags for the best path.
 	startTags uint64
 
-	stride     int
-	numStates  int
+	stride      int
+	numStates   int
 	searchState StateID
 	matchState  StateID
-	hasAnchors bool
-	numSubexp  int
+	hasAnchors  bool
+	numSubexp   int
 
 	// Metadata for each state
 	stateIsSearch []bool
@@ -148,8 +154,12 @@ func (d *DFA) findWarpPoints() {
 		possible := true
 
 		for b := 0; b < 256; b++ {
-			next := d.transitions[i*d.stride+b]
-			if next == InvalidState || next == currState {
+			nextRaw := d.transitions[i*d.stride+b]
+			if nextRaw == InvalidState {
+				continue
+			}
+			next := nextRaw & 0x7FFFFFFF
+			if next == currState {
 				continue
 			}
 			if progressByte == -1 {
@@ -198,10 +208,11 @@ func (d *DFA) findSCCs() {
 		onStack[v] = true
 
 		for b := 0; b < 256; b++ {
-			w := int(d.transitions[v*d.stride+b])
-			if w == -1 {
+			nextRaw := d.transitions[v*d.stride+b]
+			if nextRaw == -1 {
 				continue
 			}
+			w := int(nextRaw & 0x7FFFFFFF)
 			if index[w] == -1 {
 				strongconnect(w)
 				if lowlink[w] < lowlink[v] {
@@ -247,13 +258,14 @@ func (d *DFA) findSCCs() {
 				allTransitionsToAlwaysTrue := true
 				for _, s := range component {
 					for b := 0; b < 256; b++ {
-						next := int(d.transitions[s*d.stride+b])
-						if next == -1 {
+						nextRaw := d.transitions[s*d.stride+b]
+						if nextRaw == -1 {
 							// In a Search DFA, next should ideally not be -1 for bytes if it's always true,
 							// but if it is -1, it means it doesn't match, so it's NOT always true.
 							allTransitionsToAlwaysTrue = false
 							break
 						}
+						next := int(nextRaw & 0x7FFFFFFF)
 						// If next is not in current component, it must be in a previously
 						// identified Always True component.
 						inCurrent := false
@@ -299,20 +311,18 @@ const (
 )
 
 func NewDFA(prog *syntax.Prog) (*DFA, error) {
-	d := &DFA{
-		numSubexp: prog.NumCap / 2,
-	}
-	if err := d.build(context.Background(), prog); err != nil {
-		return nil, fmt.Errorf("failed to build DFA: %w", err)
-	}
-	return d, nil
+	return NewDFAWithMemoryLimit(context.Background(), prog, MaxDFAMemory)
 }
 
 func NewDFAContext(ctx context.Context, prog *syntax.Prog) (*DFA, error) {
+	return NewDFAWithMemoryLimit(ctx, prog, MaxDFAMemory)
+}
+
+func NewDFAWithMemoryLimit(ctx context.Context, prog *syntax.Prog, maxMemory int) (*DFA, error) {
 	d := &DFA{
 		numSubexp: prog.NumCap / 2,
 	}
-	if err := d.build(ctx, prog); err != nil {
+	if err := d.build(ctx, prog, maxMemory); err != nil {
 		return nil, fmt.Errorf("failed to build DFA: %w", err)
 	}
 	return d, nil
@@ -326,7 +336,11 @@ func (d *DFA) Next(current StateID, b int) StateID {
 	if offset >= len(d.transitions) {
 		return InvalidState
 	}
-	return d.transitions[offset]
+	raw := d.transitions[offset]
+	if raw == InvalidState {
+		return InvalidState
+	}
+	return raw & 0x7FFFFFFF
 }
 
 func (d *DFA) NumStates() int {
@@ -337,16 +351,12 @@ func (d *DFA) Transitions() []StateID {
 	return d.transitions
 }
 
-func (d *DFA) PriorityIncrements() []int32 {
-	return d.transPriorityIncrement
+func (d *DFA) TagUpdateIndices() []uint32 {
+	return d.tagUpdateIndices
 }
 
-func (d *DFA) PreTags() []uint64 {
-	return d.transPreTags
-}
-
-func (d *DFA) PostTags() []uint64 {
-	return d.transPostTags
+func (d *DFA) TagUpdates() []TransitionUpdate {
+	return d.tagUpdates
 }
 
 func (d *DFA) Stride() int {
@@ -420,7 +430,7 @@ type dfaStateKey struct {
 
 const SearchRestartPenalty = 1000000
 
-func (d *DFA) build(ctx context.Context, prog *syntax.Prog) error {
+func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error {
 	cache := newUTF8NodeCache()
 
 	d.hasAnchors = false
@@ -460,13 +470,27 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog) error {
 	nfaToDfa := make(map[dfaStateKey]StateID)
 	dfaToNfa := make([][]nfaPath, 0)
 
+	// Interning TransitionUpdates
+	updateToIdx := make(map[TransitionUpdate]uint32)
+	addUpdate := func(u TransitionUpdate) uint32 {
+		if idx, ok := updateToIdx[u]; ok {
+			return idx
+		}
+		idx := uint32(len(d.tagUpdates))
+		d.tagUpdates = append(d.tagUpdates, u)
+		updateToIdx[u] = idx
+		return idx
+	}
+
 	var errBuild error
 	addDfaState := func(closure []nfaPath, isSearch bool) StateID {
 		if errBuild != nil {
 			return InvalidState
 		}
 
-		if (d.numStates+1)*d.stride*8 > MaxDFAMemory {
+		// Calculate memory usage based on transitions and update indices.
+		// Each transition is 4 bytes, and each update index is 4 bytes.
+		if (d.numStates+1)*d.stride*8 > maxMemory {
 			errBuild = ErrStateExplosion
 			return InvalidState
 		}
@@ -543,9 +567,7 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog) error {
 
 		for i := 0; i < d.stride; i++ {
 			d.transitions = append(d.transitions, InvalidState)
-			d.transPriorityIncrement = append(d.transPriorityIncrement, 0)
-			d.transPreTags = append(d.transPreTags, 0)
-			d.transPostTags = append(d.transPostTags, 0)
+			d.tagUpdateIndices = append(d.tagUpdateIndices, 0)
 		}
 		d.numStates++
 		return id
@@ -687,18 +709,35 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog) error {
 				if errBuild != nil {
 					return errBuild
 				}
-				idx := int(currentDfaID)*d.stride + b
-				d.transitions[idx] = nextDfaID
-				d.transPriorityIncrement[idx] = int32(minP)
+
+				var pre, post uint64
 				if len(nextClosure) > 0 {
-					d.transPreTags[idx] = nextClosure[0].PreTags
-					d.transPostTags[idx] = nextClosure[0].PostTags
+					pre = nextClosure[0].PreTags
+					post = nextClosure[0].PostTags
+				}
+
+				idx := int(currentDfaID)*d.stride + b
+				if minP != 0 || pre != 0 || post != 0 {
+					d.transitions[idx] = nextDfaID | TaggedStateFlag
+					d.tagUpdateIndices[idx] = addUpdate(TransitionUpdate{
+						Priority: int32(minP),
+						PreTags:  pre,
+						PostTags: post,
+					})
+				} else {
+					d.transitions[idx] = nextDfaID
 				}
 			} else if currentIsSearch {
 				// Fallback: skip this byte and restart from the beginning.
 				idx := int(currentDfaID)*d.stride + b
-				d.transitions[idx] = d.searchState
-				d.transPriorityIncrement[idx] = int32(SearchRestartPenalty)
+				if SearchRestartPenalty != 0 {
+					d.transitions[idx] = d.searchState | TaggedStateFlag
+					d.tagUpdateIndices[idx] = addUpdate(TransitionUpdate{
+						Priority: int32(SearchRestartPenalty),
+					})
+				} else {
+					d.transitions[idx] = d.searchState
+				}
 			}
 		}
 
@@ -749,12 +788,23 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog) error {
 					if errBuild != nil {
 						return errBuild
 					}
-					idx := int(currentDfaID)*d.stride + 256 + bit
-					d.transitions[idx] = nextDfaID
-					d.transPriorityIncrement[idx] = int32(minP)
+
+					var pre, post uint64
 					if len(nextClosure) > 0 {
-						d.transPreTags[idx] = nextClosure[0].PreTags
-						d.transPostTags[idx] = nextClosure[0].PostTags
+						pre = nextClosure[0].PreTags
+						post = nextClosure[0].PostTags
+					}
+
+					idx := int(currentDfaID)*d.stride + 256 + bit
+					if minP != 0 || pre != 0 || post != 0 {
+						d.transitions[idx] = nextDfaID | TaggedStateFlag
+						d.tagUpdateIndices[idx] = addUpdate(TransitionUpdate{
+							Priority: int32(minP),
+							PreTags:  pre,
+							PostTags: post,
+						})
+					} else {
+						d.transitions[idx] = nextDfaID
 					}
 				}
 			}
@@ -803,23 +853,28 @@ func (d *DFA) minimize() {
 		nextNumGroups := int32(0)
 
 		for i := 0; i < d.numStates; i++ {
-			buf := make([]byte, d.stride*20)
+			buf := make([]byte, d.stride*8)
 			for b := 0; b < d.stride; b++ {
 				idx := i*d.stride + b
 				target := d.transitions[idx]
-				inc := d.transPriorityIncrement[idx]
-				pre := d.transPreTags[idx]
-				post := d.transPostTags[idx]
-				var targetGroup int32 = -1
 				if target != InvalidState {
-					targetGroup = stateToGroup[target]
-				}
+					targetID := target & 0x7FFFFFFF
+					isTagged := target < 0
+					tg := stateToGroup[targetID]
 
-				off := b * 20
-				*(*int16)(unsafe.Pointer(&buf[off])) = int16(targetGroup)
-				*(*int16)(unsafe.Pointer(&buf[off+2])) = int16(inc)
-				*(*uint64)(unsafe.Pointer(&buf[off+4])) = pre
-				*(*uint64)(unsafe.Pointer(&buf[off+12])) = post
+					var updateIdx uint32
+					if isTagged {
+						updateIdx = d.tagUpdateIndices[idx] + 1
+					}
+
+					off := b * 8
+					*(*int32)(unsafe.Pointer(&buf[off])) = tg
+					*(*uint32)(unsafe.Pointer(&buf[off+4])) = updateIdx
+				} else {
+					off := b * 8
+					*(*int32)(unsafe.Pointer(&buf[off])) = -1
+					*(*uint32)(unsafe.Pointer(&buf[off+4])) = 0
+				}
 			}
 
 			key := splitKey{stateToGroup[i], string(buf)}
@@ -846,9 +901,7 @@ func (d *DFA) minimize() {
 	}
 
 	newTransitions := make([]StateID, int(numGroups)*d.stride)
-	newIncrements := make([]int32, int(numGroups)*d.stride)
-	newPre := make([]uint64, int(numGroups)*d.stride)
-	newPost := make([]uint64, int(numGroups)*d.stride)
+	newUpdateIndices := make([]uint32, int(numGroups)*d.stride)
 	newAccepting := make([]bool, numGroups)
 	newPrio := make([]int, numGroups)
 	newMatchTags := make([]uint64, numGroups)
@@ -867,20 +920,23 @@ func (d *DFA) minimize() {
 			oldIdx := oldS*d.stride + b
 			target := d.transitions[oldIdx]
 			if target != InvalidState {
-				newTransitions[int(g)*d.stride+b] = StateID(stateToGroup[target])
+				targetID := target & 0x7FFFFFFF
+				isTagged := target < 0
+				newID := StateID(stateToGroup[targetID])
+				if isTagged {
+					newTransitions[int(g)*d.stride+b] = newID | TaggedStateFlag
+					newUpdateIndices[int(g)*d.stride+b] = d.tagUpdateIndices[oldIdx]
+				} else {
+					newTransitions[int(g)*d.stride+b] = newID
+				}
 			} else {
 				newTransitions[int(g)*d.stride+b] = InvalidState
 			}
-			newIncrements[int(g)*d.stride+b] = d.transPriorityIncrement[oldIdx]
-			newPre[int(g)*d.stride+b] = d.transPreTags[oldIdx]
-			newPost[int(g)*d.stride+b] = d.transPostTags[oldIdx]
 		}
 	}
 
 	d.transitions = newTransitions
-	d.transPriorityIncrement = newIncrements
-	d.transPreTags = newPre
-	d.transPostTags = newPost
+	d.tagUpdateIndices = newUpdateIndices
 	d.accepting = newAccepting
 	d.stateMatchPriority = newPrio
 	d.stateMatchTags = newMatchTags

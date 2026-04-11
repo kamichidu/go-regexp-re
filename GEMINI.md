@@ -20,8 +20,12 @@ Every implementation must adhere to these pillars to ensure maximum performance:
 - **Byte-Level Transitions**: All state transitions must operate on raw bytes to minimize branching and memory latency.
 
 ### 2.3 Cache Locality Optimization
-- **Flattened Memory Layout**: Transition tables MUST be stored as a single, contiguous `int32` array. Access must use `table[state * stride + byte]` to eliminate pointer chasing and maximize L1/L2 cache hit rates.
-- **Unified Transition Table**: To minimize memory footprint, states for Search (with restart closure) and Match (without restart) MUST be unified into a single physical transition table. This improves L3 cache hit rates and halves the memory requirements for compiled regular expressions.
+- **Flattened Memory Layout**: Transition tables MUST be stored as a contiguous `int32` array. Access must use `table[state * stride + byte]` to eliminate pointer chasing and maximize L1/L2 cache hit rates.
+- **MSB Flagging for Tagged Transitions**: To support submatches without extra memory overhead in the fast path, the Most Significant Bit (MSB) of a transition value is used as a flag.
+  - **MSB = 0**: The value is the `nextState`. No further action is needed (Fast Path).
+  - **MSB = 1**: Indicates a "Tagged Transition". The lower 31 bits represent the `nextState`, and an associated index in a separate `tagUpdateIndices` array points to interned `TransitionUpdate` data (Priority increments, Pre/Post tags).
+- **Interned Update Tables**: Tag update information MUST be deduplicated (interned) during compilation. Multiple transitions with the same tag updates MUST share a single entry in the update table to maximize memory efficiency.
+- **Unified Transition Table**: To minimize memory footprint, states for Search (with restart closure) and Match (without restart) MUST be unified into a single physical transition table.
 - **Minimize Memory Latency**: Keep core data structures small enough to fit within L2/L3 caches even for large pattern sets.
 
 ### 2.4 Execution Switching Strategy
@@ -32,19 +36,18 @@ To maximize throughput, the engine MUST select the most efficient execution loop
 - **Extended Path (Virtual Byte Insertion)**: Selected for patterns with anchors (e.g., `^`, `$`, `\b`). It employs "Virtual Bytes" (indices 256+) injected at character boundaries to process empty-width assertions within the DFA's $O(n)$ framework.
 - **Submatch Path (Path-Guided 2-Pass DFA)**: Selected when submatches are requested. It utilizes a high-speed DFA scan to identify match boundaries, followed by a guided DFA second pass for efficient submatch extraction.
 
-### 2.5 Submatch Extraction Architecture (Path-Guided 2nd Pass DFA)
-The engine adopts a **Path-Guided 2nd Pass DFA** architecture as its definitive strategy for submatch extraction. This architecture prioritizes DFA throughput even during submatch resolution, ensuring $O(n)$ predictability and minimal CPU overhead.
+### 2.5 Submatch Extraction Architecture (Tagged DFA 2nd Pass)
+The engine adopts a **Tagged DFA 2nd Pass** architecture for submatch extraction. This architecture prioritizes DFA throughput even during submatch resolution, ensuring $O(n)$ predictability and minimal CPU overhead.
 
 - **Intentional Exclusion of TDFA**: Full Tagged DFA (TDFA) with 1-pass resolution is explicitly excluded to avoid catastrophic state explosion.
 - **Phase 1: Boundary Discovery & Winner Identification**:
   - A specialized DFA scan identifies match boundaries `[start, end]`.
-  - The engine tracks **Absolute Priority** (cumulative transition increments + state match priority) to identify the "winning" NFA path according to leftmost-first semantics.
-- **Phase 2: Path-Guided DFA Rescan (Primary)**:
+  - The engine tracks **Absolute Priority** (cumulative transition increments from **MSB-flagged updates** + state match priority) to identify the "winning" NFA path.
+- **Phase 2: DFA Tag Collection (Primary)**:
   - If the winning path corresponds to the highest priority (Priority 0), the engine rescans the `[start, end]` range using the same DFA table.
-  - Submatch tags are collected directly from DFA transition edges (`PreTags` and `PostTags`), eliminating NFA thread management overhead.
+  - Submatch tags are collected from **Tagged Transitions** (identified by MSB=1), eliminating NFA thread management overhead.
 - **Phase 2: Targeted NFA Rescan (Fallback)**:
-  - If a lower priority path won (common in complex greedy loops, `targetPriority > 0`), the engine falls back to an optimized NFA rescan ONLY within the identified `[start, end]` bounds.
-  - **Eliminate Rune Decoding**: The NFA fallback MUST operate directly on raw bytes to maintain performance consistency.
+  - If a lower priority path won (`targetPriority > 0`), the engine falls back to an optimized NFA rescan ONLY within the identified `[start, end]` bounds.
 
 ### 2.6 Prefix-Skip Optimization (SIMD Acceleration)
 To maximize throughput for patterns with literal prefixes, the engine MUST utilize a **Prefix-Skip** optimization:
@@ -126,6 +129,7 @@ To strictly guarantee $O(n)$ time complexity, all search operations (finding a m
 
 ### 3.3 Interface Compatibility Policy
 - **Interface Consistency**: We aim to provide a compatible interface for the most commonly used features (Find, Replace, Split, etc.) while adhering to our performance-first philosophy.
+- **Extended Options**: Non-standard APIs like `CompileWithOption` are provided to allow users to tune performance characteristics (e.g., `MaxMemory` for large pattern sets) without breaking the standard signature.
 
 ## 4. Engineering & Validation Standards
 - **Performance-First Benchmarking**: Any change must be validated against the standard `regexp` package. Significant throughput regressions are unacceptable.
