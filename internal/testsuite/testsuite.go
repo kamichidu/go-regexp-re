@@ -37,22 +37,90 @@ type Matcher interface {
 var (
 	engines []Engine
 
-	findTests    []FindTest
-	fowlerFiles  []FowlerFile
-	re2SearchSet *RE2TestSet
-	postalCodes  []string
+	findTestsOnce    sync.Once
+	findTests        []FindTest
+	fowlerFilesOnce  sync.Once
+	fowlerFiles      []FowlerFile
+	re2SearchSetOnce sync.Once
+	re2SearchSet     *RE2TestSet
+	postalCodesOnce  sync.Once
+	postalCodes      []string
 
 	// New corpora
-	sherlock    string
-	wikipediaJP string
-	httpLogs    string
+	sherlockOnce    sync.Once
+	sherlock        string
+	wikipediaJPOnce sync.Once
+	wikipediaJP     string
+	httpLogsOnce    sync.Once
+	httpLogs        string
 
-	initialized bool
+	gorootOnce  sync.Once
+	gorootCache string
 
 	// Compatibility reporting
 	EnableCompatibilityReport bool
 	registry                  CompatibilityRegistry
 )
+
+func getGoroot() string {
+	gorootOnce.Do(func() {
+		gorootCache = runtime.GOROOT()
+		if gorootCache == "" {
+			out, err := exec.Command("go", "env", "GOROOT").Output()
+			if err != nil {
+				log.Fatal("could not find GOROOT")
+			}
+			gorootCache = strings.TrimSpace(string(out))
+		}
+	})
+	return gorootCache
+}
+
+func ensureFindTests() {
+	findTestsOnce.Do(func() {
+		findTests = loadFindTestsFromGo(filepath.Join(getGoroot(), "src", "regexp", "find_test.go"))
+	})
+}
+
+func ensureFowlerFiles() {
+	fowlerFilesOnce.Do(func() {
+		testdataDir := filepath.Join(getGoroot(), "src", "regexp", "testdata")
+		datFiles, _ := filepath.Glob(filepath.Join(testdataDir, "*.dat"))
+		for _, file := range datFiles {
+			fowlerFiles = append(fowlerFiles, loadFowlerFile(file))
+		}
+	})
+}
+
+func ensureRE2SearchSet() {
+	re2SearchSetOnce.Do(func() {
+		re2SearchSet = loadRE2SearchFile(filepath.Join(getGoroot(), "src", "regexp", "testdata", "re2-search.txt"))
+	})
+}
+
+func ensurePostalCodes() {
+	postalCodesOnce.Do(func() {
+		postalCodes = parsePostalCodes(loadCorpus("ken_all.zip", "https://www.post.japanpost.jp/zipcode/dl/kogaki/zip/ken_all.zip", "KEN_ALL.CSV"))
+	})
+}
+
+func ensureSherlock() {
+	sherlockOnce.Do(func() {
+		sherlock = loadCorpus("sherlock.txt", "https://www.gutenberg.org/files/1661/1661-0.txt")
+	})
+}
+
+func ensureWikipediaJP() {
+	wikipediaJPOnce.Do(func() {
+		wikipediaJP = loadCorpus("wikipedia_jp_sample.txt", "https://raw.githubusercontent.com/taku910/mecab/master/mecab-ipadic/test/t/test.txt")
+	})
+}
+
+func ensureHttpLogs() {
+	httpLogsOnce.Do(func() {
+		httpLogs = loadCorpus("http_logs.txt", "https://raw.githubusercontent.com/elastic/examples/master/Common%20Data%20Formats/apache_logs/apache_logs")
+	})
+}
 
 type CompatibilityRegistry struct {
 	mu       sync.Mutex
@@ -159,46 +227,6 @@ func Register(engine Engine) {
 	engines = append(engines, engine)
 }
 
-// initialize loads all required data from GOROOT and external sources.
-func initialize() {
-	if initialized {
-		return
-	}
-
-	goroot := runtime.GOROOT()
-	if goroot == "" {
-		out, err := exec.Command("go", "env", "GOROOT").Output()
-		if err != nil {
-			log.Fatal("could not find GOROOT")
-		}
-		goroot = strings.TrimSpace(string(out))
-	}
-
-	testdataDir := filepath.Join(goroot, "src", "regexp", "testdata")
-
-	// 1. Load find tests
-	findTests = loadFindTestsFromGo(filepath.Join(goroot, "src", "regexp", "find_test.go"))
-
-	// 2. Load Fowler tests
-	datFiles, _ := filepath.Glob(filepath.Join(testdataDir, "*.dat"))
-	for _, file := range datFiles {
-		fowlerFiles = append(fowlerFiles, loadFowlerFile(file))
-	}
-
-	// 3. Load RE2 search tests
-	re2SearchSet = loadRE2SearchFile(filepath.Join(testdataDir, "re2-search.txt"))
-
-	// 4. Load Japan Post postal codes
-	postalCodes = parsePostalCodes(loadCorpus("ken_all.zip", "https://www.post.japanpost.jp/zipcode/dl/kogaki/zip/ken_all.zip", "KEN_ALL.CSV"))
-
-	// 5. Load new corpora
-	sherlock = loadCorpus("sherlock.txt", "https://www.gutenberg.org/files/1661/1661-0.txt")
-	wikipediaJP = loadCorpus("wikipedia_jp_sample.txt", "https://raw.githubusercontent.com/taku910/mecab/master/mecab-ipadic/test/t/test.txt") // Temporary sample
-	httpLogs = loadCorpus("http_logs.txt", "https://raw.githubusercontent.com/elastic/examples/master/Common%20Data%20Formats/apache_logs/apache_logs")
-
-	initialized = true
-}
-
 func loadCorpus(name, url string, targetInZip ...string) string {
 	cacheDir := filepath.Join(os.TempDir(), "go-regexp-re", "testdata")
 	path := filepath.Join(cacheDir, name)
@@ -268,7 +296,6 @@ func parsePostalCodes(csvData string) []string {
 
 // Main is the entry point for testing.M.
 func Main(m *testing.M) {
-	initialize()
 	code := m.Run()
 	if EnableCompatibilityReport {
 		registry.Report()
@@ -278,34 +305,53 @@ func Main(m *testing.M) {
 
 // RunCompatibility runs find_test.go compatibility tests for all registered engines.
 func RunCompatibility(t *testing.T) {
+	ensureFindTests()
 	if len(findTests) == 0 {
 		t.Skip("no find tests loaded")
 	}
+
+	type testCase struct {
+		text    string
+		matches [][]int
+	}
+	grouped := make(map[string][]testCase)
+	var patterns []string
+	for _, tt := range findTests {
+		if _, ok := grouped[tt.pat]; !ok {
+			patterns = append(patterns, tt.pat)
+		}
+		grouped[tt.pat] = append(grouped[tt.pat], testCase{tt.text, tt.matches})
+	}
+
 	for _, engine := range engines {
 		t.Run(engine.Name, func(t *testing.T) {
-			for _, tt := range findTests {
-				t.Run(fmt.Sprintf("pat=%q/text=%q", tt.pat, tt.text), func(t *testing.T) {
-					if strings.Contains(tt.pat, "\uFFFD") || strings.Contains(tt.pat, "\\x{fffd}") {
-						t.Skip("skipping U+FFFD test")
-					}
+			for _, pat := range patterns {
+				if strings.Contains(pat, "\uFFFD") || strings.Contains(pat, "\\x{fffd}") {
+					continue
+				}
 
-					re, err := engine.Compile(tt.pat)
+				t.Run(fmt.Sprintf("pat=%q", pat), func(t *testing.T) {
+					re, err := engine.Compile(pat)
 					if err != nil {
 						if EnableCompatibilityReport {
-							registry.record(engine.Name, err, false)
+							for range grouped[pat] {
+								registry.record(engine.Name, err, false)
+							}
 						}
-						t.Skipf("failed to compile %q: %v", tt.pat, err)
+						t.Skipf("failed to compile %q: %v", pat, err)
 						return
 					}
 
-					wantMatch := len(tt.matches) > 0
-					gotMatch := re.MatchString(tt.text)
-					passed := gotMatch == wantMatch
-					if EnableCompatibilityReport {
-						registry.record(engine.Name, nil, passed)
-					}
-					if !passed {
-						t.Errorf("MatchString() failed\npattern: %q\ninput:   %q\ngot:     %v\nwant:    %v", tt.pat, tt.text, gotMatch, wantMatch)
+					for _, tc := range grouped[pat] {
+						wantMatch := len(tc.matches) > 0
+						gotMatch := re.MatchString(tc.text)
+						passed := gotMatch == wantMatch
+						if EnableCompatibilityReport {
+							registry.record(engine.Name, nil, passed)
+						}
+						if !passed {
+							t.Errorf("MatchString() failed\npattern: %q\ninput:   %q\ngot:     %v\nwant:    %v", pat, tc.text, gotMatch, wantMatch)
+						}
 					}
 				})
 			}
@@ -315,6 +361,7 @@ func RunCompatibility(t *testing.T) {
 
 // RunSubmatchCompatibility runs capture group compatibility tests for all registered engines.
 func RunSubmatchCompatibility(t *testing.T) {
+	ensureFindTests()
 	if len(findTests) == 0 {
 		t.Skip("no find tests loaded")
 	}
@@ -331,41 +378,57 @@ func RunSubmatchCompatibility(t *testing.T) {
 		t.Skip("no reference engine GoRegexp found")
 	}
 
+	type testCase struct {
+		text string
+	}
+	grouped := make(map[string][]testCase)
+	var patterns []string
+	for _, tt := range findTests {
+		if _, ok := grouped[tt.pat]; !ok {
+			patterns = append(patterns, tt.pat)
+		}
+		grouped[tt.pat] = append(grouped[tt.pat], testCase{tt.text})
+	}
+
 	for _, engine := range engines {
 		if engine.Name == "GoRegexp" {
 			continue
 		}
 		t.Run(engine.Name, func(t *testing.T) {
-			for _, tt := range findTests {
-				t.Run(fmt.Sprintf("pat=%q/text=%q", tt.pat, tt.text), func(t *testing.T) {
-					if strings.Contains(tt.pat, "\uFFFD") || strings.Contains(tt.pat, "\\x{fffd}") {
-						t.Skip("skipping U+FFFD test")
-					}
+			for _, pat := range patterns {
+				if strings.Contains(pat, "\uFFFD") || strings.Contains(pat, "\\x{fffd}") {
+					continue
+				}
 
-					re, err := engine.Compile(tt.pat)
+				t.Run(fmt.Sprintf("pat=%q", pat), func(t *testing.T) {
+					re, err := engine.Compile(pat)
 					if err != nil {
 						if EnableCompatibilityReport {
-							registry.record(engine.Name, err, false)
+							for range grouped[pat] {
+								registry.record(engine.Name, err, false)
+							}
 						}
-						t.Skipf("failed to compile %q: %v", tt.pat, err)
+						t.Skipf("failed to compile %q: %v", pat, err)
 						return
 					}
 
-					refRe, err := referenceEngine.Compile(tt.pat)
+					refRe, err := referenceEngine.Compile(pat)
 					if err != nil {
-						t.Skipf("reference engine failed to compile %q: %v", tt.pat, err)
+						t.Skipf("reference engine failed to compile %q: %v", pat, err)
 						return
 					}
 
-					want := refRe.FindStringSubmatchIndex(tt.text)
-					got := re.FindStringSubmatchIndex(tt.text)
-					passed := reflect.DeepEqual(got, want)
-					if EnableCompatibilityReport {
-						registry.record(engine.Name, nil, passed)
-					}
+					for _, tc := range grouped[pat] {
+						want := refRe.FindStringSubmatchIndex(tc.text)
+						got := re.FindStringSubmatchIndex(tc.text)
+						passed := reflect.DeepEqual(got, want)
+						if EnableCompatibilityReport {
+							registry.record(engine.Name, nil, passed)
+						}
 
-					if !passed {
-						t.Errorf("FindStringSubmatchIndex() failed\npattern: %q\ninput:   %q\ngot:     %v\nwant:    %v", tt.pat, tt.text, got, want)
+						if !passed {
+							t.Errorf("FindStringSubmatchIndex() failed\npattern: %q\ninput:   %q\ngot:     %v\nwant:    %v", pat, tc.text, got, want)
+						}
 					}
 				})
 			}
@@ -375,6 +438,7 @@ func RunSubmatchCompatibility(t *testing.T) {
 
 // RunFowler runs Fowler tests for all registered engines.
 func RunFowler(t *testing.T) {
+	ensureFowlerFiles()
 	if len(fowlerFiles) == 0 {
 		t.Skip("no fowler tests loaded")
 	}
@@ -424,6 +488,7 @@ func RunFowler(t *testing.T) {
 
 // RunRE2Search runs RE2 search tests for all registered engines.
 func RunRE2Search(t *testing.T) {
+	ensureRE2SearchSet()
 	if re2SearchSet == nil {
 		t.Skip("re2-search.txt not loaded")
 	}
@@ -466,6 +531,7 @@ func runOnEngines(b *testing.B, f func(b *testing.B, engine Engine)) {
 
 // BenchmarkStandardSuite benchmarks engines using re2-search.txt.
 func BenchmarkStandardSuite(b *testing.B) {
+	ensureRE2SearchSet()
 	if re2SearchSet == nil {
 		b.Skip("re2-search.txt not loaded")
 	}
@@ -506,7 +572,7 @@ func BenchmarkStandardSuite(b *testing.B) {
 
 // BenchmarkLargeAlternation benchmarks engines with thousands of postal codes.
 func BenchmarkLargeAlternation(b *testing.B) {
-	initialize()
+	ensurePostalCodes()
 	counts := []int{10, 100, 1000, 10000}
 	runOnEngines(b, func(b *testing.B, engine Engine) {
 		for _, count := range counts {
@@ -539,7 +605,7 @@ func BenchmarkLargeAlternation(b *testing.B) {
 
 // BenchmarkLiteralScan benchmarks literal patterns with Sherlock.
 func BenchmarkLiteralScan(b *testing.B) {
-	initialize()
+	ensureSherlock()
 	if sherlock == "" {
 		b.Skip("sherlock corpus not loaded")
 	}
@@ -567,7 +633,7 @@ func BenchmarkLiteralScan(b *testing.B) {
 
 // BenchmarkAnchors benchmarks anchor patterns with HTTP logs.
 func BenchmarkAnchors(b *testing.B) {
-	initialize()
+	ensureHttpLogs()
 	if httpLogs == "" {
 		b.Skip("http logs corpus not loaded")
 	}
@@ -596,7 +662,6 @@ func BenchmarkAnchors(b *testing.B) {
 
 // BenchmarkCapturing benchmarks capturing groups with Email/URL patterns.
 func BenchmarkCapturing(b *testing.B) {
-	initialize()
 	// Use a sample input text for capturing
 	input := "Contact us at support@example.com or visit https://example.com/path?q=1#fragment"
 
@@ -626,7 +691,6 @@ func BenchmarkCapturing(b *testing.B) {
 
 // BenchmarkNFAWorstCase benchmarks (a+)+b against a...ac.
 func BenchmarkNFAWorstCase(b *testing.B) {
-	initialize()
 	pattern := `(a+)+b`
 	input := strings.Repeat("a", 25) + "c"
 
