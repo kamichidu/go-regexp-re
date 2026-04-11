@@ -317,17 +317,25 @@ func execLoop[T loopTrait](re *Regexp, b []byte) (int, int, int) {
 	trans := dfa.Transitions()
 	stride := dfa.Stride()
 	accepting := dfa.Accepting()
+	isAlwaysTrue := dfa.IsAlwaysTrueFunc()
+	warpPoints := dfa.WarpPoints()
+	warpPointState := dfa.WarpPointStates()
 
 	if trait.HasAnchors() {
 		state := dfa.StartState()
 		for i := 0; i <= len(b); i++ {
 			ctx := ir.CalculateContext(b, i)
 			s := re.applyContextToState(dfa, state, ctx, nil)
-			if s != ir.InvalidState && accepting[s] {
+			if s != ir.InvalidState && (accepting[s] || isAlwaysTrue(s)) {
 				return re.findBoundary(b)
 			}
 
 			if i < len(b) {
+				// SIMD Warp for extended loop (only if current state is not anchor-sensitive)
+				// For now, only warp if the state is NOT affected by virtual bytes.
+				// However, determining this statically is complex, so we skip warp in extended loop for safety.
+				// In a future optimization, we can check if ALL transitions from this state lead to the same target for ALL virtual bytes.
+
 				state = re.applyContextToState(dfa, state, ctx, nil)
 				state = trans[int(state)*stride+int(b[i])]
 				if state == ir.InvalidState {
@@ -351,17 +359,27 @@ func execLoop[T loopTrait](re *Regexp, b []byte) (int, int, int) {
 		}
 
 		state := dfa.StartState()
-		if accepting[state] {
+		if accepting[state] || isAlwaysTrue(state) {
 			return re.findBoundary(b)
 		}
 
 		for ; i < len(b); i++ {
-			state = trans[int(state)*stride+int(b[i])]
-			if state == ir.InvalidState {
-				state = dfa.StartState()
+			// SIMD Warp
+			if wp := warpPoints[state]; wp != -1 {
+				idx := bytes.IndexByte(b[i:], byte(wp))
+				if idx < 0 {
+					return -1, -1, -1
+				}
+				i += idx
+				state = warpPointState[state]
+			} else {
+				state = trans[int(state)*stride+int(b[i])]
+				if state == ir.InvalidState {
+					state = dfa.StartState()
+				}
 			}
 
-			if accepting[state] {
+			if accepting[state] || isAlwaysTrue(state) {
 				return re.findBoundary(b)
 			}
 		}

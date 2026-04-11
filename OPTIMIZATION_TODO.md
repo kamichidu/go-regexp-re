@@ -3,19 +3,19 @@
 This document tracks the remaining optimization tasks based on the project's high-performance DFA strategy.
 
 ## 1. SIMD Warp Execution Engine Integration
-- [ ] **Task**: Integrate `warpPoints` metadata into `execLoop`.
-- [ ] **Implementation**:
+- [x] **Task**: Integrate `warpPoints` metadata into `execLoop`.
+- [x] **Implementation**:
     - In `execLoop`, check if the current state has a `warpPoint` (a byte that leads to progress while others stay in the same state).
-    - Use `bytes.Index` to SIMD-skip the input until that byte is found.
-- [ ] **Impact**: Significant throughput boost for patterns with long literal components.
+    - Use `bytes.IndexByte` to SIMD-skip the input until that byte is found.
+- [x] **Impact**: Significant throughput boost for patterns with long literal components.
 
 ## 2. SCC Analysis for Early Exit (Always True)
-- [ ] **Task**: Implement `findSCCs` in `internal/ir/dfa.go` using Tarjan's or Kosaraju's algorithm.
-- [ ] **Implementation**:
+- [x] **Task**: Implement `findSCCs` in `internal/ir/dfa.go` using Tarjan's or Kosaraju's algorithm.
+- [x] **Implementation**:
     - Identify Strongly Connected Components (SCCs).
     - Mark states as `isAlwaysTrue` if they belong to an SCC that is guaranteed to reach an accepting state regardless of further input.
     - Update `execLoop` to exit immediately when an `isAlwaysTrue` state is reached.
-- [ ] **Impact**: Faster matching for patterns like `.*` where trailing content doesn't affect the match outcome.
+- [x] **Impact**: Faster matching for patterns like `.*` where trailing content doesn't affect the match outcome.
 
 ## 3. Unified Transition Table (Single Table, Multiple Entries)
 - [ ] **Task**: Consolidate the separate Search and Match DFAs into a single physical transition table.

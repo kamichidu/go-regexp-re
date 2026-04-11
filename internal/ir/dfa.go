@@ -67,6 +67,219 @@ type DFA struct {
 	stateMatchPriority []int
 	stateMatchTags     []uint64
 	stateIsBestMatch   []bool
+
+	// Phase 2 Metadata
+	isAlwaysTrue   []bool
+	warpPoints     []int16   // byte value to skip to, or -1
+	warpPointState []StateID // state to jump to after skip
+}
+
+func (d *DFA) IsAlwaysTrue(s StateID) bool {
+	if s < 0 || int(s) >= d.numStates || d.isAlwaysTrue == nil {
+		return false
+	}
+	return d.isAlwaysTrue[s]
+}
+
+func (d *DFA) IsAlwaysTrueFunc() func(StateID) bool {
+	return func(s StateID) bool {
+		if s < 0 || int(s) >= d.numStates || d.isAlwaysTrue == nil {
+			return false
+		}
+		return d.isAlwaysTrue[s]
+	}
+}
+
+func (d *DFA) WarpPoint(s StateID) int16 {
+	if s < 0 || int(s) >= d.numStates || d.warpPoints == nil {
+		return -1
+	}
+	return d.warpPoints[s]
+}
+
+func (d *DFA) WarpPoints() []int16 {
+	return d.warpPoints
+}
+
+func (d *DFA) WarpPointState(s StateID) StateID {
+	if s < 0 || int(s) >= d.numStates || d.warpPointState == nil {
+		return InvalidState
+	}
+	return d.warpPointState[s]
+}
+
+func (d *DFA) WarpPointStates() []StateID {
+	return d.warpPointState
+}
+
+func (d *DFA) computePhase2Metadata() {
+	d.isAlwaysTrue = make([]bool, d.numStates)
+	d.warpPoints = make([]int16, d.numStates)
+	d.warpPointState = make([]StateID, d.numStates)
+
+	for i := range d.warpPoints {
+		d.warpPoints[i] = -1
+		d.warpPointState[i] = InvalidState
+	}
+
+	d.findWarpPoints()
+	d.findSCCs()
+}
+
+func (d *DFA) findWarpPoints() {
+	for i := 0; i < d.numStates; i++ {
+		currState := StateID(i)
+		// A Warp Point is a state where:
+		// 1. Exactly one byte leads to progress (a different state).
+		// 2. All other bytes lead to InvalidState or the same state.
+		// 3. The state is NOT accepting (to avoid skipping over a match).
+		if d.accepting[i] {
+			continue
+		}
+
+		progressByte := -1
+		targetState := InvalidState
+		possible := true
+
+		for b := 0; b < 256; b++ {
+			next := d.transitions[i*d.stride+b]
+			if next == InvalidState || next == currState {
+				continue
+			}
+			if progressByte == -1 {
+				progressByte = b
+				targetState = next
+			} else {
+				// More than one progress byte.
+				possible = false
+				break
+			}
+		}
+
+		if possible && progressByte != -1 {
+			d.warpPoints[i] = int16(progressByte)
+			d.warpPointState[i] = targetState
+		}
+	}
+}
+
+func (d *DFA) findSCCs() {
+	// Tarjan's algorithm to find SCCs.
+	// We want to identify states that are "Always True", meaning once entered,
+	// any further input will lead to a match eventually (or is already matching).
+	// Actually, the stronger condition for "Always True" in a DFA for Search is:
+	// A state s is Always True if all paths from s eventually hit an accepting state
+	// AND stay in accepting states (or the match is already guaranteed).
+	// In our Search DFA, we have a search closure (.*?), so if a state belongs to
+	// an SCC where every state is accepting, it's Always True.
+
+	num := 0
+	index := make([]int, d.numStates)
+	lowlink := make([]int, d.numStates)
+	onStack := make([]bool, d.numStates)
+	stack := []int{}
+
+	for i := range index {
+		index[i] = -1
+	}
+
+	var strongconnect func(v int)
+	strongconnect = func(v int) {
+		index[v] = num
+		lowlink[v] = num
+		num++
+		stack = append(stack, v)
+		onStack[v] = true
+
+		for b := 0; b < 256; b++ {
+			w := int(d.transitions[v*d.stride+b])
+			if w == -1 {
+				continue
+			}
+			if index[w] == -1 {
+				strongconnect(w)
+				if lowlink[w] < lowlink[v] {
+					lowlink[v] = lowlink[w]
+				}
+			} else if onStack[w] {
+				if index[w] < lowlink[v] {
+					lowlink[v] = index[w]
+				}
+			}
+		}
+
+		if lowlink[v] == index[v] {
+			// Found an SCC.
+			var component []int
+			for {
+				w := stack[len(stack)-1]
+				stack = stack[:len(stack)-1]
+				onStack[w] = false
+				component = append(component, w)
+				if w == v {
+					break
+				}
+			}
+
+			// Check if this component is "Always True".
+			// For a component to be Always True:
+			// 1. All states in the component must be accepting.
+			// 2. All transitions from any state in the component must lead to
+			//    another state in the same component OR another Always True component.
+			// This requires processing SCCs in reverse topological order.
+			// Tarjan's naturally finds them in reverse topological order.
+
+			allAccepting := true
+			for _, s := range component {
+				if !d.accepting[s] {
+					allAccepting = false
+					break
+				}
+			}
+
+			if allAccepting {
+				allTransitionsToAlwaysTrue := true
+				for _, s := range component {
+					for b := 0; b < 256; b++ {
+						next := int(d.transitions[s*d.stride+b])
+						if next == -1 {
+							// In a Search DFA, next should ideally not be -1 for bytes if it's always true,
+							// but if it is -1, it means it doesn't match, so it's NOT always true.
+							allTransitionsToAlwaysTrue = false
+							break
+						}
+						// If next is not in current component, it must be in a previously
+						// identified Always True component.
+						inCurrent := false
+						for _, cs := range component {
+							if cs == next {
+								inCurrent = true
+								break
+							}
+						}
+						if !inCurrent && !d.isAlwaysTrue[next] {
+							allTransitionsToAlwaysTrue = false
+							break
+						}
+					}
+					if !allTransitionsToAlwaysTrue {
+						break
+					}
+				}
+				if allTransitionsToAlwaysTrue {
+					for _, s := range component {
+						d.isAlwaysTrue[s] = true
+					}
+				}
+			}
+		}
+	}
+
+	for i := 0; i < d.numStates; i++ {
+		if index[i] == -1 {
+			strongconnect(i)
+		}
+	}
 }
 
 const (
@@ -514,6 +727,7 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, withSearch bool) err
 	}
 
 	d.minimize()
+	d.computePhase2Metadata()
 
 	return nil
 }
