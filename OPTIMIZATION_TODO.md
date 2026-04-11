@@ -14,7 +14,7 @@ This document tracks the remaining optimization tasks based on the project's hig
 - [x] **Implementation**:
     - Identify Strongly Connected Components (SCCs).
     - Mark states as `isAlwaysTrue` if they belong to an SCC that is guaranteed to reach an accepting state regardless of further input.
-    - Update `execLoop` to exit immediately when an `isAlwaysTrue` state is reached.
+    - Update `execLoop` to exit immediately when an `isAlwaysTrue` state is reached (Match only).
 - [x] **Impact**: Faster matching for patterns like `.*` where trailing content doesn't affect the match outcome.
 
 ## 3. Unified Transition Table (Single Table, Multiple Entries)
@@ -36,3 +36,11 @@ This document tracks the remaining optimization tasks based on the project's hig
     - [x] Ensure `execLoop` instances are free of unnecessary `runtime.panicIndex` (Bounds Check Elimination).
     - [x] Confirm that trait-based conditions (e.g., `trait.HasAnchors()`) are completely eliminated in the assembly.
 - [x] **Impact**: Minimizes Instruction Per Byte (IPB) by ensuring optimal machine code generation. Hot loops are now verified to be free of bounds check overhead.
+
+## 6. O(n) Search with Unified DFA
+- [x] **Task**: Eliminate O(n^2) behavior in anchored searches by making the Search DFA complete.
+- [x] **Implementation**:
+    - Added `SearchRestartPenalty` to track the "skipped" start positions in a single forward pass.
+    - Ensured every state in Search DFA has a transition for every byte (fallback to `SearchState` with penalty).
+    - Refactored `execLoop` to track the absolute best match across the entire scan.
+- [x] **Impact**: Guaranteed O(n) scan time for ALL regular expressions, including those with anchors and complex restarts.

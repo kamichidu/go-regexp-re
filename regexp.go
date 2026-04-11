@@ -126,6 +126,18 @@ func CompileContext(ctx context.Context, expr string) (*Regexp, error) {
 	return res, nil
 }
 
+func (re *Regexp) bindMatchLoop() {
+	if re.dfa.HasAnchors() {
+		re.match = func(b []byte) (int, int, int) {
+			return execLoop[extendedLoopTrait](re, b)
+		}
+	} else {
+		re.match = func(b []byte) (int, int, int) {
+			return execLoop[fastLoopTrait](re, b)
+		}
+	}
+}
+
 // Match reports whether the byte slice b contains any match of the regular expression re.
 func (re *Regexp) Match(b []byte) bool {
 	i, _, _ := re.match(b)
@@ -158,24 +170,25 @@ func (re *Regexp) FindSubmatchIndex(b []byte) []int {
 		return nil
 	}
 
-	// Special Case: Greedy loop resolution for simple DFA.
-	// If targetPriority > 0, we use NFA rescan because a simple Tagged DFA
-	// only records the tags for Priority 0 (the best path in each state).
-	if targetPriority > 0 {
-		regs := ir.NFAMatch(re.prog, re.dfa.TrieRoots(), b, start, end, re.numSubexp)
-		if regs != nil {
-			regs[0], regs[1] = start, end
-			return regs
-		}
-	}
-
 	// Phase 2: Simple Tagged DFA Rescan (O(n) for Priority 0 matches).
+	// Priority 0 means the match started at the beginning of the pattern
+	// within the matched range [start, end].
 	regs := make([]int, (re.numSubexp+1)*2)
 	for i := range regs {
 		regs[i] = -1
 	}
 	regs[0] = start
 	regs[1] = end
+
+	// If the inner priority was not 0, we use NFA fallback.
+	// targetPriority % 1000000 gives the NFA-style priority within the pattern.
+	if (targetPriority % 1000000) > 0 {
+		nregs := ir.NFAMatch(re.prog, re.dfa.TrieRoots(), b, start, end, re.numSubexp)
+		if nregs != nil {
+			nregs[0], nregs[1] = start, end
+			return nregs
+		}
+	}
 
 	dfa := re.dfa
 	trans := dfa.Transitions()
@@ -281,18 +294,6 @@ func (re *Regexp) String() string {
 	return re.expr
 }
 
-func (re *Regexp) bindMatchLoop() {
-	if re.dfa.HasAnchors() {
-		re.match = func(b []byte) (int, int, int) {
-			return execLoop[extendedLoopTrait](re, b)
-		}
-	} else {
-		re.match = func(b []byte) (int, int, int) {
-			return execLoop[fastLoopTrait](re, b)
-		}
-	}
-}
-
 type loopTrait interface {
 	HasAnchors() bool
 }
@@ -306,229 +307,85 @@ type extendedLoopTrait struct{}
 func (extendedLoopTrait) HasAnchors() bool { return true }
 
 func execLoop[T loopTrait](re *Regexp, b []byte) (int, int, int) {
-	var trait T
+	var _ T
 	dfa := re.dfa
 	trans := dfa.Transitions()
+	increments := dfa.PriorityIncrements()
 	stride := dfa.Stride()
 	accepting := dfa.Accepting()
 	isAlwaysTrue := dfa.IsAlwaysTrueFunc()
-	warpPoints := dfa.WarpPoints()
-	warpPointState := dfa.WarpPointStates()
 
-	numStates := dfa.TotalStates()
+	numStates := dfa.NumStates()
 	numBytes := len(b)
 	lb := b[:numBytes] // BCE hint
 
-	if trait.HasAnchors() {
-		state := dfa.SearchState()
-		for i := 0; i <= numBytes; i++ {
-			ctx := ir.CalculateContext(lb, i)
-			s := re.applyContextToState(dfa, state, ctx, nil)
-			if s != ir.InvalidState {
-				idx := int(s)
-				if idx >= 0 && idx < len(accepting) {
-					if accepting[idx] || isAlwaysTrue(s) {
-						return re.findBoundary(lb)
+	bestStart, bestEnd, bestPriority := -1, -1, 1<<30-1
+	currentPriority := 0
+
+	state := dfa.SearchState()
+	if re.anchorStart {
+		state = dfa.MatchState()
+	}
+
+	for i := 0; i <= numBytes; i++ {
+		// 1. Check for match at position i
+		ctx := ir.CalculateContext(lb, i)
+		s := re.applyContextToState(dfa, state, ctx, nil)
+		if s != ir.InvalidState {
+			idx := int(s)
+			if idx >= 0 && idx < len(accepting) {
+				if accepting[idx] {
+					p := currentPriority + dfa.MatchPriority(s)
+					if p <= bestPriority {
+						bestPriority = p
+						bestEnd = i
+						bestStart = p / ir.SearchRestartPenalty
 					}
 				}
+				if isAlwaysTrue(s) {
+					// AlwaysTrue means we are guaranteed to match eventually.
+					// If we only need Match(), we could return true.
+				}
 			}
+		} else {
+			if re.anchorStart {
+				break
+			}
+		}
 
-			if i < numBytes {
-				state = re.applyContextToState(dfa, state, ctx, nil)
-				sidx := int(state)
-				// Explicit check for BCE
-				if i >= 0 && i < len(lb) {
-					bval := int(lb[i])
-					if sidx >= 0 && sidx < numStates && bval >= 0 && bval < stride {
-						off := sidx*stride + bval
-						if off >= 0 && off < len(trans) {
-							state = trans[off]
-						} else {
-							state = ir.InvalidState
-						}
+		// 2. Transition to next byte
+		if i < numBytes {
+			s = re.applyContextToState(dfa, state, ctx, nil)
+			sidx := int(s)
+			if i >= 0 && i < len(lb) {
+				bval := int(lb[i])
+				if sidx >= 0 && sidx < numStates && bval >= 0 && bval < stride {
+					off := sidx*stride + bval
+					if off >= 0 && off < len(trans) {
+						currentPriority += int(increments[off])
+						state = trans[off]
 					} else {
 						state = ir.InvalidState
 					}
 				} else {
 					state = ir.InvalidState
 				}
-
-				if state == ir.InvalidState {
-					state = dfa.SearchState()
-					state = re.applyContextToState(dfa, state, ctx, nil)
-					sidx = int(state)
-					if i >= 0 && i < len(lb) {
-						bval := int(lb[i])
-						if sidx >= 0 && sidx < numStates && bval >= 0 && bval < stride {
-							off := sidx*stride + bval
-							if off >= 0 && off < len(trans) {
-								state = trans[off]
-							} else {
-								state = ir.InvalidState
-							}
-						} else {
-							state = ir.InvalidState
-						}
-					} else {
-						state = ir.InvalidState
-					}
-
-					if state == ir.InvalidState {
-						state = dfa.SearchState()
-					}
-				}
-			}
-		}
-	} else {
-		i := 0
-		if len(re.prefix) > 0 {
-			idx := bytes.Index(lb, re.prefix)
-			if idx < 0 {
-				return -1, -1, -1
-			}
-			i = idx
-		}
-
-		state := dfa.SearchState()
-		sidx := int(state)
-		if sidx >= 0 && sidx < len(accepting) {
-			if accepting[sidx] || isAlwaysTrue(state) {
-				return re.findBoundary(lb)
-			}
-		}
-
-		for ; i < numBytes; i++ {
-			sidx = int(state)
-			if sidx >= 0 && sidx < len(warpPoints) {
-				// SIMD Warp
-				if wp := warpPoints[sidx]; wp != -1 {
-					idx := bytes.IndexByte(lb[i:], byte(wp))
-					if idx < 0 {
-						return -1, -1, -1
-					}
-					i += idx
-					if sidx >= 0 && sidx < len(warpPointState) {
-						state = warpPointState[sidx]
-					}
-				} else {
-					if i >= 0 && i < len(lb) {
-						bval := int(lb[i])
-						if sidx >= 0 && sidx < numStates && bval >= 0 && bval < stride {
-							off := sidx*stride + bval
-							if off >= 0 && off < len(trans) {
-								state = trans[off]
-							} else {
-								state = ir.InvalidState
-							}
-						} else {
-							state = ir.InvalidState
-						}
-					} else {
-						state = ir.InvalidState
-					}
-
-					if state == ir.InvalidState {
-						state = dfa.SearchState()
-					}
-				}
-			}
-
-			sidx = int(state)
-			if sidx >= 0 && sidx < len(accepting) {
-				if accepting[sidx] || isAlwaysTrue(state) {
-					return re.findBoundary(lb)
-				}
-			}
-		}
-	}
-	return -1, -1, -1
-}
-
-func (re *Regexp) findBoundary(b []byte) (int, int, int) {
-	dfa := re.dfa
-	trans := dfa.Transitions()
-	increments := dfa.PriorityIncrements()
-	stride := dfa.Stride()
-	accepting := dfa.Accepting()
-	matchState := dfa.MatchState()
-
-	for i := 0; i <= len(b); i++ {
-		if len(re.prefix) > 0 {
-			if re.anchorStart {
-				if i > 0 {
-					break
-				}
-				if !bytes.HasPrefix(b[i:], re.prefix) {
-					return -1, -1, -1
-				}
 			} else {
-				if i < len(b) {
-					idx := bytes.Index(b[i:], re.prefix)
-					if idx < 0 {
-						break
-					}
-					i += idx
-				} else if len(b) == 0 && len(re.prefix) == 0 {
-					// Empty prefix, empty string - matches at 0.
-				} else {
+				state = ir.InvalidState
+			}
+
+			if state == ir.InvalidState {
+				if re.anchorStart {
 					break
 				}
+				// Restart search from next byte
+				state = dfa.SearchState()
+				currentPriority += ir.SearchRestartPenalty
 			}
-		}
-
-		ctx := ir.CalculateContext(b, i)
-		state := re.applyContextToState(dfa, matchState, ctx, nil)
-		lastAcceptingEnd := -1
-		bestAbsolutePriority := 1<<30 - 1
-
-		if state != ir.InvalidState && accepting[state] {
-			lastAcceptingEnd = i
-			bestAbsolutePriority = dfa.AcceptingPriority(state)
-			if dfa.IsBestMatch(state) {
-				return i, lastAcceptingEnd, bestAbsolutePriority
-			}
-		}
-
-		if state != ir.InvalidState {
-			currState := state
-			cumulativeIncrement := 0
-			for j := i; j < len(b); j++ {
-				idx := int(currState)*stride + int(b[j])
-				next := trans[idx]
-				if next == ir.InvalidState {
-					break
-				}
-				cumulativeIncrement += int(increments[idx])
-
-				currState = re.applyContextToState(dfa, next, ir.CalculateContext(b, j+1), nil)
-				if currState == ir.InvalidState {
-					break
-				}
-				if accepting[currState] {
-					priority := cumulativeIncrement + dfa.AcceptingPriority(currState)
-					if priority < bestAbsolutePriority {
-						bestAbsolutePriority = priority
-						lastAcceptingEnd = j + 1
-					} else if priority == bestAbsolutePriority {
-						lastAcceptingEnd = j + 1
-					}
-
-					if dfa.IsBestMatch(currState) {
-						break
-					}
-				}
-			}
-		}
-
-		if lastAcceptingEnd != -1 {
-			return i, lastAcceptingEnd, bestAbsolutePriority
-		}
-
-		if re.anchorStart {
-			break
 		}
 	}
-	return -1, -1, -1
+
+	return bestStart, bestEnd, bestPriority
 }
 
 func (re *Regexp) FindStringSubmatchIndex(s string) []int {

@@ -22,8 +22,8 @@ func TestToDOT(t *testing.T) {
 	}
 
 	// Basic checks for expected elements
-	if !strings.Contains(dot, "S0 (start)") {
-		t.Error("DOT output should contain start state S0")
+	if !strings.Contains(dot, "S0 (match)") {
+		t.Error("DOT output should contain match state S0")
 	}
 	if !strings.Contains(dot, "shape=doublecircle") {
 		t.Error("DOT output should contain doublecircle for accepting states")

@@ -104,6 +104,12 @@ To maximize scan speed, `execLoop` and other hot loops MUST be free of `runtime.
 - **Explicit BCE (Bounds Check Elimination)**: Hot loops MUST use explicit local slice variables and index checks to provide the compiler with enough hints to prove that every array access is safe.
 - **Assembly Verification**: Critical matching loops MUST be periodically verified using `go tool compile -S` to ensure that `panicIndex` calls have been successfully eliminated from the hot path.
 
+### 2.17 Single-Pass O(n) Search via Penalty Tracking
+To strictly guarantee $O(n)$ time complexity, all search operations (finding a match anywhere in the string) MUST be performed in a single pass:
+- **Search-Complete DFA**: The Search-enabled states of the transition table MUST be complete for every possible byte. If no pattern-specific transition exists, the DFA MUST fallback to the `SearchState` (the pattern start) or a relevant resumption state.
+- **SearchRestartPenalty**: Every fallback transition that effectively skips a byte or restarts the search MUST increment the **Absolute Priority** by a fixed, large value (`SearchRestartPenalty`).
+- **Absolute Priority Convergence**: The execution engine MUST track the match with the lowest Absolute Priority (restart penalties + NFA inner priority) during the single scan. This convergence identifies the true **leftmost-first** match without requiring multiple passes or backtracking, ensuring strictly linear performance regardless of anchor placement or pattern complexity.
+
 ## 3. Feature Selection Policy (Performance over Features)
 
 ### 3.1 Supported Features

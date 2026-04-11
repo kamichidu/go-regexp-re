@@ -31,7 +31,7 @@ func ToDOT(d *DFA) string {
 
 		// Show accepting priority
 		if d.IsAccepting(s) {
-			labels = append(labels, fmt.Sprintf("Priority: %d", d.AcceptingPriority(s)))
+			labels = append(labels, fmt.Sprintf("Priority: %d", d.MatchPriority(s)))
 		}
 
 		label := strings.Join(labels, "\n")

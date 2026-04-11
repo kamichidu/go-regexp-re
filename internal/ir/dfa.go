@@ -329,6 +329,10 @@ func (d *DFA) Next(current StateID, b int) StateID {
 	return d.transitions[offset]
 }
 
+func (d *DFA) NumStates() int {
+	return d.numStates
+}
+
 func (d *DFA) Transitions() []StateID {
 	return d.transitions
 }
@@ -367,6 +371,20 @@ func (d *DFA) IsBestMatch(s StateID) bool {
 	return d.stateIsBestMatch[s]
 }
 
+func (d *DFA) MatchPriority(s StateID) int {
+	if s < 0 || int(s) >= d.numStates {
+		return 1<<30 - 1
+	}
+	return d.stateMatchPriority[s]
+}
+
+func (d *DFA) MatchTags(s StateID) uint64 {
+	if s < 0 || int(s) >= d.numStates {
+		return 0
+	}
+	return d.stateMatchTags[s]
+}
+
 func (d *DFA) SearchState() StateID {
 	return d.searchState
 }
@@ -391,20 +409,6 @@ func (d *DFA) TrieRoots() [][]*utf8Node {
 	return d.trieRoots
 }
 
-func (d *DFA) AcceptingPriority(s StateID) int {
-	if s < 0 || int(s) >= d.numStates {
-		return 1<<30 - 1
-	}
-	return d.stateMatchPriority[s]
-}
-
-func (d *DFA) MatchTags(s StateID) uint64 {
-	if s < 0 || int(s) >= d.numStates {
-		return 0
-	}
-	return d.stateMatchTags[s]
-}
-
 var ErrStateExplosion = fmt.Errorf("regexp: pattern too large or ambiguous")
 
 const MaxDFAMemory = 64 * 1024 * 1024
@@ -413,6 +417,8 @@ type dfaStateKey struct {
 	nfaKey   string
 	isSearch bool
 }
+
+const SearchRestartPenalty = 1000000
 
 func (d *DFA) build(ctx context.Context, prog *syntax.Prog) error {
 	cache := newUTF8NodeCache()
@@ -582,8 +588,8 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog) error {
 			searchPaths = make([]nfaPath, len(currentClosure)+len(defaultStartClosure))
 			copy(searchPaths, currentClosure)
 			for j, p := range defaultStartClosure {
-				// Priority 1000000 to ensure search paths are lower priority than existing ones.
-				p.Priority += 1000000
+				// Priority SearchRestartPenalty to ensure search paths are lower priority than existing ones.
+				p.Priority += SearchRestartPenalty
 				searchPaths[len(currentClosure)+j] = p
 			}
 		} else {
@@ -688,6 +694,11 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog) error {
 					d.transPreTags[idx] = nextClosure[0].PreTags
 					d.transPostTags[idx] = nextClosure[0].PostTags
 				}
+			} else if currentIsSearch {
+				// Fallback: skip this byte and restart from the beginning.
+				idx := int(currentDfaID)*d.stride + b
+				d.transitions[idx] = d.searchState
+				d.transPriorityIncrement[idx] = int32(SearchRestartPenalty)
 			}
 		}
 
@@ -707,7 +718,7 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog) error {
 					}
 					initialPaths[len(currentClosure)] = nfaPath{
 						nfaState: nfaState{ID: uint32(prog.Start)},
-						Priority: 1000000,
+						Priority: SearchRestartPenalty,
 						PreTags:  0,
 						PostTags: 0,
 					}
