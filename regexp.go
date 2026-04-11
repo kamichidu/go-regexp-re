@@ -298,11 +298,13 @@ func (re *Regexp) doMatchFast(b []byte) (int, int, int) {
 	stride := dfa.Stride()
 	accepting := dfa.Accepting()
 
-	// Optimization: Prefix skip
+	i := 0
 	if len(re.prefix) > 0 {
-		if bytes.Index(b, re.prefix) < 0 {
+		idx := bytes.Index(b, re.prefix)
+		if idx < 0 {
 			return -1, -1, -1
 		}
+		i = idx
 	}
 
 	state := dfa.StartState()
@@ -311,7 +313,7 @@ func (re *Regexp) doMatchFast(b []byte) (int, int, int) {
 		return re.findBoundary(b)
 	}
 
-	for i := 0; i < len(b); i++ {
+	for ; i < len(b); i++ {
 		state = trans[int(state)*stride+int(b[i])]
 		if state == ir.InvalidState {
 			state = dfa.StartState()
@@ -365,7 +367,10 @@ func (re *Regexp) findBoundary(b []byte) (int, int, int) {
 	for i := 0; i <= len(b); i++ {
 		if len(re.prefix) > 0 {
 			if re.anchorStart {
-				if i > 0 || !bytes.HasPrefix(b, re.prefix) {
+				if i > 0 {
+					break
+				}
+				if !bytes.HasPrefix(b[i:], re.prefix) {
 					return -1, -1, -1
 				}
 			} else {
@@ -376,6 +381,7 @@ func (re *Regexp) findBoundary(b []byte) (int, int, int) {
 					}
 					i += idx
 				} else if len(b) == 0 && len(re.prefix) == 0 {
+					// Empty prefix, empty string - matches at 0.
 				} else {
 					break
 				}

@@ -55,10 +55,78 @@ func Optimize(re *Regexp) *Regexp {
 		re.Sub[i] = Optimize(sub)
 	}
 
-	if re.Op == OpAlternate {
+	switch re.Op {
+	case OpAlternate:
 		re = factorAlternate(re)
+	case OpConcat:
+		re = flattenConcat(re)
+		re = aggregateLiterals(re)
+		if len(re.Sub) == 1 {
+			return re.Sub[0]
+		}
 	}
 
+	return re
+}
+
+func flattenConcat(re *Regexp) *Regexp {
+	if re.Op != OpConcat {
+		return re
+	}
+
+	hasNested := false
+	for _, sub := range re.Sub {
+		if sub.Op == OpConcat {
+			hasNested = true
+			break
+		}
+	}
+	if !hasNested {
+		return re
+	}
+
+	var subs []*Regexp
+	for _, sub := range re.Sub {
+		if sub.Op == OpConcat {
+			subs = append(subs, sub.Sub...)
+		} else {
+			subs = append(subs, sub)
+		}
+	}
+	re.Sub = subs
+	return re
+}
+
+func aggregateLiterals(re *Regexp) *Regexp {
+	if re.Op != OpConcat || len(re.Sub) <= 1 {
+		return re
+	}
+
+	var newSubs []*Regexp
+	var lastLiteral *Regexp
+
+	for _, sub := range re.Sub {
+		if sub.Op == OpLiteral && sub.Flags&FoldCase == 0 {
+			if lastLiteral != nil && lastLiteral.Flags&FoldCase == 0 {
+				lastLiteral.Rune = append(lastLiteral.Rune, sub.Rune...)
+			} else {
+				lastLiteral = &Regexp{
+					Op:    OpLiteral,
+					Rune:  append([]rune(nil), sub.Rune...),
+					Flags: sub.Flags,
+				}
+				newSubs = append(newSubs, lastLiteral)
+			}
+		} else {
+			newSubs = append(newSubs, sub)
+			lastLiteral = nil
+		}
+	}
+
+	if len(newSubs) == len(re.Sub) {
+		return re
+	}
+	re.Sub = newSubs
 	return re
 }
 
