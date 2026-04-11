@@ -25,9 +25,9 @@ This document tracks the remaining optimization tasks based on the project's hig
 - [ ] **Impact**: 50% reduction in transition table memory footprint and improved L3 cache efficiency.
 
 ## 4. Advanced AST Common Factorization
-- [ ] **Task**: Enhance `syntax.Optimize` to perform aggressive factorization of alternations.
-- [ ] **Example**: Convert `(apple|apply)` to `appl(e|y)` at the AST level.
-- [ ] **Impact**: Reduces DFA state count and speeds up compilation for large alternation sets.
+- [x] **Task**: Enhance `syntax.Optimize` to perform aggressive factorization of alternations.
+- [x] **Example**: Convert `(apple|apply)` to `appl[ey]` (gosyntax normalized) at the AST level.
+- [x] **Impact**: Reduces DFA state count and speeds up compilation for large alternation sets.
 
 ## 5. Branch & BCE Verification (Compiler Guardrails)
 - [ ] **Task**: Use `go tool compile -S` to verify the quality of monomorphized loops.
