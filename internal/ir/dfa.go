@@ -9,297 +9,11 @@ import (
 	"github.com/kamichidu/go-regexp-re/syntax"
 )
 
-// StateID represents a unique identifier for a DFA state.
 type StateID int32
-
 const (
-	// InvalidState represents a non-existent or error state.
 	InvalidState StateID = -1
-	// StartStateID is the ID of the initial state.
 	StartStateID StateID = 0
 )
-
-// nfaState represents an NFA instruction and its current matching progress (Trie node).
-type nfaState struct {
-	ID   uint32
-	node *utf8Node // if nil, the instruction hasn't started yet.
-}
-
-// nfaPath represents an NFA state reached with associated priority.
-type nfaPath struct {
-	nfaState
-	Priority int
-	PreTags  uint64
-	PostTags uint64
-}
-
-// TagRecord represents a set of tags encountered at a position.
-type TagRecord struct {
-	Tags uint64
-	Pos  int
-}
-
-// TransitionUpdate holds information for a tagged transition.
-// This is used when the MSB of a StateID in transitions is set.
-type TransitionUpdate struct {
-	Priority int32
-	PreTags  uint64
-	PostTags uint64
-}
-
-// TaggedStateFlag is the MSB flag for tagged transitions.
-const TaggedStateFlag StateID = -2147483648
-
-// DFA represents a Deterministic Finite Automaton.
-type DFA struct {
-	transitions      []StateID
-	tagUpdateIndices []uint32
-	tagUpdates       []TransitionUpdate
-
-	// Start tags for the best path.
-	startTags uint64
-
-	stride      int
-	numStates   int
-	searchState StateID
-	matchState  StateID
-	hasAnchors  bool
-	numSubexp   int
-
-	// Metadata for each state
-	stateIsSearch []bool
-
-	// Cached trie roots for each instruction
-	trieRoots [][]*utf8Node
-
-	// Accepting info
-	accepting          []bool
-	stateMatchPriority []int
-	stateMatchTags     []uint64
-	stateIsBestMatch   []bool
-
-	// Phase 2 Metadata
-	isAlwaysTrue   []bool
-	warpPoints     []int16   // byte value to skip to, or -1
-	warpPointState []StateID // state to jump to after skip
-}
-
-func (d *DFA) IsAlwaysTrue(s StateID) bool {
-	if s < 0 || int(s) >= d.numStates || d.isAlwaysTrue == nil {
-		return false
-	}
-	return d.isAlwaysTrue[s]
-}
-
-func (d *DFA) IsAlwaysTrueFunc() func(StateID) bool {
-	isAlwaysTrue := d.isAlwaysTrue
-	return func(s StateID) bool {
-		idx := int(s)
-		if isAlwaysTrue != nil && idx >= 0 && idx < len(isAlwaysTrue) {
-			return isAlwaysTrue[idx]
-		}
-		return false
-	}
-}
-
-func (d *DFA) WarpPoint(s StateID) int16 {
-	if s < 0 || int(s) >= d.numStates || d.warpPoints == nil {
-		return -1
-	}
-	return d.warpPoints[s]
-}
-
-func (d *DFA) WarpPoints() []int16 {
-	return d.warpPoints
-}
-
-func (d *DFA) WarpPointState(s StateID) StateID {
-	if s < 0 || int(s) >= d.numStates || d.warpPointState == nil {
-		return InvalidState
-	}
-	return d.warpPointState[s]
-}
-
-func (d *DFA) WarpPointStates() []StateID {
-	return d.warpPointState
-}
-
-func (d *DFA) computePhase2Metadata() {
-	d.isAlwaysTrue = make([]bool, d.numStates)
-	d.warpPoints = make([]int16, d.numStates)
-	d.warpPointState = make([]StateID, d.numStates)
-
-	for i := range d.warpPoints {
-		d.warpPoints[i] = -1
-		d.warpPointState[i] = InvalidState
-	}
-
-	d.findWarpPoints()
-	d.findSCCs()
-}
-
-func (d *DFA) findWarpPoints() {
-	for i := 0; i < d.numStates; i++ {
-		currState := StateID(i)
-		// A Warp Point is a state where:
-		// 1. Exactly one byte leads to progress (a different state).
-		// 2. All other bytes lead to InvalidState or the same state.
-		// 3. The state is NOT accepting (to avoid skipping over a match).
-		if d.accepting[i] {
-			continue
-		}
-
-		progressByte := -1
-		targetState := InvalidState
-		possible := true
-
-		for b := 0; b < 256; b++ {
-			nextRaw := d.transitions[i*d.stride+b]
-			if nextRaw == InvalidState {
-				continue
-			}
-			next := nextRaw & 0x7FFFFFFF
-			if next == currState {
-				continue
-			}
-			if progressByte == -1 {
-				progressByte = b
-				targetState = next
-			} else {
-				// More than one progress byte.
-				possible = false
-				break
-			}
-		}
-
-		if possible && progressByte != -1 {
-			d.warpPoints[i] = int16(progressByte)
-			d.warpPointState[i] = targetState
-		}
-	}
-}
-
-func (d *DFA) findSCCs() {
-	// Tarjan's algorithm to find SCCs.
-	// We want to identify states that are "Always True", meaning once entered,
-	// any further input will lead to a match eventually (or is already matching).
-	// Actually, the stronger condition for "Always True" in a DFA for Search is:
-	// A state s is Always True if all paths from s eventually hit an accepting state
-	// AND stay in accepting states (or the match is already guaranteed).
-	// In our Search DFA, we have a search closure (.*?), so if a state belongs to
-	// an SCC where every state is accepting, it's Always True.
-
-	num := 0
-	index := make([]int, d.numStates)
-	lowlink := make([]int, d.numStates)
-	onStack := make([]bool, d.numStates)
-	stack := []int{}
-
-	for i := range index {
-		index[i] = -1
-	}
-
-	var strongconnect func(v int)
-	strongconnect = func(v int) {
-		index[v] = num
-		lowlink[v] = num
-		num++
-		stack = append(stack, v)
-		onStack[v] = true
-
-		for b := 0; b < 256; b++ {
-			nextRaw := d.transitions[v*d.stride+b]
-			if nextRaw == -1 {
-				continue
-			}
-			w := int(nextRaw & 0x7FFFFFFF)
-			if index[w] == -1 {
-				strongconnect(w)
-				if lowlink[w] < lowlink[v] {
-					lowlink[v] = lowlink[w]
-				}
-			} else if onStack[w] {
-				if index[w] < lowlink[v] {
-					lowlink[v] = index[w]
-				}
-			}
-		}
-
-		if lowlink[v] == index[v] {
-			// Found an SCC.
-			var component []int
-			for {
-				w := stack[len(stack)-1]
-				stack = stack[:len(stack)-1]
-				onStack[w] = false
-				component = append(component, w)
-				if w == v {
-					break
-				}
-			}
-
-			// Check if this component is "Always True".
-			// For a component to be Always True:
-			// 1. All states in the component must be accepting.
-			// 2. All transitions from any state in the component must lead to
-			//    another state in the same component OR another Always True component.
-			// This requires processing SCCs in reverse topological order.
-			// Tarjan's naturally finds them in reverse topological order.
-
-			allAccepting := true
-			for _, s := range component {
-				if !d.accepting[s] {
-					allAccepting = false
-					break
-				}
-			}
-
-			if allAccepting {
-				allTransitionsToAlwaysTrue := true
-				for _, s := range component {
-					for b := 0; b < 256; b++ {
-						nextRaw := d.transitions[s*d.stride+b]
-						if nextRaw == -1 {
-							// In a Search DFA, next should ideally not be -1 for bytes if it's always true,
-							// but if it is -1, it means it doesn't match, so it's NOT always true.
-							allTransitionsToAlwaysTrue = false
-							break
-						}
-						next := int(nextRaw & 0x7FFFFFFF)
-						// If next is not in current component, it must be in a previously
-						// identified Always True component.
-						inCurrent := false
-						for _, cs := range component {
-							if cs == next {
-								inCurrent = true
-								break
-							}
-						}
-						if !inCurrent && !d.isAlwaysTrue[next] {
-							allTransitionsToAlwaysTrue = false
-							break
-						}
-					}
-					if !allTransitionsToAlwaysTrue {
-						break
-					}
-				}
-				if allTransitionsToAlwaysTrue {
-					for _, s := range component {
-						d.isAlwaysTrue[s] = true
-					}
-				}
-			}
-		}
-	}
-
-	for i := 0; i < d.numStates; i++ {
-		if index[i] == -1 {
-			strongconnect(i)
-		}
-	}
-}
-
 const (
 	VirtualBeginLine = 256 + iota
 	VirtualEndLine
@@ -309,792 +23,337 @@ const (
 	VirtualNoWordBoundary
 	numVirtualBytes = 6
 )
+const TaggedStateFlag StateID = -2147483648
 
-func NewDFA(prog *syntax.Prog) (*DFA, error) {
-	return NewDFAWithMemoryLimit(context.Background(), prog, MaxDFAMemory)
+type nfaState struct { ID uint32; node *utf8Node }
+type nfaPath struct { nfaState; Priority int; Tags uint64 }
+type TransitionUpdate struct {
+	Priority int32
+	StartTags uint64 // Group starts, recorded at current position i
+	EndTags   uint64 // Group ends, recorded at next position i+1
 }
-
-func NewDFAContext(ctx context.Context, prog *syntax.Prog) (*DFA, error) {
-	return NewDFAWithMemoryLimit(ctx, prog, MaxDFAMemory)
-}
-
-func NewDFAWithMemoryLimit(ctx context.Context, prog *syntax.Prog, maxMemory int) (*DFA, error) {
-	d := &DFA{
-		numSubexp: prog.NumCap / 2,
-	}
-	if err := d.build(ctx, prog, maxMemory); err != nil {
-		return nil, fmt.Errorf("failed to build DFA: %w", err)
-	}
-	return d, nil
+type DFA struct {
+	transitions      []StateID
+	tagUpdateIndices []uint32
+	tagUpdates       []TransitionUpdate
+	startTags        uint64
+	stride           int
+	numStates        int
+	searchState      StateID
+	matchState       StateID
+	hasAnchors       bool
+	numSubexp        int
+	stateIsSearch    []bool
+	trieRoots        [][]*utf8Node
+	accepting        []bool
+	stateMatchPriority []int
+	stateMatchTags     []uint64
+	stateIsBestMatch   []bool
+	isAlwaysTrue       []bool
+	warpPoints         []int16
+	warpPointState     []StateID
 }
 
 func (d *DFA) Next(current StateID, b int) StateID {
-	if current < 0 || int(current) >= d.numStates || b < 0 || b >= d.stride {
-		return InvalidState
-	}
-	offset := int(current)*d.stride + b
-	if offset >= len(d.transitions) {
-		return InvalidState
-	}
-	raw := d.transitions[offset]
-	if raw == InvalidState {
-		return InvalidState
-	}
+	if current < 0 || int(current) >= d.numStates || b < 0 || b >= d.stride { return InvalidState }
+	offset := int(current)*d.stride + b; if offset >= len(d.transitions) { return InvalidState }
+	raw := d.transitions[offset]; if raw == InvalidState { return InvalidState }
 	return raw & 0x7FFFFFFF
 }
-
-func (d *DFA) NumStates() int {
-	return d.numStates
-}
-
-func (d *DFA) Transitions() []StateID {
-	return d.transitions
-}
-
-func (d *DFA) TagUpdateIndices() []uint32 {
-	return d.tagUpdateIndices
-}
-
-func (d *DFA) TagUpdates() []TransitionUpdate {
-	return d.tagUpdates
-}
-
-func (d *DFA) Stride() int {
-	return d.stride
-}
-
-func (d *DFA) Accepting() []bool {
-	return d.accepting
-}
-
-func (d *DFA) IsAccepting(s StateID) bool {
-	if s < 0 || int(s) >= d.numStates {
-		return false
-	}
-	return d.accepting[s]
-}
-
-func (d *DFA) IsBestMatch(s StateID) bool {
-	if s < 0 || int(s) >= d.numStates {
-		return false
-	}
-	return d.stateIsBestMatch[s]
-}
-
-func (d *DFA) MatchPriority(s StateID) int {
-	if s < 0 || int(s) >= d.numStates {
-		return 1<<30 - 1
-	}
-	return d.stateMatchPriority[s]
-}
-
-func (d *DFA) MatchTags(s StateID) uint64 {
-	if s < 0 || int(s) >= d.numStates {
-		return 0
-	}
-	return d.stateMatchTags[s]
-}
-
-func (d *DFA) SearchState() StateID {
-	return d.searchState
-}
-
-func (d *DFA) MatchState() StateID {
-	return d.matchState
-}
-
-func (d *DFA) StartTags() uint64 {
-	return d.startTags
-}
-
-func (d *DFA) HasAnchors() bool {
-	return d.hasAnchors
-}
-
-func (d *DFA) TotalStates() int {
-	return d.numStates
-}
-
-func (d *DFA) TrieRoots() [][]*utf8Node {
-	return d.trieRoots
-}
+func (d *DFA) NumStates() int { return d.numStates }
+func (d *DFA) TotalStates() int { return d.numStates }
+func (d *DFA) Transitions() []StateID { return d.transitions }
+func (d *DFA) TagUpdateIndices() []uint32 { return d.tagUpdateIndices }
+func (d *DFA) TagUpdates() []TransitionUpdate { return d.tagUpdates }
+func (d *DFA) Stride() int { return d.stride }
+func (d *DFA) IsAccepting(s StateID) bool { if s < 0 || int(s) >= d.numStates { return false }; return d.accepting[s] }
+func (d *DFA) Accepting() []bool { return d.accepting }
+func (d *DFA) MatchPriority(s StateID) int { if s < 0 || int(s) >= d.numStates { return 1<<30 - 1 }; return d.stateMatchPriority[s] }
+func (d *DFA) MatchTags(s StateID) uint64 { if s < 0 || int(s) >= d.numStates { return 0 }; return d.stateMatchTags[s] }
+func (d *DFA) SearchState() StateID { return d.searchState }
+func (d *DFA) MatchState() StateID { return d.matchState }
+func (d *DFA) StartTags() uint64 { return d.startTags }
+func (d *DFA) HasAnchors() bool { return d.hasAnchors }
+func (d *DFA) TrieRoots() [][]*utf8Node { return d.trieRoots }
 
 var ErrStateExplosion = fmt.Errorf("regexp: pattern too large or ambiguous")
-
 const MaxDFAMemory = 64 * 1024 * 1024
-
-type dfaStateKey struct {
-	nfaKey   string
-	isSearch bool
-}
-
+type dfaStateKey struct { nfaKey string; isSearch bool }
 const SearchRestartPenalty = 1000000
 
+func NewDFA(prog *syntax.Prog) (*DFA, error) { return NewDFAWithMemoryLimit(context.Background(), prog, MaxDFAMemory) }
+func NewDFAWithMemoryLimit(ctx context.Context, prog *syntax.Prog, maxMemory int) (*DFA, error) {
+	d := &DFA{numSubexp: prog.NumCap / 2}
+	if err := d.build(ctx, prog, maxMemory); err != nil { return nil, err }
+	return d, nil
+}
+
 func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error {
-	cache := newUTF8NodeCache()
-
-	d.hasAnchors = false
-	for _, inst := range prog.Inst {
-		if inst.Op == syntax.InstEmptyWidth {
-			d.hasAnchors = true
-			break
-		}
-	}
-
-	if d.hasAnchors {
-		d.stride = 256 + numVirtualBytes
-	} else {
-		d.stride = 256
-	}
-
+	cache := newUTF8NodeCache(); d.hasAnchors = false
+	for _, inst := range prog.Inst { if inst.Op == syntax.InstEmptyWidth { d.hasAnchors = true; break } }
+	d.stride = 256; if d.hasAnchors { d.stride += numVirtualBytes }
 	d.trieRoots = make([][]*utf8Node, len(prog.Inst))
 	getTrie := func(ID uint32) []*utf8Node {
-		if roots := d.trieRoots[ID]; roots != nil {
-			return roots
-		}
-		inst := prog.Inst[ID]
-		var roots []*utf8Node
+		if roots := d.trieRoots[ID]; roots != nil { return roots }
+		inst := prog.Inst[ID]; var roots []*utf8Node
 		switch inst.Op {
 		case syntax.InstRune, syntax.InstRune1:
-			foldCase := inst.Op == syntax.InstRune && (inst.Arg&uint32(syntax.FoldCase) != 0)
-			roots = cache.runeRangesToUTF8Trie(inst.Rune, foldCase)
-		case syntax.InstRuneAny:
-			roots = cache.anyRuneTrie(true)
-		case syntax.InstRuneAnyNotNL:
-			roots = cache.anyRuneTrie(false)
+			fold := inst.Op == syntax.InstRune && (inst.Arg&uint32(syntax.FoldCase) != 0)
+			roots = cache.runeRangesToUTF8Trie(inst.Rune, fold)
+		case syntax.InstRuneAny: roots = cache.anyRuneTrie(true)
+		case syntax.InstRuneAnyNotNL: roots = cache.anyRuneTrie(false)
 		}
-		d.trieRoots[ID] = roots
-		return roots
+		d.trieRoots[ID] = roots; return roots
 	}
-
-	nfaToDfa := make(map[dfaStateKey]StateID)
-	dfaToNfa := make([][]nfaPath, 0)
-
-	// Interning TransitionUpdates
+	nfaToDfa := make(map[dfaStateKey]StateID); dfaToNfa := make([][]nfaPath, 0)
 	updateToIdx := make(map[TransitionUpdate]uint32)
 	addUpdate := func(u TransitionUpdate) uint32 {
-		if idx, ok := updateToIdx[u]; ok {
-			return idx
-		}
-		idx := uint32(len(d.tagUpdates))
-		d.tagUpdates = append(d.tagUpdates, u)
-		updateToIdx[u] = idx
-		return idx
+		if idx, ok := updateToIdx[u]; ok { return idx }
+		idx := uint32(len(d.tagUpdates)); d.tagUpdates = append(d.tagUpdates, u); updateToIdx[u] = idx; return idx
 	}
-
 	var errBuild error
 	addDfaState := func(closure []nfaPath, isSearch bool) StateID {
-		if errBuild != nil {
-			return InvalidState
-		}
-
-		// Calculate memory usage based on transitions and update indices.
-		// Each transition is 4 bytes, and each update index is 4 bytes.
-		if (d.numStates+1)*d.stride*8 > maxMemory {
-			errBuild = ErrStateExplosion
-			return InvalidState
-		}
-
+		if errBuild != nil { return InvalidState }
+		if (d.numStates+1)*d.stride*8 > maxMemory { errBuild = ErrStateExplosion; return InvalidState }
 		if len(closure) > 0 {
-			minP := closure[0].Priority
-			for i := 1; i < len(closure); i++ {
-				if closure[i].Priority < minP {
-					minP = closure[i].Priority
-				}
-			}
-			if minP > 0 {
-				for i := range closure {
-					closure[i].Priority -= minP
-				}
-			}
+			minP := closure[0].Priority; for i := 1; i < len(closure); i++ { if closure[i].Priority < minP { minP = closure[i].Priority } }
+			if minP > 0 { for i := range closure { closure[i].Priority -= minP } }
 		}
-
 		sort.Slice(closure, func(i, j int) bool {
-			if closure[i].ID != closure[j].ID {
-				return closure[i].ID < closure[j].ID
-			}
+			if closure[i].ID != closure[j].ID { return closure[i].ID < closure[j].ID }
 			if closure[i].node != closure[j].node {
-				idI, idJ := 0, 0
-				if closure[i].node != nil {
-					idI = closure[i].node.ID
-				}
-				if closure[j].node != nil {
-					idJ = closure[j].node.ID
-				}
-				return idI < idJ
+				idI, idJ := 0, 0; if closure[i].node != nil { idI = closure[i].node.ID }; if closure[j].node != nil { idJ = closure[j].node.ID }; return idI < idJ
 			}
-			return closure[i].Priority < closure[j].Priority
+			if closure[i].Priority != closure[j].Priority { return closure[i].Priority < closure[j].Priority }
+			return closure[i].Tags < closure[j].Tags
 		})
-
-		key := dfaStateKey{serializeSet(closure), isSearch}
-		if id, ok := nfaToDfa[key]; ok {
-			return id
-		}
-
-		id := StateID(len(dfaToNfa))
-		nfaToDfa[key] = id
-
-		cleanClosure := make([]nfaPath, len(closure))
-		for i, p := range closure {
-			cleanClosure[i] = nfaPath{
-				nfaState: p.nfaState,
-				Priority: p.Priority,
-			}
-		}
-		dfaToNfa = append(dfaToNfa, cleanClosure)
-		d.stateIsSearch = append(d.stateIsSearch, isSearch)
-
-		isAccepting := false
-		matchPriority := 1<<30 - 1
-		var matchTags uint64
-		minPathPriority := 1<<30 - 1
+		key := dfaStateKey{serializeSet(closure), isSearch}; if id, ok := nfaToDfa[key]; ok { return id }
+		id := StateID(len(dfaToNfa)); nfaToDfa[key] = id
+		cleanClosure := make([]nfaPath, len(closure)); copy(cleanClosure, closure)
+		dfaToNfa = append(dfaToNfa, cleanClosure); d.stateIsSearch = append(d.stateIsSearch, isSearch)
+		isAcc, matchP := false, 1<<30 - 1; var matchTags uint64; minPathP := 1<<30 - 1
 		for _, s := range closure {
-			if s.Priority < minPathPriority {
-				minPathPriority = s.Priority
-			}
+			if s.Priority < minPathP { minPathP = s.Priority }
 			if prog.Inst[s.ID].Op == syntax.InstMatch && s.node == nil {
-				isAccepting = true
-				if s.Priority < matchPriority {
-					matchPriority = s.Priority
-					matchTags = s.PostTags
-				}
+				isAcc = true; if s.Priority < matchP { matchP = s.Priority; matchTags = s.Tags }
 			}
 		}
-		d.accepting = append(d.accepting, isAccepting)
-		d.stateMatchPriority = append(d.stateMatchPriority, matchPriority)
-		d.stateMatchTags = append(d.stateMatchTags, matchTags)
-		d.stateIsBestMatch = append(d.stateIsBestMatch, isAccepting && (matchPriority == minPathPriority))
-
-		for i := 0; i < d.stride; i++ {
-			d.transitions = append(d.transitions, InvalidState)
-			d.tagUpdateIndices = append(d.tagUpdateIndices, 0)
-		}
-		d.numStates++
-		return id
+		d.accepting = append(d.accepting, isAcc); d.stateMatchPriority = append(d.stateMatchPriority, matchP)
+		d.stateMatchTags = append(d.stateMatchTags, matchTags); d.stateIsBestMatch = append(d.stateIsBestMatch, isAcc && (matchP == minPathP))
+		for i := 0; i < d.stride; i++ { d.transitions = append(d.transitions, InvalidState); d.tagUpdateIndices = append(d.tagUpdateIndices, 0) }
+		d.numStates++; return id
 	}
-
-	initialPaths := []nfaPath{{nfaState: nfaState{ID: uint32(prog.Start)}, PreTags: 0, PostTags: 0}}
-	defaultStartClosure := epsilonClosure(initialPaths, prog, 0)
-
-	// Build Match start state
-	d.matchState = addDfaState(defaultStartClosure, false)
-	if len(defaultStartClosure) > 0 {
-		d.startTags = defaultStartClosure[0].PostTags
-	}
-
-	// Build Search start state (includes the restart closure)
-	searchInitialPaths := make([]nfaPath, len(defaultStartClosure))
-	copy(searchInitialPaths, defaultStartClosure)
-	// We don't need to add it here explicitly because it's added in the transition loop
-	// for isSearch=true states. But the start state itself must be search-enabled.
+	defaultStartClosure, sStart, _ := epsilonClosureWithSplitTags([]nfaPath{{nfaState: nfaState{ID: uint32(prog.Start)}}}, prog, 0)
+	d.matchState = addDfaState(defaultStartClosure, false); d.startTags = sStart
 	d.searchState = addDfaState(defaultStartClosure, true)
-
-	if errBuild != nil {
-		return errBuild
-	}
-
 	for i := 0; i < len(dfaToNfa); i++ {
-		if i%100 == 0 {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			default:
-			}
-		}
-		currentClosure := dfaToNfa[i]
-		currentDfaID := StateID(i)
-		currentIsSearch := d.stateIsSearch[i]
-
-		var searchPaths []nfaPath
+		currentClosure, currentDfaID, currentIsSearch := dfaToNfa[i], StateID(i), d.stateIsSearch[i]
+		var initialPaths []nfaPath
 		if currentIsSearch {
-			searchPaths = make([]nfaPath, len(currentClosure)+len(defaultStartClosure))
-			copy(searchPaths, currentClosure)
-			for j, p := range defaultStartClosure {
-				// Priority SearchRestartPenalty to ensure search paths are lower priority than existing ones.
-				p.Priority += SearchRestartPenalty
-				searchPaths[len(currentClosure)+j] = p
-			}
-		} else {
-			searchPaths = currentClosure
-		}
-
-		searchClosure := epsilonClosure(searchPaths, prog, 0)
-
+			initialPaths = make([]nfaPath, len(currentClosure)+1); copy(initialPaths, currentClosure); initialPaths[len(currentClosure)] = nfaPath{nfaState: nfaState{ID: uint32(prog.Start)}, Priority: SearchRestartPenalty}
+		} else { initialPaths = currentClosure }
+		searchClosure, sPre, _ := epsilonClosureWithSplitTags(initialPaths, prog, 0)
 		for b := 0; b < 256; b++ {
-			var nextPaths []nfaPath
-			foundMatch := false
-
+			var nextPaths []nfaPath; foundMatch := false
 			for _, p := range searchClosure {
-				s := p.nfaState
-				inst := prog.Inst[s.ID]
-
-				var matchedOut []uint32
-				var matchedNodes []*utf8Node
-
+				s := p.nfaState; inst := prog.Inst[s.ID]; var matchedOut []uint32; var matchedNodes []*utf8Node
 				if s.node == nil {
 					switch inst.Op {
 					case syntax.InstRune, syntax.InstRune1, syntax.InstRuneAny, syntax.InstRuneAnyNotNL:
-						roots := getTrie(s.ID)
-						fold := inst.Op == syntax.InstRune && (inst.Arg&uint32(syntax.FoldCase) != 0)
+						roots := getTrie(s.ID); fold := inst.Op == syntax.InstRune && (inst.Arg&uint32(syntax.FoldCase) != 0)
 						for _, root := range roots {
-							match := matchesByte
-							if fold {
-								match = matchesByteFold
-							}
-							if match(root, byte(b)) {
-								if root.next == nil {
-									matchedOut = append(matchedOut, inst.Out)
-								} else {
-									for _, child := range root.next {
-										matchedNodes = append(matchedNodes, child)
-									}
-								}
-							}
+							match := matchesByte; if fold { match = matchesByteFold }
+							if match(root, byte(b)) { if root.next == nil { matchedOut = append(matchedOut, inst.Out) } else { for _, child := range root.next { matchedNodes = append(matchedNodes, child) } } }
 						}
 					}
 				} else {
 					fold := inst.Op == syntax.InstRune && (inst.Arg&uint32(syntax.FoldCase) != 0)
-					match := matchesByte
-					if fold {
-						match = matchesByteFold
-					}
-					if match(s.node, byte(b)) {
-						if s.node.next == nil {
-							matchedOut = append(matchedOut, inst.Out)
-						} else {
-							for _, child := range s.node.next {
-								matchedNodes = append(matchedNodes, child)
-							}
-						}
-					}
+					match := matchesByte; if fold { match = matchesByteFold }
+					if match(s.node, byte(b)) { if s.node.next == nil { matchedOut = append(matchedOut, inst.Out) } else { for _, child := range s.node.next { matchedNodes = append(matchedNodes, child) } } }
 				}
-
 				if len(matchedOut) > 0 || len(matchedNodes) > 0 {
 					foundMatch = true
-					for _, out := range matchedOut {
-						np := nfaPath{
-							nfaState: nfaState{ID: out},
-							Priority: p.Priority,
-							PreTags:  p.PreTags | p.PostTags,
-							PostTags: 0,
-						}
-						nextPaths = append(nextPaths, np)
-					}
-					for _, node := range matchedNodes {
-						np := nfaPath{
-							nfaState: nfaState{ID: s.ID, node: node},
-							Priority: p.Priority,
-							PreTags:  p.PreTags | p.PostTags,
-							PostTags: 0,
-						}
-						nextPaths = append(nextPaths, np)
-					}
+					for _, out := range matchedOut { nextPaths = append(nextPaths, nfaPath{nfaState: nfaState{ID: out}, Priority: p.Priority, Tags: p.Tags}) }
+					for _, node := range matchedNodes { nextPaths = append(nextPaths, nfaPath{nfaState: nfaState{ID: s.ID, node: node}, Priority: p.Priority, Tags: p.Tags}) }
 				}
 			}
-
 			if foundMatch {
-				nextClosure := epsilonClosure(nextPaths, prog, 0)
-
-				minP := 0
-				if len(nextClosure) > 0 {
-					minP = nextClosure[0].Priority
-					for i := 1; i < len(nextClosure); i++ {
-						if nextClosure[i].Priority < minP {
-							minP = nextClosure[i].Priority
-						}
-					}
-				}
-
-				nextDfaID := addDfaState(nextClosure, currentIsSearch)
-				if errBuild != nil {
-					return errBuild
-				}
-
-				var pre, post uint64
-				if len(nextClosure) > 0 {
-					pre = nextClosure[0].PreTags
-					post = nextClosure[0].PostTags
-				}
-
+				nextClosure, _, ePost := epsilonClosureWithSplitTags(nextPaths, prog, 0)
+				if len(nextClosure) == 0 { continue }
+				minP := nextClosure[0].Priority; for _, p := range nextClosure { if p.Priority < minP { minP = p.Priority } }
+				nextDfaID := addDfaState(nextClosure, currentIsSearch); if errBuild != nil { return errBuild }
 				idx := int(currentDfaID)*d.stride + b
-				if minP != 0 || pre != 0 || post != 0 {
+				currTags := currentClosure[0].Tags
+				sNew, eNew := sPre & ^currTags, ePost & ^currTags
+				if minP != 0 || sNew != 0 || eNew != 0 {
 					d.transitions[idx] = nextDfaID | TaggedStateFlag
-					d.tagUpdateIndices[idx] = addUpdate(TransitionUpdate{
-						Priority: int32(minP),
-						PreTags:  pre,
-						PostTags: post,
-					})
-				} else {
-					d.transitions[idx] = nextDfaID
-				}
+					d.tagUpdateIndices[idx] = addUpdate(TransitionUpdate{Priority: int32(minP), StartTags: sNew, EndTags: eNew})
+				} else { d.transitions[idx] = nextDfaID }
 			} else if currentIsSearch {
-				// Fallback: skip this byte and restart from the beginning.
 				idx := int(currentDfaID)*d.stride + b
-				if SearchRestartPenalty != 0 {
-					d.transitions[idx] = d.searchState | TaggedStateFlag
-					d.tagUpdateIndices[idx] = addUpdate(TransitionUpdate{
-						Priority: int32(SearchRestartPenalty),
-					})
-				} else {
-					d.transitions[idx] = d.searchState
-				}
+				d.transitions[idx] = d.searchState | TaggedStateFlag; d.tagUpdateIndices[idx] = addUpdate(TransitionUpdate{Priority: int32(SearchRestartPenalty)})
 			}
 		}
-
 		if d.hasAnchors {
 			for bit := 0; bit < numVirtualBytes; bit++ {
 				op := syntax.EmptyOp(1 << bit)
-				var initialPaths []nfaPath
+				var anchorPaths []nfaPath
 				if currentIsSearch {
-					initialPaths = make([]nfaPath, len(currentClosure)+1)
-					for j, p := range currentClosure {
-						initialPaths[j] = nfaPath{
-							nfaState: p.nfaState,
-							Priority: p.Priority,
-							PreTags:  p.PreTags,
-							PostTags: p.PostTags,
-						}
-					}
-					initialPaths[len(currentClosure)] = nfaPath{
-						nfaState: nfaState{ID: uint32(prog.Start)},
-						Priority: SearchRestartPenalty,
-						PreTags:  0,
-						PostTags: 0,
-					}
-				} else {
-					initialPaths = make([]nfaPath, len(currentClosure))
-					for j, p := range currentClosure {
-						initialPaths[j] = nfaPath{
-							nfaState: p.nfaState,
-							Priority: p.Priority,
-							PreTags:  p.PreTags,
-							PostTags: p.PostTags,
-						}
-					}
-				}
-				nextClosure := epsilonClosure(initialPaths, prog, op)
-				if serializeSet(nextClosure) != serializeSet(currentClosure) {
-					minP := 0
-					if len(nextClosure) > 0 {
-						minP = nextClosure[0].Priority
-						for i := 1; i < len(nextClosure); i++ {
-							if nextClosure[i].Priority < minP {
-								minP = nextClosure[i].Priority
-							}
-						}
-					}
-
-					nextDfaID := addDfaState(nextClosure, currentIsSearch)
-					if errBuild != nil {
-						return errBuild
-					}
-
-					var pre, post uint64
-					if len(nextClosure) > 0 {
-						pre = nextClosure[0].PreTags
-						post = nextClosure[0].PostTags
-					}
-
-					idx := int(currentDfaID)*d.stride + 256 + bit
-					if minP != 0 || pre != 0 || post != 0 {
-						d.transitions[idx] = nextDfaID | TaggedStateFlag
-						d.tagUpdateIndices[idx] = addUpdate(TransitionUpdate{
-							Priority: int32(minP),
-							PreTags:  pre,
-							PostTags: post,
-						})
-					} else {
-						d.transitions[idx] = nextDfaID
-					}
-				}
+					anchorPaths = make([]nfaPath, len(currentClosure)+1); copy(anchorPaths, currentClosure); anchorPaths[len(currentClosure)] = nfaPath{nfaState: nfaState{ID: uint32(prog.Start)}, Priority: SearchRestartPenalty}
+				} else { anchorPaths = currentClosure }
+				nextClosure, sPost, ePost := epsilonClosureWithSplitTags(anchorPaths, prog, op)
+				if len(nextClosure) == 0 || serializeSet(nextClosure) == serializeSet(currentClosure) { continue }
+				minP := nextClosure[0].Priority; for _, p := range nextClosure { if p.Priority < minP { minP = p.Priority } }
+				nextDfaID := addDfaState(nextClosure, currentIsSearch); if errBuild != nil { return errBuild }
+				idx := int(currentDfaID)*d.stride + 256 + bit
+				currTags := currentClosure[0].Tags
+				sNew, eNew := sPost & ^currTags, ePost & ^currTags
+				if minP != 0 || sNew != 0 || eNew != 0 {
+					d.transitions[idx] = nextDfaID | TaggedStateFlag
+					d.tagUpdateIndices[idx] = addUpdate(TransitionUpdate{Priority: int32(minP), StartTags: sNew, EndTags: eNew})
+				} else { d.transitions[idx] = nextDfaID }
 			}
 		}
 	}
-
-	d.minimize()
-	d.computePhase2Metadata()
-
-	return nil
+	d.minimize(); d.computePhase2Metadata(); return nil
 }
 
 func (d *DFA) minimize() {
-	if d.numStates <= 1 {
-		return
-	}
-
-	stateToGroup := make([]int32, d.numStates)
-	type groupSig struct {
-		acc       bool
-		prio      int
-		bestMatch bool
-		isSearch  bool
-	}
-	sigToGroup := make(map[groupSig]int32)
-	numGroups := int32(0)
-
+	if d.numStates <= 1 { return }
+	stateToGroup := make([]int32, d.numStates); type groupSig struct { acc bool; prio int; bestMatch bool; isSearch bool }
+	sigToGroup := make(map[groupSig]int32); numGroups := int32(0)
 	for i := 0; i < d.numStates; i++ {
 		sig := groupSig{d.accepting[i], d.stateMatchPriority[i], d.stateIsBestMatch[i], d.stateIsSearch[i]}
-		g, ok := sigToGroup[sig]
-		if !ok {
-			g = numGroups
-			numGroups++
-			sigToGroup[sig] = g
-		}
-		stateToGroup[i] = g
+		g, ok := sigToGroup[sig]; if !ok { g = numGroups; numGroups++; sigToGroup[sig] = g }; stateToGroup[i] = g
 	}
-
 	for {
-		type splitKey struct {
-			oldGroup int32
-			transSig string
-		}
-		newGroups := make(map[splitKey]int32)
-		nextStateToGroup := make([]int32, d.numStates)
-		nextNumGroups := int32(0)
-
+		type splitKey struct { oldGroup int32; transSig string }
+		newGroups := make(map[splitKey]int32); nextStateToGroup := make([]int32, d.numStates); nextNumGroups := int32(0)
 		for i := 0; i < d.numStates; i++ {
 			buf := make([]byte, d.stride*8)
 			for b := 0; b < d.stride; b++ {
-				idx := i*d.stride + b
-				target := d.transitions[idx]
+				idx := i*d.stride + b; target := d.transitions[idx]
 				if target != InvalidState {
-					targetID := target & 0x7FFFFFFF
-					isTagged := target < 0
-					tg := stateToGroup[targetID]
-
-					var updateIdx uint32
-					if isTagged {
-						updateIdx = d.tagUpdateIndices[idx] + 1
-					}
-
-					off := b * 8
-					*(*int32)(unsafe.Pointer(&buf[off])) = tg
-					*(*uint32)(unsafe.Pointer(&buf[off+4])) = updateIdx
-				} else {
-					off := b * 8
-					*(*int32)(unsafe.Pointer(&buf[off])) = -1
-					*(*uint32)(unsafe.Pointer(&buf[off+4])) = 0
-				}
+					tg := stateToGroup[target & 0x7FFFFFFF]; var updateIdx uint32; if target < 0 { updateIdx = d.tagUpdateIndices[idx] + 1 }
+					off := b * 8; *(*int32)(unsafe.Pointer(&buf[off])) = tg; *(*uint32)(unsafe.Pointer(&buf[off+4])) = updateIdx
+				} else { off := b * 8; *(*int32)(unsafe.Pointer(&buf[off])) = -1; *(*uint32)(unsafe.Pointer(&buf[off+4])) = 0 }
 			}
-
-			key := splitKey{stateToGroup[i], string(buf)}
-
-			g, ok := newGroups[key]
-			if !ok {
-				g = nextNumGroups
-				nextNumGroups++
-				newGroups[key] = g
-			}
-			nextStateToGroup[i] = g
+			key := splitKey{stateToGroup[i], string(buf)}; g, ok := newGroups[key]
+			if !ok { g = nextNumGroups; nextNumGroups++; newGroups[key] = g }; nextStateToGroup[i] = g
 		}
-
-		if nextNumGroups == numGroups {
-			break
-		}
-		stateToGroup = nextStateToGroup
-		numGroups = nextNumGroups
+		if nextNumGroups == numGroups { break }; stateToGroup = nextStateToGroup; numGroups = nextNumGroups
 	}
-
-	groupToFirstState := make([]int, numGroups)
-	for i, g := range stateToGroup {
-		groupToFirstState[g] = i
-	}
-
-	newTransitions := make([]StateID, int(numGroups)*d.stride)
-	newUpdateIndices := make([]uint32, int(numGroups)*d.stride)
-	newAccepting := make([]bool, numGroups)
-	newPrio := make([]int, numGroups)
-	newMatchTags := make([]uint64, numGroups)
-	newBest := make([]bool, numGroups)
-	newIsSearch := make([]bool, numGroups)
-
+	groupToFirstState := make([]int, numGroups); for i, g := range stateToGroup { groupToFirstState[g] = i }
+	newTransitions := make([]StateID, int(numGroups)*d.stride); newUpdateIndices := make([]uint32, int(numGroups)*d.stride)
+	newAccepting, newPrio, newMatchTags, newBest, newIsSearch := make([]bool, numGroups), make([]int, numGroups), make([]uint64, numGroups), make([]bool, numGroups), make([]bool, numGroups)
 	for g := int32(0); g < numGroups; g++ {
-		oldS := groupToFirstState[g]
-		newAccepting[g] = d.accepting[oldS]
-		newPrio[g] = d.stateMatchPriority[oldS]
-		newMatchTags[g] = d.stateMatchTags[oldS]
-		newBest[g] = d.stateIsBestMatch[oldS]
-		newIsSearch[g] = d.stateIsSearch[oldS]
-
+		oldS := groupToFirstState[g]; newAccepting[g] = d.accepting[oldS]; newPrio[g] = d.stateMatchPriority[oldS]; newMatchTags[g] = d.stateMatchTags[oldS]; newBest[g] = d.stateIsBestMatch[oldS]; newIsSearch[g] = d.stateIsSearch[oldS]
 		for b := 0; b < d.stride; b++ {
-			oldIdx := oldS*d.stride + b
-			target := d.transitions[oldIdx]
+			oldIdx := oldS*d.stride + b; target := d.transitions[oldIdx]
 			if target != InvalidState {
-				targetID := target & 0x7FFFFFFF
-				isTagged := target < 0
-				newID := StateID(stateToGroup[targetID])
-				if isTagged {
-					newTransitions[int(g)*d.stride+b] = newID | TaggedStateFlag
-					newUpdateIndices[int(g)*d.stride+b] = d.tagUpdateIndices[oldIdx]
-				} else {
-					newTransitions[int(g)*d.stride+b] = newID
-				}
-			} else {
-				newTransitions[int(g)*d.stride+b] = InvalidState
-			}
+				newID := StateID(stateToGroup[target & 0x7FFFFFFF])
+				if target < 0 { newTransitions[int(g)*d.stride+b] = newID | TaggedStateFlag; newUpdateIndices[int(g)*d.stride+b] = d.tagUpdateIndices[oldIdx] } else { newTransitions[int(g)*d.stride+b] = newID }
+			} else { newTransitions[int(g)*d.stride+b] = InvalidState }
 		}
 	}
-
-	d.transitions = newTransitions
-	d.tagUpdateIndices = newUpdateIndices
-	d.accepting = newAccepting
-	d.stateMatchPriority = newPrio
-	d.stateMatchTags = newMatchTags
-	d.stateIsBestMatch = newBest
-	d.stateIsSearch = newIsSearch
-	d.numStates = int(numGroups)
-	d.searchState = StateID(stateToGroup[d.searchState])
-	d.matchState = StateID(stateToGroup[d.matchState])
+	d.transitions, d.tagUpdateIndices, d.accepting, d.stateMatchPriority, d.stateMatchTags, d.stateIsBestMatch, d.stateIsSearch, d.numStates, d.searchState, d.matchState = newTransitions, newUpdateIndices, newAccepting, newPrio, newMatchTags, newBest, newIsSearch, int(numGroups), StateID(stateToGroup[d.searchState]), StateID(stateToGroup[d.matchState])
 }
 
-func matchesByte(node *utf8Node, b byte) bool {
-	for _, r := range node.ranges {
-		if b >= r.lo && b <= r.hi {
-			return true
+func (d *DFA) computePhase2Metadata() {
+	d.isAlwaysTrue, d.warpPoints, d.warpPointState = make([]bool, d.numStates), make([]int16, d.numStates), make([]StateID, d.numStates)
+	for i := range d.warpPoints { d.warpPoints[i] = -1; d.warpPointState[i] = InvalidState }
+	d.findWarpPoints(); d.findSCCs()
+}
+func (d *DFA) findWarpPoints() {
+	for i := 0; i < d.numStates; i++ {
+		currState := StateID(i); if d.accepting[i] { continue }
+		progressByte, targetState, possible := -1, InvalidState, true
+		for b := 0; b < 256; b++ {
+			nextRaw := d.transitions[i*d.stride+b]; if nextRaw == InvalidState { continue }
+			next := nextRaw & 0x7FFFFFFF; if next == currState { continue }
+			if progressByte == -1 { progressByte = b; targetState = next } else { possible = false; break }
 		}
+		if possible && progressByte != -1 { d.warpPoints[i] = int16(progressByte); d.warpPointState[i] = targetState }
 	}
-	return false
 }
-
-func matchesByteFold(node *utf8Node, b byte) bool {
-	return matchesByte(node, b)
-}
-
-func epsilonClosure(paths []nfaPath, prog *syntax.Prog, context syntax.EmptyOp) []nfaPath {
-	type key struct {
-		ID   uint32
-		node *utf8Node
-	}
-	best := make(map[key]nfaPath)
-	minMatchPriority := 1<<30 - 1
-
-	type pathWithHistory struct {
-		p       nfaPath
-		history []uint32
-	}
-	stack := make([]pathWithHistory, 0, len(paths))
-	for i := len(paths) - 1; i >= 0; i-- {
-		p := paths[i]
-		stack = append(stack, pathWithHistory{p, []uint32{p.ID}})
-	}
-
-	for len(stack) > 0 {
-		ph := stack[len(stack)-1]
-		stack = stack[:len(stack)-1]
-		p := ph.p
-
-		k := key{p.ID, p.node}
-		if existing, ok := best[k]; ok {
-			if p.Priority >= existing.Priority {
-				continue
-			}
+func (d *DFA) findSCCs() {
+	num := 0; index, lowlink, onStack, stack := make([]int, d.numStates), make([]int, d.numStates), make([]bool, d.numStates), []int{}
+	for i := range index { index[i] = -1 }
+	var strongconnect func(v int)
+	strongconnect = func(v int) {
+		index[v] = num; lowlink[v] = num; num++; stack = append(stack, v); onStack[v] = true
+		for b := 0; b < 256; b++ {
+			nextRaw := d.transitions[v*d.stride+b]; if nextRaw == -1 { continue }
+			w := int(nextRaw & 0x7FFFFFFF)
+			if index[w] == -1 { strongconnect(w); if lowlink[w] < lowlink[v] { lowlink[v] = lowlink[w] } } else if onStack[w] { if index[w] < lowlink[v] { lowlink[v] = index[w] } }
 		}
-		best[k] = p
-
-		if p.node == nil {
-			inst := prog.Inst[p.ID]
-
-			if inst.Op == syntax.InstMatch {
-				if p.Priority < minMatchPriority {
-					minMatchPriority = p.Priority
-				}
-				continue
-			}
-
-			push := func(nextID uint32, nextPriority int, preTags, postTags uint64) {
-				for _, id := range ph.history {
-					if id == nextID {
-						return
+		if lowlink[v] == index[v] {
+			var component []int
+			for { w := stack[len(stack)-1]; stack = stack[:len(stack)-1]; onStack[w] = false; component = append(component, w); if w == v { break } }
+			allAcc := true; for _, s := range component { if !d.accepting[s] { allAcc = false; break } }
+			if allAcc {
+				allTrans := true
+				for _, s := range component {
+					for b := 0; b < 256; b++ {
+						nextRaw := d.transitions[s*d.stride+b]; if nextRaw == -1 { allTrans = false; break }
+						next := int(nextRaw & 0x7FFFFFFF); in := false; for _, cs := range component { if cs == next { in = true; break } }
+						if !in && !d.isAlwaysTrue[next] { allTrans = false; break }
 					}
+					if !allTrans { break }
 				}
-				newHistory := make([]uint32, len(ph.history)+1)
-				copy(newHistory, ph.history)
-				newHistory[len(ph.history)] = nextID
-				stack = append(stack, pathWithHistory{
-					p: nfaPath{
-						nfaState: nfaState{ID: nextID},
-						Priority: nextPriority,
-						PreTags:  preTags,
-						PostTags: postTags,
-					},
-					history: newHistory,
-				})
+				if allTrans { for _, s := range component { d.isAlwaysTrue[s] = true } }
 			}
+		}
+	}
+	for i := 0; i < d.numStates; i++ { if index[i] == -1 { strongconnect(i) } }
+}
 
+func matchesByte(node *utf8Node, b byte) bool { for _, r := range node.ranges { if b >= r.lo && b <= r.hi { return true } }; return false }
+func matchesByteFold(node *utf8Node, b byte) bool { return matchesByte(node, b) }
+
+func epsilonClosureWithSplitTags(paths []nfaPath, prog *syntax.Prog, context syntax.EmptyOp) ([]nfaPath, uint64, uint64) {
+	type key struct { ID uint32; node *utf8Node; Tags uint64 }
+	best := make(map[key]int); type pathWithNewTags struct { p nfaPath; sTags, eTags uint64 }
+	stack := make([]pathWithNewTags, len(paths)); for i, p := range paths { stack[i] = pathWithNewTags{p, 0, 0} }
+	var allSTags, allETags uint64
+	for len(stack) > 0 {
+		ph := stack[len(stack)-1]; stack = stack[:len(stack)-1]; p, k := ph.p, key{ph.p.ID, ph.p.node, ph.p.Tags}
+		if prio, ok := best[k]; ok && p.Priority >= prio { continue }
+		best[k] = p.Priority
+		if p.Priority == 0 { allSTags |= ph.sTags; allETags |= ph.eTags }
+		if p.node == nil {
+			inst := prog.Inst[p.ID]; if inst.Op == syntax.InstMatch { continue }
 			switch inst.Op {
 			case syntax.InstAlt, syntax.InstAltMatch:
-				push(inst.Arg, p.Priority+1, p.PreTags, p.PostTags)
-				push(inst.Out, p.Priority, p.PreTags, p.PostTags)
+				stack = append(stack, pathWithNewTags{nfaPath{nfaState: nfaState{ID: inst.Arg}, Priority: p.Priority + 1, Tags: p.Tags}, ph.sTags, ph.eTags})
+				stack = append(stack, pathWithNewTags{nfaPath{nfaState: nfaState{ID: inst.Out}, Priority: p.Priority, Tags: p.Tags}, ph.sTags, ph.eTags})
 			case syntax.InstCapture:
-				newPostTags := p.PostTags
-				if inst.Arg < 64 {
-					newPostTags |= (1 << inst.Arg)
-				}
-				push(inst.Out, p.Priority, p.PreTags, newPostTags)
-			case syntax.InstNop:
-				push(inst.Out, p.Priority, p.PreTags, p.PostTags)
-			case syntax.InstEmptyWidth:
-				if syntax.EmptyOp(inst.Arg)&context == syntax.EmptyOp(inst.Arg) {
-					push(inst.Out, p.Priority, p.PreTags, p.PostTags)
-				}
+				tagBit := uint64(0); if inst.Arg < 64 { tagBit = (1 << inst.Arg) }
+				ns, ne := ph.sTags, ph.eTags; if inst.Arg%2 == 0 { ns |= tagBit } else { ne |= tagBit }
+				stack = append(stack, pathWithNewTags{nfaPath{nfaState: nfaState{ID: inst.Out}, Priority: p.Priority, Tags: p.Tags | tagBit}, ns, ne})
+			case syntax.InstNop: stack = append(stack, pathWithNewTags{nfaPath{nfaState: nfaState{ID: inst.Out}, Priority: p.Priority, Tags: p.Tags}, ph.sTags, ph.eTags})
+			case syntax.InstEmptyWidth: if syntax.EmptyOp(inst.Arg)&context == syntax.EmptyOp(inst.Arg) { stack = append(stack, pathWithNewTags{nfaPath{nfaState: nfaState{ID: inst.Out}, Priority: p.Priority, Tags: p.Tags}, ph.sTags, ph.eTags}) }
 			}
 		}
 	}
-
-	var result []nfaPath
-	for _, p := range best {
-		if p.Priority <= minMatchPriority {
-			result = append(result, p)
-		}
-	}
-
+	var result []nfaPath; for k, prio := range best { result = append(result, nfaPath{nfaState: nfaState{ID: k.ID, node: k.node}, Priority: prio, Tags: k.Tags}) }
 	sort.Slice(result, func(i, j int) bool {
-		if result[i].Priority != result[j].Priority {
-			return result[i].Priority < result[j].Priority
-		}
-		if result[i].ID != result[j].ID {
-			return result[i].ID < result[j].ID
-		}
-		idI, idJ := 0, 0
-		if result[i].node != nil {
-			idI = result[i].node.ID
-		}
-		if result[j].node != nil {
-			idJ = result[j].node.ID
-		}
-		return idI < idJ
+		if result[i].Priority != result[j].Priority { return result[i].Priority < result[j].Priority }
+		if result[i].ID != result[j].ID { return result[i].ID < result[j].ID }
+		return result[i].Tags < result[j].Tags
 	})
-
-	return result
+	return result, allSTags, allETags
 }
 
 func serializeSet(set []nfaPath) string {
-	if len(set) == 0 {
-		return ""
-	}
-	buf := make([]byte, len(set)*12)
+	if len(set) == 0 { return "" }
+	minP := set[0].Priority; for i := 1; i < len(set); i++ { if set[i].Priority < minP { minP = set[i].Priority } }
+	buf := make([]byte, len(set)*20)
 	for i, s := range set {
-		off := i * 12
-		id := s.ID
-		buf[off] = byte(id)
-		buf[off+1] = byte(id >> 8)
-		buf[off+2] = byte(id >> 16)
-		buf[off+3] = byte(id >> 24)
-
-		var nodeID uint32
-		if s.node != nil {
-			nodeID = uint32(s.node.ID)
-		}
-		buf[off+4] = byte(nodeID)
-		buf[off+5] = byte(nodeID >> 8)
-		buf[off+6] = byte(nodeID >> 16)
-		buf[off+7] = byte(nodeID >> 24)
-
-		p := uint32(s.Priority)
-		buf[off+8] = byte(p)
-		buf[off+9] = byte(p >> 8)
-		buf[off+10] = byte(p >> 16)
-		buf[off+11] = byte(p >> 24)
+		off := i * 20; *(*uint32)(unsafe.Pointer(&buf[off])) = s.ID
+		var nodeID uint32; if s.node != nil { nodeID = uint32(s.node.ID) }
+		*(*uint32)(unsafe.Pointer(&buf[off+4])) = nodeID
+		*(*uint32)(unsafe.Pointer(&buf[off+8])) = uint32(s.Priority - minP); *(*uint64)(unsafe.Pointer(&buf[off+12])) = s.Tags
 	}
 	return string(buf)
 }

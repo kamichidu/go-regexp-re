@@ -5,8 +5,6 @@ import (
 	goregexp "regexp"
 	"strings"
 	"testing"
-
-	"github.com/kamichidu/go-regexp-re/internal/ir"
 )
 
 var goldenPatterns []struct {
@@ -223,25 +221,6 @@ func TestRegexp_FindSubmatchIndex(t *testing.T) {
 
 			// Failure diagnostics
 			t.Errorf("FindStringSubmatchIndex(%q, %q) = %v; want %v", tt.pattern, tt.input, got, want)
-
-			// Phase 1: DFA Boundary check
-			b := []byte(tt.input)
-			start, end, _ := re.match(b)
-			if want == nil {
-				if start >= 0 {
-					t.Errorf("  [Diagnostic] DFA mismatch: found match [%d, %d], but want no match", start, end)
-				}
-			} else {
-				if start < 0 {
-					t.Errorf("  [Diagnostic] DFA mismatch: no match found, but want match at [%d, %d]", want[0], want[1])
-				} else if start != want[0] || end != want[1] {
-					t.Errorf("  [Diagnostic] DFA mismatch: got [%d, %d], want [%d, %d]", start, end, want[0], want[1])
-				} else {
-					// DFA was correct, so it must be NFA
-					regs := ir.NFAMatch(re.prog, re.dfa.TrieRoots(), b, start, end, re.numSubexp)
-					t.Errorf("  [Diagnostic] NFA mismatch: got %v, want %v (with correct boundaries [%d, %d])", regs, want, start, end)
-				}
-			}
 		})
 	}
 }
