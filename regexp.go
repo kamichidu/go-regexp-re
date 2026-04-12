@@ -112,21 +112,23 @@ func (re *Regexp) applyContextToState(d *ir.DFA, state ir.StateID, context synta
 	if state == ir.InvalidState || context == 0 || d.Stride() <= 256 { return state }
 	trans, tagUpdateIndices, tagUpdates, stride := d.Transitions(), d.TagUpdateIndices(), d.TagUpdates(), d.Stride()
 	virtualBytes := [6]int{ir.VirtualBeginLine, ir.VirtualEndLine, ir.VirtualBeginText, ir.VirtualEndText, ir.VirtualWordBoundary, ir.VirtualNoWordBoundary}
-	for {
+	// Safety limit: a state should not need more than 6 virtual transitions to reach a fixed point.
+	for iter := 0; iter < 6; iter++ {
 		changed := false
 		for bit := 0; bit < 6; bit++ {
 			if (context & (1 << bit)) != 0 {
 				idx := int(state)*stride + virtualBytes[bit]
 				if idx < len(trans) {
 					rawNext := trans[idx]
-					if rawNext != ir.InvalidState && rawNext != state {
+					nextID := rawNext & 0x7FFFFFFF
+					if rawNext != ir.InvalidState && nextID != state {
 						if rawNext < 0 && stack != nil {
 							update := tagUpdates[tagUpdateIndices[idx]]
 							for _, tp := range update.PathUpdates {
 								stack.Push(currentPrio + int(tp.RelativePriority), tp.Tags, pos)
 							}
 						}
-						state = rawNext & 0x7FFFFFFF; changed = true
+						state = nextID; changed = true
 					}
 				}
 			}
