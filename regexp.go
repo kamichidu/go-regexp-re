@@ -66,7 +66,7 @@ func CompileContextWithOption(ctx context.Context, expr string, opt CompileOptio
 }
 
 func (re *Regexp) bindMatchLoop() {
-	if re.dfa.HasAnchors() { re.match = func(b []byte) (int, int, int) { i, j, k, _ := execLoop[extendedMatchTrait](re, b, nil); return i, j, k } } else { re.match = func(b []byte) (int, int, int) { i, j, k, _ := execLoop[fastMatchTrait](re, b, nil); return i, j, k } }
+	if re.dfa.HasAnchors() { re.match = func(b []byte) (int, int, int) { i, j, k, _ := execLoop[extendedMatchTrait](re, b); return i, j, k } } else { re.match = func(b []byte) (int, int, int) { i, j, k, _ := execLoop[fastMatchTrait](re, b); return i, j, k } }
 }
 
 func (re *Regexp) Match(b []byte) bool { i, _, _ := re.match(b); return i >= 0 }
@@ -75,32 +75,17 @@ func (re *Regexp) NumSubexp() int { return re.numSubexp }
 func (re *Regexp) LiteralPrefix() (string, bool) { return string(re.prefix), re.complete }
 
 func (re *Regexp) FindSubmatchIndex(b []byte) []int {
-	var stack ir.CaptureStack; var start, end, targetPriority int; var matchTags uint64
-	if re.dfa.HasAnchors() { start, end, targetPriority, matchTags = execLoop[extendedCaptureTrait](re, b, &stack) } else { start, end, targetPriority, matchTags = execLoop[fastCaptureTrait](re, b, &stack) }
+	var start, end, targetPriority int; var matchTags uint64
+	if re.dfa.HasAnchors() { start, end, targetPriority, matchTags = execLoop[extendedCaptureTrait](re, b) } else { start, end, targetPriority, matchTags = execLoop[fastCaptureTrait](re, b) }
 	if start < 0 { return nil }
-	return re.extractSubmatches(b, start, end, targetPriority, matchTags, &stack)
+	return re.extractSubmatches(b, start, end, targetPriority, matchTags)
 }
 
-func (re *Regexp) extractSubmatches(b []byte, start, end, targetPriority int, matchTags uint64, stack *ir.CaptureStack) []int {
+func (re *Regexp) extractSubmatches(b []byte, start, end, targetPriority int, matchTags uint64) []int {
 	regs := make([]int, (re.numSubexp+1)*2); for i := range regs { regs[i] = -1 }; regs[0], regs[1] = start, end
-	dfa := re.dfa
 	
-	basePriority := (targetPriority / ir.SearchRestartPenalty) * ir.SearchRestartPenalty
-	// Start tags from the very beginning of this match attempt
-	for i := 0; i < 64; i++ { if (dfa.StartTags() & (1 << i)) != 0 && i < len(regs) { regs[i] = start } }
+	if re.dfa.HasAnchors() { rescanLoop[extendedMatchTrait](re, b, start, end, targetPriority, regs) } else { rescanLoop[fastMatchTrait](re, b, start, end, targetPriority, regs) }
 	
-	for _, record := range stack.All() {
-		// Only consider tags up to the best match end position and belonging to the winning priority
-		if record.Pos <= end && (record.Priority == targetPriority || record.Priority == basePriority) {
-			for i := 0; i < 64; i++ {
-				if (record.Tags & (1 << i)) != 0 && i < len(regs) {
-					regs[i] = record.Pos
-				}
-			}
-		}
-	}
-	
-	// Final state match tags (e.g. for patterns ending with empty match groups)
 	for i := 0; i < 64; i++ {
 		if (matchTags & (1 << i)) != 0 && i < len(regs) {
 			if regs[i] == -1 || regs[i] < start || regs[i] > end {
@@ -111,10 +96,60 @@ func (re *Regexp) extractSubmatches(b []byte, start, end, targetPriority int, ma
 	return regs
 }
 
-func (re *Regexp) applyContextToState(d *ir.DFA, state ir.StateID, context syntax.EmptyOp, pos int, currentPrio int, stack *ir.CaptureStack) ir.StateID {
+func rescanLoop[T loopTrait](re *Regexp, b []byte, start, end, targetPriority int, regs []int) {
+	var trait T; dfa := re.dfa
+	trans, tagUpdateIndices, tagUpdates, stride, matchState := dfa.Transitions(), dfa.TagUpdateIndices(), dfa.TagUpdates(), dfa.Stride(), dfa.MatchState()
+	
+	recordTags := func(t uint64, pos int) {
+		if t == 0 { return }
+		for i := 0; i < 64; i++ { if (t & (1 << i)) != 0 && i < len(regs) { regs[i] = pos } }
+	}
+	
+	recordTags(dfa.StartTags(), start)
+	
+	currentPrio := 0; state := matchState
+	hasAnchors := trait.HasAnchors()
+	
+	innerTarget := targetPriority % ir.SearchRestartPenalty
+
+	for i := start; i <= end; i++ {
+		if hasAnchors {
+			state = re.applyContextToState(dfa, state, ir.CalculateContext(b, i), i, currentPrio, innerTarget, regs)
+		}
+		if i == end { break }
+		
+		idx := int(state)*stride + int(b[i]); rawNext := trans[idx]
+		if rawNext != ir.InvalidState {
+			if rawNext < 0 {
+				update := tagUpdates[tagUpdateIndices[idx]]
+				// Find tags consistent with our winning priority path
+				for _, tu := range update.PreUpdates {
+					if currentPrio + int(update.BasePriority) + int(tu.RelativePriority) <= innerTarget {
+						recordTags(tu.Tags, i)
+					}
+				}
+				for _, tu := range update.PostUpdates {
+					if currentPrio + int(update.BasePriority) + int(tu.RelativePriority) <= innerTarget {
+						recordTags(tu.Tags, i+1)
+					}
+				}
+				currentPrio += int(update.BasePriority)
+			}
+			state = rawNext & 0x7FFFFFFF
+		} else { break }
+	}
+}
+
+func (re *Regexp) applyContextToState(d *ir.DFA, state ir.StateID, context syntax.EmptyOp, pos int, currentPrio int, targetPrio int, regs []int) ir.StateID {
 	if state == ir.InvalidState || context == 0 || d.Stride() <= 256 { return state }
 	trans, tagUpdateIndices, tagUpdates, stride := d.Transitions(), d.TagUpdateIndices(), d.TagUpdates(), d.Stride()
 	virtualBytes := [6]int{ir.VirtualBeginLine, ir.VirtualEndLine, ir.VirtualBeginText, ir.VirtualEndText, ir.VirtualWordBoundary, ir.VirtualNoWordBoundary}
+	
+	recordTags := func(t uint64, p int) {
+		if t == 0 { return }
+		for i := 0; i < 64; i++ { if (t & (1 << i)) != 0 && i < len(regs) { regs[i] = p } }
+	}
+
 	for iter := 0; iter < 6; iter++ {
 		changed := false
 		for bit := 0; bit < 6; bit++ {
@@ -124,10 +159,12 @@ func (re *Regexp) applyContextToState(d *ir.DFA, state ir.StateID, context synta
 					rawNext := trans[idx]
 					nextID := rawNext & 0x7FFFFFFF
 					if rawNext != ir.InvalidState && nextID != state {
-						if rawNext < 0 && stack != nil {
+						if rawNext < 0 && regs != nil {
 							update := tagUpdates[tagUpdateIndices[idx]]
-							for _, tp := range update.PathUpdates {
-								stack.Push(currentPrio + int(tp.RelativePriority), tp.Tags, pos)
+							for _, tu := range update.PreUpdates {
+								if currentPrio + int(update.BasePriority) + int(tu.RelativePriority) <= targetPrio {
+									recordTags(tu.Tags, pos)
+								}
 							}
 						}
 						state = nextID; changed = true
@@ -151,23 +188,22 @@ type fastCaptureTrait struct{}; func (fastCaptureTrait) HasAnchors() bool { retu
 type extendedMatchTrait struct{}; func (extendedMatchTrait) HasAnchors() bool { return true }; func (extendedMatchTrait) IsCapture() bool { return false }
 type extendedCaptureTrait struct{}; func (extendedCaptureTrait) HasAnchors() bool { return true }; func (extendedCaptureTrait) IsCapture() bool { return true }
 
-func execLoop[T loopTrait](re *Regexp, b []byte, stack *ir.CaptureStack) (int, int, int, uint64) {
+func execLoop[T loopTrait](re *Regexp, b []byte) (int, int, int, uint64) {
 	var trait T; dfa := re.dfa
 	trans, tagUpdateIndices, tagUpdates, stride, accepting := dfa.Transitions(), dfa.TagUpdateIndices(), dfa.TagUpdates(), dfa.Stride(), dfa.Accepting()
 	numStates, numBytes := dfa.NumStates(), len(b); lb := b[:numBytes]
 	bestStart, bestEnd, bestPriority, bestMatchTags, currentPriority := -1, -1, 1<<30-1, uint64(0), 0
 	state := dfa.SearchState(); if re.anchorStart { state = dfa.MatchState() }
-	hasAnchors, isCapture := trait.HasAnchors(), trait.IsCapture()
+	hasAnchors := trait.HasAnchors()
 
 	for i := 0; i <= numBytes; i++ {
-		if hasAnchors { state = re.applyContextToState(dfa, state, ir.CalculateContext(lb, i), i, currentPriority, stack) }
+		if hasAnchors { state = re.applyContextToState(dfa, state, ir.CalculateContext(lb, i), i, currentPriority, 1<<30-1, nil) }
 		if state != ir.InvalidState {
 			idx := int(state); if idx >= 0 && idx < len(accepting) && accepting[idx] {
 				p := currentPriority + dfa.MatchPriority(state)
 				if p <= bestPriority {
 					bestPriority, bestEnd, bestMatchTags = p, i, dfa.MatchTags(state)
 					bestStart = p / ir.SearchRestartPenalty
-					// Mandate 2.10: Early exit if we found the absolute best match
 					if dfa.IsBestMatch(state) {
 						return bestStart, bestEnd, bestPriority, bestMatchTags
 					}
@@ -182,11 +218,6 @@ func execLoop[T loopTrait](re *Regexp, b []byte, stack *ir.CaptureStack) (int, i
 					state = rawNext & 0x7FFFFFFF
 					if rawNext < 0 {
 						update := tagUpdates[tagUpdateIndices[off]]
-						if isCapture {
-							for _, tp := range update.PathUpdates {
-								stack.Push(currentPriority + int(update.BasePriority) + int(tp.RelativePriority), tp.Tags, i + int(tp.PosOffset))
-							}
-						}
 						currentPriority += int(update.BasePriority)
 					}
 				} else { state = ir.InvalidState }
@@ -194,7 +225,6 @@ func execLoop[T loopTrait](re *Regexp, b []byte, stack *ir.CaptureStack) (int, i
 			if state == ir.InvalidState {
 				if re.anchorStart { break }
 				state, currentPriority = dfa.SearchState(), currentPriority + ir.SearchRestartPenalty
-				if isCapture { stack.Reset() }
 			}
 		}
 	}

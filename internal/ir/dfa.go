@@ -31,12 +31,12 @@ type nfaPath struct { nfaState; Priority int; Tags uint64 }
 type PathTagUpdate struct {
 	RelativePriority int32
 	Tags             uint64
-	PosOffset        int32 // 0 for i, 1 for i+1
 }
 
 type TransitionUpdate struct {
 	BasePriority int32
-	PathUpdates  []PathTagUpdate
+	PreUpdates   []PathTagUpdate // Tags before consuming byte
+	PostUpdates  []PathTagUpdate // Tags after consuming byte
 }
 
 type DFA struct {
@@ -99,9 +99,7 @@ func NewDFAWithMemoryLimit(ctx context.Context, prog *syntax.Prog, maxMemory int
 type closureCacheKey struct { paths string; context syntax.EmptyOp }
 type closureResult struct {
 	nextClosure []nfaPath
-	allSTags    uint64
-	allETags    uint64
-	updates     []simpleTagUpdate
+	updates     []PathTagUpdate
 }
 
 func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error {
@@ -132,8 +130,8 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 	getCachedClosure := func(paths []nfaPath, context syntax.EmptyOp) closureResult {
 		key := closureCacheKey{serializeSet(paths), context}
 		if res, ok := closureCache[key]; ok { return res }
-		nextClosure, allSTags, allETags, updates := epsilonClosureWithPathTags(paths, prog, context)
-		res := closureResult{nextClosure, allSTags, allETags, updates}
+		nextClosure, updates := epsilonClosureWithPathTags(paths, prog, context)
+		res := closureResult{nextClosure, updates}
 		closureCache[key] = res
 		return res
 	}
@@ -171,7 +169,8 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 		d.numStates++; return id
 	}
 	defaultStartRes := getCachedClosure([]nfaPath{{nfaState: nfaState{ID: uint32(prog.Start)}}}, 0)
-	d.matchState = addDfaState(defaultStartRes.nextClosure, false); d.startTags = defaultStartRes.allSTags
+	d.matchState = addDfaState(defaultStartRes.nextClosure, false)
+	d.startTags = 0; for _, u := range defaultStartRes.updates { if u.RelativePriority == 0 { d.startTags |= u.Tags } }
 	d.searchState = addDfaState(defaultStartRes.nextClosure, true)
 	for i := 0; i < len(dfaToNfa); i++ {
 		if i%100 == 0 { select { case <-ctx.Done(): return ctx.Err(); default: } }
@@ -211,14 +210,9 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 				minP := nextRes.nextClosure[0].Priority; for _, p := range nextRes.nextClosure { if p.Priority < minP { minP = p.Priority } }
 				nextDfaID := addDfaState(nextRes.nextClosure, currentIsSearch); if errBuild != nil { return errBuild }
 				idx := int(currentDfaID)*d.stride + b
-				
-				var allUpdates []PathTagUpdate
-				for _, u := range searchRes.updates { allUpdates = append(allUpdates, PathTagUpdate{RelativePriority: u.RelativePriority, Tags: u.Tags, PosOffset: 0}) }
-				for _, u := range nextRes.updates { allUpdates = append(allUpdates, PathTagUpdate{RelativePriority: u.RelativePriority, Tags: u.Tags, PosOffset: 1}) }
-				
-				if minP != 0 || len(allUpdates) > 0 {
+				if minP != 0 || len(searchRes.updates) > 0 || len(nextRes.updates) > 0 {
 					d.transitions[idx] = nextDfaID | TaggedStateFlag
-					d.tagUpdateIndices[idx] = addUpdate(TransitionUpdate{BasePriority: int32(minP), PathUpdates: allUpdates})
+					d.tagUpdateIndices[idx] = addUpdate(TransitionUpdate{BasePriority: int32(minP), PreUpdates: searchRes.updates, PostUpdates: nextRes.updates})
 				} else { d.transitions[idx] = nextDfaID }
 			} else if currentIsSearch {
 				idx := int(currentDfaID)*d.stride + b
@@ -237,13 +231,9 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 				minP := nextRes.nextClosure[0].Priority; for _, p := range nextRes.nextClosure { if p.Priority < minP { minP = p.Priority } }
 				nextDfaID := addDfaState(nextRes.nextClosure, currentIsSearch); if errBuild != nil { return errBuild }
 				idx := int(currentDfaID)*d.stride + 256 + bit
-				
-				var allUpdates []PathTagUpdate
-				for _, u := range nextRes.updates { allUpdates = append(allUpdates, PathTagUpdate{RelativePriority: u.RelativePriority, Tags: u.Tags, PosOffset: 0}) }
-				
-				if minP != 0 || len(allUpdates) > 0 {
+				if minP != 0 || len(nextRes.updates) > 0 {
 					d.transitions[idx] = nextDfaID | TaggedStateFlag
-					d.tagUpdateIndices[idx] = addUpdate(TransitionUpdate{BasePriority: int32(minP), PathUpdates: allUpdates})
+					d.tagUpdateIndices[idx] = addUpdate(TransitionUpdate{BasePriority: int32(minP), PreUpdates: nextRes.updates})
 				} else { d.transitions[idx] = nextDfaID }
 			}
 		}
@@ -344,29 +334,19 @@ func (d *DFA) findSCCs() {
 func matchesByte(node *utf8Node, b byte) bool { for _, r := range node.ranges { if b >= r.lo && b <= r.hi { return true } }; return false }
 func matchesByteFold(node *utf8Node, b byte) bool { return matchesByte(node, b) }
 
-type simpleTagUpdate struct {
-	RelativePriority int32
-	Tags             uint64
-}
-
-func epsilonClosureWithPathTags(paths []nfaPath, prog *syntax.Prog, context syntax.EmptyOp) ([]nfaPath, uint64, uint64, []simpleTagUpdate) {
+func epsilonClosureWithPathTags(paths []nfaPath, prog *syntax.Prog, context syntax.EmptyOp) ([]nfaPath, []PathTagUpdate) {
 	type key struct { ID uint32; node *utf8Node; Tags uint64 }
 	best := make(map[key]int); type pathWithNewTags struct { p nfaPath; tags uint64 }
 	stack := make([]pathWithNewTags, len(paths)); for i, p := range paths { stack[i] = pathWithNewTags{p, 0} }
 	
-	pathTags := make(map[int]*simpleTagUpdate)
-	var allSTags, allETags uint64
+	pathTags := make(map[int]*PathTagUpdate)
 	for len(stack) > 0 {
 		ph := stack[len(stack)-1]; stack = stack[:len(stack)-1]; p, k := ph.p, key{ph.p.ID, ph.p.node, ph.p.Tags}
 		if prio, ok := best[k]; ok && p.Priority >= prio { continue }
 		best[k] = p.Priority
-		if p.Priority == 0 {
-			// Extract S/E tags for the old 2nd pass (redundant but kept for dfa struct)
-			for i := 0; i < 64; i++ { if (ph.tags & (1 << i)) != 0 { if i%2 == 0 { allSTags |= (1 << i) } else { allETags |= (1 << i) } } }
-		}
 		
 		if ph.tags != 0 {
-			update := pathTags[p.Priority]; if update == nil { update = &simpleTagUpdate{RelativePriority: int32(p.Priority)}; pathTags[p.Priority] = update }
+			update := pathTags[p.Priority]; if update == nil { update = &PathTagUpdate{RelativePriority: int32(p.Priority)}; pathTags[p.Priority] = update }
 			update.Tags |= ph.tags
 		}
 
@@ -391,9 +371,9 @@ func epsilonClosureWithPathTags(paths []nfaPath, prog *syntax.Prog, context synt
 		return result[i].Tags < result[j].Tags
 	})
 	
-	var updates []simpleTagUpdate; for _, u := range pathTags { updates = append(updates, *u) }
+	var updates []PathTagUpdate; for _, u := range pathTags { updates = append(updates, *u) }
 	sort.Slice(updates, func(i, j int) bool { return updates[i].RelativePriority < updates[j].RelativePriority })
-	return result, allSTags, allETags, updates
+	return result, updates
 }
 
 func serializeSet(set []nfaPath) string {
@@ -410,11 +390,14 @@ func serializeSet(set []nfaPath) string {
 }
 
 func serializeUpdate(u TransitionUpdate) string {
-	buf := make([]byte, 4 + len(u.PathUpdates)*16)
+	buf := make([]byte, 4 + len(u.PreUpdates)*12 + len(u.PostUpdates)*12)
 	*(*int32)(unsafe.Pointer(&buf[0])) = u.BasePriority
-	for i, p := range u.PathUpdates {
-		off := 4 + i*16; *(*int32)(unsafe.Pointer(&buf[off])) = p.RelativePriority
-		*(*uint64)(unsafe.Pointer(&buf[off+4])) = p.Tags; *(*int32)(unsafe.Pointer(&buf[off+12])) = p.PosOffset
+	off := 4
+	for _, p := range u.PreUpdates {
+		*(*int32)(unsafe.Pointer(&buf[off])) = p.RelativePriority; *(*uint64)(unsafe.Pointer(&buf[off+4])) = p.Tags; off += 12
+	}
+	for _, p := range u.PostUpdates {
+		*(*int32)(unsafe.Pointer(&buf[off])) = p.RelativePriority; *(*uint64)(unsafe.Pointer(&buf[off+4])) = p.Tags; off += 12
 	}
 	return string(buf)
 }
