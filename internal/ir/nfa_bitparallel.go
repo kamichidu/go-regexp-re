@@ -42,8 +42,8 @@ func nfaMatchBitParallel(prog *syntax.Prog, b []byte, start, end int, numSubexp 
 		case syntax.InstNop:
 			addThread(q, inst.Out, nil, regs, priority, pos, context)
 		case syntax.InstAlt, syntax.InstAltMatch:
-			addThread(q, inst.Out, nil, regs, priority*2, pos, context)
-			addThread(q, inst.Arg, nil, regs, priority*2+1, pos, context)
+			addThread(q, inst.Out, nil, regs, priority, pos, context)
+			addThread(q, inst.Arg, nil, regs, priority + 1, pos, context)
 		case syntax.InstCapture:
 			if int(inst.Arg) < numRegs {
 				newRegs := make([]int, numRegs)
@@ -83,9 +83,6 @@ func nfaMatchBitParallel(prog *syntax.Prog, b []byte, start, end int, numSubexp 
 		initialRegs[i] = -1
 	}
 
-	ctx := CalculateContext(b, start)
-	addThread(&curr, uint32(prog.Start), nil, initialRegs, 0, start, ctx)
-
 	bestMatchRegs := make([]int, numRegs)
 	for i := range bestMatchRegs {
 		bestMatchRegs[i] = -1
@@ -94,6 +91,14 @@ func nfaMatchBitParallel(prog *syntax.Prog, b []byte, start, end int, numSubexp 
 	foundMatch := false
 
 	for pos := start; ; {
+		// In Search mode, we allow a new match to start at every position.
+		searchRegs := make([]int, numRegs)
+		for i := range searchRegs {
+			searchRegs[i] = -1
+		}
+		searchRegs[0] = pos
+		addThread(&curr, uint32(prog.Start), nil, searchRegs, (pos-start)*SearchRestartPenalty, pos, CalculateContext(b, pos))
+
 		if len(curr) == 0 && len(next) == 0 {
 			break
 		}
@@ -105,7 +110,6 @@ func nfaMatchBitParallel(prog *syntax.Prog, b []byte, start, end int, numSubexp 
 					foundMatch = true
 					copy(bestMatchRegs, t.regs)
 					if len(bestMatchRegs) >= 2 {
-						bestMatchRegs[0] = start
 						bestMatchRegs[1] = pos
 					}
 				}

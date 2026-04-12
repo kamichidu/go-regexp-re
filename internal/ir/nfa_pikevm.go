@@ -49,8 +49,8 @@ func nfaMatchPikeVM(prog *syntax.Prog, trieRoots [][]*utf8Node, b []byte, start,
 			case syntax.InstNop:
 				stack = append(stack, workItem{inst.Out, nil, item.regs, item.priority})
 			case syntax.InstAlt, syntax.InstAltMatch:
-				stack = append(stack, workItem{inst.Arg, nil, item.regs, item.priority*2 + 1})
-				stack = append(stack, workItem{inst.Out, nil, item.regs, item.priority * 2})
+				stack = append(stack, workItem{inst.Arg, nil, item.regs, item.priority + 1})
+				stack = append(stack, workItem{inst.Out, nil, item.regs, item.priority})
 			case syntax.InstCapture:
 				if int(inst.Arg) < numRegs {
 					newRegs := make([]int, numRegs)
@@ -82,9 +82,6 @@ func nfaMatchPikeVM(prog *syntax.Prog, trieRoots [][]*utf8Node, b []byte, start,
 		initialRegs[i] = -1
 	}
 
-	ctx := CalculateContext(b, start)
-	addThread(&curr, uint32(prog.Start), nil, initialRegs, 0, start, ctx)
-
 	bestMatchRegs := make([]int, numRegs)
 	for i := range bestMatchRegs {
 		bestMatchRegs[i] = -1
@@ -93,6 +90,16 @@ func nfaMatchPikeVM(prog *syntax.Prog, trieRoots [][]*utf8Node, b []byte, start,
 	foundMatch := false
 
 	for pos := start; ; {
+		// In Search mode, we allow a new match to start at every position.
+		// We set regs[0] to the current position to track the start of the match.
+		searchRegs := make([]int, numRegs)
+		for i := range searchRegs {
+			searchRegs[i] = -1
+		}
+		searchRegs[0] = pos
+		// Priority ensures that matches starting earlier are preferred.
+		addThread(&curr, uint32(prog.Start), nil, searchRegs, (pos-start)*SearchRestartPenalty, pos, CalculateContext(b, pos))
+
 		if len(curr) == 0 && len(next) == 0 {
 			break
 		}
@@ -105,7 +112,6 @@ func nfaMatchPikeVM(prog *syntax.Prog, trieRoots [][]*utf8Node, b []byte, start,
 					foundMatch = true
 					copy(bestMatchRegs, t.regs)
 					if len(bestMatchRegs) >= 2 {
-						bestMatchRegs[0] = start
 						bestMatchRegs[1] = pos
 					}
 				}

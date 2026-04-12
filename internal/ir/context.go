@@ -18,10 +18,6 @@ func CalculateContext(b []byte, i int) syntax.EmptyOp {
 		r2 = rune(b[i])
 	}
 	op := CalculateContextBetween(r1, r2)
-	if r2 == '\n' && i == len(b)-1 {
-		// Go's $ (EmptyEndText) also matches before a newline at the end of text.
-		op |= syntax.EmptyEndText
-	}
 	return op
 }
 

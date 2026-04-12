@@ -247,6 +247,9 @@ func factorPrefix(subs []*Regexp) []*Regexp {
 }
 
 func commonPrefixLenRune(prefix, re *Regexp) int {
+	if prefix.Op == OpEmptyMatch {
+		return 0
+	}
 	if prefix.Op != OpLiteral {
 		head, _ := splitHead(re)
 		if equal(prefix, head) {
@@ -376,6 +379,9 @@ func factorSuffix(subs []*Regexp) []*Regexp {
 }
 
 func commonSuffixLenRune(suffix, re *Regexp) int {
+	if suffix.Op == OpEmptyMatch {
+		return 0
+	}
 	if suffix.Op != OpLiteral {
 		_, tail := splitTail(re)
 		if equal(suffix, tail) {

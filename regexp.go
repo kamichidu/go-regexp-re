@@ -206,12 +206,11 @@ func (re *Regexp) FindSubmatchIndex(b []byte) []int {
 	regs[0] = start
 	regs[1] = end
 
-	// If the inner priority was not 0, we use NFA fallback.
-	// targetPriority % 1000000 gives the NFA-style priority within the pattern.
-	if (targetPriority % 1000000) > 0 {
-		nregs := ir.NFAMatch(re.prog, re.dfa.TrieRoots(), b, start, end, re.numSubexp)
+	// If the match was not a perfect priority-0 match starting at index 0,
+	// we use NFA fallback to find the precise boundaries and submatches.
+	if targetPriority > 0 || start > 0 {
+		nregs := ir.NFAMatch(re.prog, re.dfa.TrieRoots(), b, 0, end, re.numSubexp)
 		if nregs != nil {
-			nregs[0], nregs[1] = start, end
 			return nregs
 		}
 	}
