@@ -256,7 +256,7 @@ func TestRegexp_FindStringSubmatch(t *testing.T) {
 }
 
 func TestHTTP11Anchor(t *testing.T) {
-	re := MustCompile(`HTTP/1.1$`)
+	re := MustCompile(`(?m)HTTP/1.1$`)
 	tests := []struct {
 		input string
 		want  bool
