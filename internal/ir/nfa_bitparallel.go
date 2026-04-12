@@ -43,7 +43,7 @@ func nfaMatchBitParallel(prog *syntax.Prog, b []byte, start, end int, numSubexp 
 			addThread(q, inst.Out, nil, regs, priority, pos, context)
 		case syntax.InstAlt, syntax.InstAltMatch:
 			addThread(q, inst.Out, nil, regs, priority, pos, context)
-			addThread(q, inst.Arg, nil, regs, priority + 1, pos, context)
+			addThread(q, inst.Arg, nil, regs, priority+1, pos, context)
 		case syntax.InstCapture:
 			if int(inst.Arg) < numRegs {
 				newRegs := make([]int, numRegs)

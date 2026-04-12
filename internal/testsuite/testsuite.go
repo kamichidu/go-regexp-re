@@ -444,6 +444,7 @@ func RunFowler(t *testing.T) {
 	}
 	for _, engine := range engines {
 		t.Run(engine.Name, func(t *testing.T) {
+			errCache := &sync.Map{}
 			for _, ff := range fowlerFiles {
 				t.Run(ff.Name, func(t *testing.T) {
 					for _, tt := range ff.Tests {
@@ -455,8 +456,17 @@ func RunFowler(t *testing.T) {
 							continue
 						}
 						t.Run(fmt.Sprintf("pat=%q/text=%q", tt.Pattern, tt.Text), func(t *testing.T) {
+							if v, ok := errCache.Load(tt.Pattern); ok {
+								err := v.(error)
+								if EnableCompatibilityReport {
+									registry.record(engine.Name, err, false)
+								}
+								t.Skipf("failed to compile %q: %v", tt.Pattern, err)
+								return
+							}
 							re, err := engine.Compile(tt.Pattern)
 							if err != nil {
+								errCache.Store(tt.Pattern, err)
 								if EnableCompatibilityReport {
 									registry.record(engine.Name, err, false)
 								}
