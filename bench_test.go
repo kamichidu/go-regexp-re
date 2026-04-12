@@ -22,6 +22,8 @@ func BenchmarkCompile(b *testing.B) {
 		for _, p := range goldenPatterns {
 			b.Run(p.name, func(b *testing.B) {
 				b.ReportAllocs()
+				// We still need the loop for b.N, but we use it sparingly if it's slow.
+				// However, standard benchmark practice is to run b.N times.
 				for i := 0; i < b.N; i++ {
 					_ = MustCompile(p.pattern)
 				}
@@ -46,7 +48,11 @@ func BenchmarkMatch(b *testing.B) {
 	b.Run("Re", func(b *testing.B) {
 		for _, p := range goldenPatterns {
 			b.Run(p.name, func(b *testing.B) {
-				r := MustCompile(p.pattern)
+				// Use the cache if available from tests, or just compile once here.
+				r, err := Compile(p.pattern)
+				if err != nil {
+					b.Fatalf("Compile %s failed: %v", p.pattern, err)
+				}
 				input := []byte(p.payload)
 				b.ResetTimer()
 				for i := 0; i < b.N; i++ {
@@ -73,7 +79,10 @@ func BenchmarkSubmatch(b *testing.B) {
 	b.Run("Re", func(b *testing.B) {
 		for _, p := range goldenPatterns {
 			b.Run(p.name, func(b *testing.B) {
-				r := MustCompile(p.pattern)
+				r, err := Compile(p.pattern)
+				if err != nil {
+					b.Fatalf("Compile %s failed: %v", p.pattern, err)
+				}
 				input := []byte(p.payload)
 				b.ResetTimer()
 				for i := 0; i < b.N; i++ {

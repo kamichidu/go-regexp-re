@@ -3,6 +3,7 @@ package regexp
 import (
 	"reflect"
 	goregexp "regexp"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -105,6 +106,10 @@ func TestRegexp_GoldenPatterns(t *testing.T) {
 			got := re.MatchString(tc.payload)
 			if got != tc.want {
 				t.Errorf("MatchString(%q) = %v, want %v", tc.payload, got, tc.want)
+			}
+			// Explicitly trigger GC after heavy patterns like URI
+			if tc.name == "CaptureURI" {
+				runtime.GC()
 			}
 		})
 	}
@@ -223,6 +228,8 @@ func TestRegexp_FindSubmatchIndex(t *testing.T) {
 			t.Errorf("FindStringSubmatchIndex(%q, %q) = %v; want %v", tt.pattern, tt.input, got, want)
 		})
 	}
+	// Reclaim memory after many small DFA builds
+	runtime.GC()
 }
 
 func TestRegexp_FindStringSubmatch(t *testing.T) {
@@ -235,7 +242,8 @@ func TestRegexp_FindStringSubmatch(t *testing.T) {
 }
 
 func TestHTTP11Anchor(t *testing.T) {
-	re := MustCompile(`(?m)HTTP/1.1$`)
+	pattern := `(?m)HTTP/1.1$`
+	re := MustCompile(pattern)
 	tests := []struct {
 		input string
 		want  bool
@@ -299,6 +307,8 @@ func TestStateExplosion(t *testing.T) {
 					t.Logf("Pattern %q successfully compiled with %d DFA states", tt.pattern, re.dfa.TotalStates())
 				}
 			}
+			// Cleanup after potential explosion
+			runtime.GC()
 		})
 	}
 }

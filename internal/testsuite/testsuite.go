@@ -325,7 +325,7 @@ func RunCompatibility(t *testing.T) {
 
 	for _, engine := range engines {
 		t.Run(engine.Name, func(t *testing.T) {
-			for _, pat := range patterns {
+			for i, pat := range patterns {
 				if strings.Contains(pat, "\uFFFD") || strings.Contains(pat, "\\x{fffd}") {
 					continue
 				}
@@ -354,6 +354,10 @@ func RunCompatibility(t *testing.T) {
 						}
 					}
 				})
+				// Periodic GC to prevent accumulation across thousands of patterns
+				if i%50 == 0 {
+					runtime.GC()
+				}
 			}
 		})
 	}
@@ -395,7 +399,7 @@ func RunSubmatchCompatibility(t *testing.T) {
 			continue
 		}
 		t.Run(engine.Name, func(t *testing.T) {
-			for _, pat := range patterns {
+			for i, pat := range patterns {
 				if strings.Contains(pat, "\uFFFD") || strings.Contains(pat, "\\x{fffd}") {
 					continue
 				}
@@ -431,6 +435,10 @@ func RunSubmatchCompatibility(t *testing.T) {
 						}
 					}
 				})
+				// Periodic GC
+				if i%50 == 0 {
+					runtime.GC()
+				}
 			}
 		})
 	}
