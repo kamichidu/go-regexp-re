@@ -87,11 +87,15 @@ To ensure system stability and prevent Out-Of-Memory (OOM) conditions during com
 Before NFA/DFA compilation, the syntax tree (especially `OpAlternate`) MUST be optimized to reduce redundancy and mitigate state explosion.
 - **Prefix/Suffix Factoring**: Identical AST nodes at the beginning or end of alternative branches MUST be extracted (e.g., `a*c|b*c` -> `(?:a*|b*)c`). This unifies the exploration of common trailing or leading structures.
 - **Literal Trie Optimization**: Sequences of literals within an alternation MUST be merged into a Trie-like structure (e.g., `apple|applejuice` -> `apple(?:juice|)`).
-- **Semantics Preservation**: These optimizations MUST preserve the original leftmost-first priority order, ensuring compatibility with Go's standard library matching behavior.
+- **Priority Preservation**: Optimization passes MUST preserve the original leftmost-first priority.
+  - **Order Integrity**: Groups and items MUST be processed in their original relative order to ensure compatibility with Go's standard matching behavior.
+  - **Exclusion of Empty Matches**: `OpEmptyMatch` MUST NOT be treated as a common prefix or suffix. It must remain in its original position to maintain the correct priority boundary between alternatives.
+- **Structural Flatness**: Any newly created `OpAlternate` nodes MUST be flattened (nested alternates merged) to prevent Absolute Priority collisions and ensure deterministic state resolution during DFA construction.
 
 ### 2.14 Structural AST Normalization
 To maximize deterministic efficiency, the AST MUST be normalized before DFA construction:
-- **Literal Aggregation**: Consecutive single-character nodes MUST be merged into single `OpLiteral` nodes to minimize DFA state count.
+- **Literal Aggregation**: Consecutive single-character nodes MUST be merged into single `OpLiteral` nodes.
+- **Redundant Node Removal**: `OpEmptyMatch` nodes within `OpConcat` SHOULD be removed during aggregation to simplify the logical tree, provided the concatenation does not become empty (in which case it remains a single `OpEmptyMatch`).
 - **Concat Flattening**: Nested `OpConcat` structures MUST be flattened to expand the scope of literal aggregation and factoring.
 - **Anchor Hoisting**: Common anchors at the start or end of alternations MUST be hoisted out (e.g., `^a|^b` -> `^(?:a|b)`) to fix positioning constraints as early as possible.
 

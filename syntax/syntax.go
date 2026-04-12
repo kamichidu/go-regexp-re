@@ -57,6 +57,13 @@ func Optimize(re *Regexp) *Regexp {
 
 	switch re.Op {
 	case OpAlternate:
+		for i, sub := range re.Sub {
+			if sub.Op == OpConcat {
+				sub = flattenConcat(sub)
+				sub = aggregateLiterals(sub)
+				re.Sub[i] = sub
+			}
+		}
 		re = factorAlternate(re)
 	case OpConcat:
 		re = flattenConcat(re)
@@ -106,6 +113,9 @@ func aggregateLiterals(re *Regexp) *Regexp {
 	var lastLiteral *Regexp
 
 	for _, sub := range re.Sub {
+		if sub.Op == OpEmptyMatch {
+			continue
+		}
 		if sub.Op == OpLiteral && sub.Flags&FoldCase == 0 {
 			if lastLiteral != nil && lastLiteral.Flags&FoldCase == 0 {
 				lastLiteral.Rune = append(lastLiteral.Rune, sub.Rune...)
@@ -121,6 +131,13 @@ func aggregateLiterals(re *Regexp) *Regexp {
 			newSubs = append(newSubs, sub)
 			lastLiteral = nil
 		}
+	}
+
+	if len(newSubs) == 0 {
+		return &Regexp{Op: OpEmptyMatch}
+	}
+	if len(newSubs) == 1 {
+		return newSubs[0]
 	}
 
 	if len(newSubs) == len(re.Sub) {
@@ -176,11 +193,24 @@ func factorPrefix(subs []*Regexp) []*Regexp {
 		prefix *Regexp // Common prefix (can be a partial literal)
 		items  []*Regexp
 	}
-	var groups []*group
+	type entry struct {
+		item  *Regexp
+		group *group
+	}
+	var entries []*entry
 
 	for _, sub := range subs {
+		if sub.Op == OpEmptyMatch {
+			entries = append(entries, &entry{item: sub})
+			continue
+		}
+
 		found := false
-		for _, g := range groups {
+		for _, e := range entries {
+			if e.group == nil {
+				continue
+			}
+			g := e.group
 			n := commonPrefixLenRune(g.prefix, sub)
 			if n > 0 {
 				// We found a common prefix of length n.
@@ -197,42 +227,57 @@ func factorPrefix(subs []*Regexp) []*Regexp {
 					g.items = newItems
 				}
 
-				// Add current sub to the group
 				head, rest := splitAtRune(sub, n)
-				_ = head // same as g.prefix
+				_ = head
 				g.items = append(g.items, rest)
 				found = true
 				break
 			} else if equal(g.prefix, sub) {
-				// Identical - should have been handled by commonPrefixLenRune but for safety:
 				g.items = append(g.items, &Regexp{Op: OpEmptyMatch})
 				found = true
 				break
 			}
 		}
 		if !found {
-			// No group found, start a new one with its full "head"
 			head, rest := splitHead(sub)
-			groups = append(groups, &group{head, []*Regexp{rest}})
+			if head.Op == OpEmptyMatch {
+				entries = append(entries, &entry{item: sub})
+			} else {
+				g := &group{head, []*Regexp{rest}}
+				entries = append(entries, &entry{group: g})
+			}
 		}
 	}
 
 	var newSubs []*Regexp
-	hasCommon := false
-	for _, g := range groups {
+	for _, e := range entries {
+		if e.item != nil {
+			newSubs = append(newSubs, e.item)
+			continue
+		}
+		g := e.group
 		if len(g.items) == 1 {
 			newSubs = append(newSubs, combineHead(g.prefix, g.items[0]))
 		} else {
-			// Only factor if prefix is significant:
-			// - Literal of length > 1
-			// - Non-literal node
-			if g.prefix.Op != OpLiteral || len(g.prefix.Rune) > 1 {
-				hasCommon = true
-				alt := &Regexp{Op: OpAlternate, Sub: g.items}
+			significant := false
+			if g.prefix.Op == OpLiteral {
+				significant = len(g.prefix.Rune) > 1
+			} else if g.prefix.Op != OpEmptyMatch {
+				significant = true
+			}
+
+			if significant {
+				var flattenedItems []*Regexp
+				for _, item := range g.items {
+					if item.Op == OpAlternate {
+						flattenedItems = append(flattenedItems, item.Sub...)
+					} else {
+						flattenedItems = append(flattenedItems, item)
+					}
+				}
+				alt := &Regexp{Op: OpAlternate, Sub: flattenedItems}
 				newSubs = append(newSubs, combineHead(g.prefix, alt))
 			} else {
-				// Single char literal prefix - gosyntax handles [abc] better if left as is,
-				// but let's see. For now, we'll keep it as is if it's only one char.
 				for _, item := range g.items {
 					newSubs = append(newSubs, combineHead(g.prefix, item))
 				}
@@ -240,9 +285,6 @@ func factorPrefix(subs []*Regexp) []*Regexp {
 		}
 	}
 
-	if !hasCommon {
-		return subs
-	}
 	return newSubs
 }
 
@@ -253,12 +295,11 @@ func commonPrefixLenRune(prefix, re *Regexp) int {
 	if prefix.Op != OpLiteral {
 		head, _ := splitHead(re)
 		if equal(prefix, head) {
-			return 1 // Not length in runes, but "match"
+			return 1
 		}
 		return 0
 	}
 
-	// prefix is a Literal
 	head, _ := splitHead(re)
 	if head.Op != OpLiteral || head.Flags != prefix.Flags {
 		return 0
@@ -301,7 +342,6 @@ func splitAtRune(re *Regexp, n int) (head, rest *Regexp) {
 		return head, rest
 	}
 
-	// If not literal or concat starting with literal, n must be "match" (1)
 	return splitHead(re)
 }
 
@@ -314,15 +354,26 @@ func factorSuffix(subs []*Regexp) []*Regexp {
 		suffix *Regexp // Common suffix (can be a partial literal)
 		items  []*Regexp
 	}
-	var groups []*group
+	type entry struct {
+		item  *Regexp
+		group *group
+	}
+	var entries []*entry
 
 	for _, sub := range subs {
+		if sub.Op == OpEmptyMatch {
+			entries = append(entries, &entry{item: sub})
+			continue
+		}
+
 		found := false
-		for _, g := range groups {
+		for _, e := range entries {
+			if e.group == nil {
+				continue
+			}
+			g := e.group
 			n := commonSuffixLenRune(g.suffix, sub)
 			if n > 0 {
-				// We found a common suffix of length n.
-				// If n is shorter than g.suffix, we must split g.suffix.
 				if g.suffix.Op == OpLiteral && n < len(g.suffix.Rune) {
 					prefix := &Regexp{Op: OpLiteral, Flags: g.suffix.Flags, Rune: g.suffix.Rune[:len(g.suffix.Rune)-n]}
 					suffix := &Regexp{Op: OpLiteral, Flags: g.suffix.Flags, Rune: g.suffix.Rune[len(g.suffix.Rune)-n:]}
@@ -335,9 +386,8 @@ func factorSuffix(subs []*Regexp) []*Regexp {
 					g.items = newItems
 				}
 
-				// Add current sub to the group
 				rest, tail := splitTailAtRune(sub, n)
-				_ = tail // same as g.suffix
+				_ = tail
 				g.items = append(g.items, rest)
 				found = true
 				break
@@ -348,21 +398,43 @@ func factorSuffix(subs []*Regexp) []*Regexp {
 			}
 		}
 		if !found {
-			// No group found, start a new one with its full "tail"
 			rest, tail := splitTail(sub)
-			groups = append(groups, &group{tail, []*Regexp{rest}})
+			if tail.Op == OpEmptyMatch {
+				entries = append(entries, &entry{item: sub})
+			} else {
+				g := &group{tail, []*Regexp{rest}}
+				entries = append(entries, &entry{group: g})
+			}
 		}
 	}
 
 	var newSubs []*Regexp
-	hasCommon := false
-	for _, g := range groups {
+	for _, e := range entries {
+		if e.item != nil {
+			newSubs = append(newSubs, e.item)
+			continue
+		}
+		g := e.group
 		if len(g.items) == 1 {
 			newSubs = append(newSubs, combineTail(g.items[0], g.suffix))
 		} else {
-			if g.suffix.Op != OpLiteral || len(g.suffix.Rune) > 1 {
-				hasCommon = true
-				alt := &Regexp{Op: OpAlternate, Sub: g.items}
+			significant := false
+			if g.suffix.Op == OpLiteral {
+				significant = len(g.suffix.Rune) > 1
+			} else if g.suffix.Op != OpEmptyMatch {
+				significant = true
+			}
+
+			if significant {
+				var flattenedItems []*Regexp
+				for _, item := range g.items {
+					if item.Op == OpAlternate {
+						flattenedItems = append(flattenedItems, item.Sub...)
+					} else {
+						flattenedItems = append(flattenedItems, item)
+					}
+				}
+				alt := &Regexp{Op: OpAlternate, Sub: flattenedItems}
 				newSubs = append(newSubs, combineTail(alt, g.suffix))
 			} else {
 				for _, item := range g.items {
@@ -372,9 +444,6 @@ func factorSuffix(subs []*Regexp) []*Regexp {
 		}
 	}
 
-	if !hasCommon {
-		return subs
-	}
 	return newSubs
 }
 
@@ -385,12 +454,11 @@ func commonSuffixLenRune(suffix, re *Regexp) int {
 	if suffix.Op != OpLiteral {
 		_, tail := splitTail(re)
 		if equal(suffix, tail) {
-			return 1 // Not length in runes, but "match"
+			return 1
 		}
 		return 0
 	}
 
-	// suffix is a Literal
 	_, tail := splitTail(re)
 	if tail.Op != OpLiteral || tail.Flags != suffix.Flags {
 		return 0
@@ -433,14 +501,15 @@ func splitTailAtRune(re *Regexp, n int) (rest, tail *Regexp) {
 		return rest, tail
 	}
 
-	// If not literal or concat ending with literal, n must be "match" (1)
 	return splitTail(re)
 }
 
 func splitHead(re *Regexp) (head, rest *Regexp) {
 	if re.Op == OpConcat && len(re.Sub) > 0 {
 		head = re.Sub[0]
-		if len(re.Sub) == 2 {
+		if len(re.Sub) == 1 {
+			rest = &Regexp{Op: OpEmptyMatch}
+		} else if len(re.Sub) == 2 {
 			rest = re.Sub[1]
 		} else {
 			rest = &Regexp{Op: OpConcat, Sub: re.Sub[1:]}
@@ -454,6 +523,9 @@ func combineHead(head, rest *Regexp) *Regexp {
 	if rest.Op == OpEmptyMatch {
 		return head
 	}
+	if head.Op == OpEmptyMatch {
+		return rest
+	}
 	res := &Regexp{Op: OpConcat}
 	if rest.Op == OpConcat {
 		res.Sub = append([]*Regexp{head}, rest.Sub...)
@@ -466,7 +538,9 @@ func combineHead(head, rest *Regexp) *Regexp {
 func splitTail(re *Regexp) (rest, tail *Regexp) {
 	if re.Op == OpConcat && len(re.Sub) > 0 {
 		tail = re.Sub[len(re.Sub)-1]
-		if len(re.Sub) == 2 {
+		if len(re.Sub) == 1 {
+			rest = &Regexp{Op: OpEmptyMatch}
+		} else if len(re.Sub) == 2 {
 			rest = re.Sub[0]
 		} else {
 			rest = &Regexp{Op: OpConcat, Sub: re.Sub[:len(re.Sub)-1]}
@@ -479,6 +553,9 @@ func splitTail(re *Regexp) (rest, tail *Regexp) {
 func combineTail(rest, tail *Regexp) *Regexp {
 	if rest.Op == OpEmptyMatch {
 		return tail
+	}
+	if tail.Op == OpEmptyMatch {
+		return rest
 	}
 	res := &Regexp{Op: OpConcat}
 	if rest.Op == OpConcat {
