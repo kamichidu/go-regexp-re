@@ -16,7 +16,9 @@ type CaptureStack struct {
 }
 
 func (s *CaptureStack) Push(priority int, tags uint64, pos int) {
-	if tags == 0 { return }
+	if tags == 0 {
+		return
+	}
 	if s.top < len(s.embedded) {
 		s.embedded[s.top] = CaptureRecord{Priority: priority, Tags: tags, Pos: pos}
 		s.top++
