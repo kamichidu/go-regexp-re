@@ -22,6 +22,7 @@ type Regexp struct {
 	anchorEnd   bool
 	prog        *syntax.Prog
 	dfa         *ir.DFA
+	bpDfa       *ir.BitParallelDFA
 	match       func([]byte) (int, int, int)
 	subexpNames []string
 }
@@ -71,6 +72,9 @@ func CompileContextWithOption(ctx context.Context, expr string, opt CompileOptio
 	if err != nil {
 		return nil, err
 	}
+	// Separated Bit-parallel construction
+	bpDfa := ir.NewBitParallelDFA(prog)
+
 	prefixState := dfa.MatchState()
 	if prefixStr != "" {
 		trans, stride := dfa.Transitions(), dfa.Stride()
@@ -83,7 +87,7 @@ func CompileContextWithOption(ctx context.Context, expr string, opt CompileOptio
 			prefixState = rawNext & 0x7FFFFFFF
 		}
 	}
-	res := &Regexp{expr: expr, numSubexp: numSubexp, prefix: []byte(prefixStr), prefixState: prefixState, complete: complete, anchorStart: anchorStart, anchorEnd: anchorEnd, prog: prog, dfa: dfa, subexpNames: subexpNames}
+	res := &Regexp{expr: expr, numSubexp: numSubexp, prefix: []byte(prefixStr), prefixState: prefixState, complete: complete, anchorStart: anchorStart, anchorEnd: anchorEnd, prog: prog, dfa: dfa, bpDfa: bpDfa, subexpNames: subexpNames}
 	if complete && numSubexp == 0 {
 		res.match = func(b []byte) (int, int, int) {
 			if res.anchorStart && res.anchorEnd {
@@ -116,7 +120,7 @@ func CompileContextWithOption(ctx context.Context, expr string, opt CompileOptio
 }
 
 func (re *Regexp) bindMatchLoop() {
-	if re.dfa.IsBitParallel() && !re.hasNonGreedy() {
+	if re.bpDfa != nil && !re.hasNonGreedy() && !re.dfa.HasAnchors() {
 		re.match = func(b []byte) (int, int, int) { i, j, k, _ := bitParallelExecLoop(re, b); return i, j, k }
 	} else if re.dfa.HasAnchors() {
 		re.match = func(b []byte) (int, int, int) { i, j, k, _ := execLoop[extendedMatchTrait](re, b); return i, j, k }
@@ -126,9 +130,17 @@ func (re *Regexp) bindMatchLoop() {
 }
 
 func (re *Regexp) hasNonGreedy() bool {
-	// A non-greedy Alt in syntax.Prog usually has Arg < Out.
 	for _, inst := range re.prog.Inst {
 		if (inst.Op == syntax.InstAlt || inst.Op == syntax.InstAltMatch) && inst.Arg < inst.Out {
+			return true
+		}
+	}
+	return false
+}
+
+func (re *Regexp) isGreedyMatch() bool {
+	for _, inst := range re.prog.Inst {
+		if (inst.Op == syntax.InstAlt || inst.Op == syntax.InstAltMatch) && inst.Arg > inst.Out {
 			return true
 		}
 	}
@@ -149,7 +161,7 @@ func (re *Regexp) LiteralPrefix() (string, bool) { return string(re.prefix), re.
 func (re *Regexp) FindSubmatchIndex(b []byte) []int {
 	var start, end, targetPriority int
 	var matchTags uint64
-	if re.dfa.IsBitParallel() && !re.hasNonGreedy() {
+	if re.bpDfa != nil && !re.hasNonGreedy() && !re.dfa.HasAnchors() {
 		start, end, targetPriority, matchTags = bitParallelExecLoop(re, b)
 	} else if re.dfa.HasAnchors() {
 		start, end, targetPriority, matchTags = execLoop[extendedCaptureTrait](re, b)
@@ -176,6 +188,23 @@ func (re *Regexp) extractSubmatches(b []byte, start, end, targetPriority int, ma
 		return regs
 	}
 
+	// 2-Pass Hybrid Strategy:
+	// NFA rescan is ONLY used for greedy matches (edge cases).
+	// For literal-heavy or non-greedy, 2nd Pass DFA is more deterministic.
+	if re.isGreedyMatch() {
+		return re.nfaRescan(b, start, end, regs)
+	}
+
+	// Principal: DFA Rescan
+	if re.dfa.HasAnchors() {
+		rescanLoop[extendedMatchTrait](re, b, start, end, targetPriority, regs)
+	} else {
+		rescanLoop[fastMatchTrait](re, b, start, end, targetPriority, regs)
+	}
+	return regs
+}
+
+func (re *Regexp) nfaRescan(b []byte, start, end int, regs []int) []int {
 	type thread struct {
 		id   uint32
 		regs []int
@@ -184,12 +213,6 @@ func (re *Regexp) extractSubmatches(b []byte, start, end, targetPriority int, ma
 	next := make([]thread, 0, 16)
 
 	addThread := func(q *[]thread, instID uint32, r []int, pos int) {
-		for _, th := range *q {
-			if th.id == instID {
-				return
-			}
-		}
-
 		visited := make(map[uint32]bool)
 		var dfs func(id uint32, currentRegs []int)
 		dfs = func(id uint32, currentRegs []int) {
@@ -251,27 +274,10 @@ func (re *Regexp) extractSubmatches(b []byte, start, end, targetPriority int, ma
 						match = (r == r0)
 					}
 				} else {
-					if fold {
-						for _, rRange := range inst.Rune {
-							if r == rRange || (r >= rRange && r <= rRange) {
-								match = true
-								break
-							}
-						}
-						if !match {
-							for j := 0; j < len(inst.Rune); j += 2 {
-								if r >= inst.Rune[j] && r <= inst.Rune[j+1] {
-									match = true
-									break
-								}
-							}
-						}
-					} else {
-						for j := 0; j < len(inst.Rune); j += 2 {
-							if rune(b[i]) >= inst.Rune[j] && rune(b[i]) <= inst.Rune[j+1] {
-								match = true
-								break
-							}
+					for j := 0; j < len(inst.Rune); j += 2 {
+						if r >= inst.Rune[j] && r <= inst.Rune[j+1] {
+							match = true
+							break
 						}
 					}
 				}
@@ -302,15 +308,73 @@ func (re *Regexp) extractSubmatches(b []byte, start, end, targetPriority int, ma
 	return regs
 }
 
-func bitParallelExecLoop(re *Regexp, b []byte) (int, int, int, uint64) {
+func rescanLoop[T loopTrait](re *Regexp, b []byte, start, end, targetPriority int, regs []int) {
+	var trait T
 	dfa := re.dfa
-	masks := dfa.BPCharMasks()
-	matchMask := dfa.BPMatchMask()
-	epsilons := dfa.BPEpsilon()
+	trans, tagUpdateIndices, tagUpdates, stride, matchState := dfa.Transitions(), dfa.TagUpdateIndices(), dfa.TagUpdates(), dfa.Stride(), dfa.MatchState()
+
+	innerTarget := targetPriority % ir.SearchRestartPenalty
+	for _, u := range dfa.StartUpdates() {
+		if int(u.RelativePriority) == innerTarget {
+			applyTags(u.Tags, start, regs)
+		}
+	}
+
+	currentPrio := 0
+	state := matchState
+	hasAnchors := trait.HasAnchors()
+
+	for i := start; i <= end; i++ {
+		if hasAnchors {
+			state = re.applyContextToState(dfa, state, ir.CalculateContext(b, i), i, currentPrio, innerTarget, regs)
+		}
+		if i == end {
+			break
+		}
+
+		idx := int(state)*stride + int(b[i])
+		rawNext := trans[idx]
+		if rawNext != ir.InvalidState {
+			if rawNext < 0 {
+				update := tagUpdates[tagUpdateIndices[idx]]
+				nextPrio := currentPrio + int(update.BasePriority)
+				for _, tu := range update.PreUpdates {
+					if nextPrio+int(tu.RelativePriority) == innerTarget {
+						applyTags(tu.Tags, i, regs)
+					}
+				}
+				for _, tu := range update.PostUpdates {
+					if nextPrio+int(tu.RelativePriority) == innerTarget {
+						applyTags(tu.Tags, i+1, regs)
+					}
+				}
+				currentPrio = nextPrio
+			}
+			state = rawNext & 0x7FFFFFFF
+		} else {
+			break
+		}
+	}
+}
+
+func applyTags(t uint64, pos int, regs []int) {
+	for t != 0 {
+		i := bits.TrailingZeros64(t)
+		if i < len(regs) {
+			regs[i] = pos
+		}
+		t &= ^(uint64(1) << i)
+	}
+}
+
+func bitParallelExecLoop(re *Regexp, b []byte) (int, int, int, uint64) {
+	bp := re.bpDfa
+	masks := bp.CharMasks
+	matchMask := bp.MatchMask
+	epsilons := bp.Epsilon
 	numBytes := len(b)
 
 	bestStart, bestEnd, bestPriority := -1, -1, 1<<30-1
-
 	var bpStarts [64]int
 	for i := range bpStarts {
 		bpStarts[i] = -1
@@ -318,7 +382,6 @@ func bitParallelExecLoop(re *Regexp, b []byte) (int, int, int, uint64) {
 
 	state := uint64(0)
 	for i := 0; i <= numBytes; i++ {
-		// New thread starting at i
 		if !re.anchorStart || i == 0 {
 			startBits := epsilons[re.prog.Start]
 			newBits := startBits & ^state
@@ -331,11 +394,8 @@ func bitParallelExecLoop(re *Regexp, b []byte) (int, int, int, uint64) {
 		}
 
 		if (state & matchMask) != 0 {
-			matchingBits := state & matchMask
-			winningBit := bits.TrailingZeros64(matchingBits)
+			winningBit := bits.TrailingZeros64(state & matchMask)
 			currentStart := bpStarts[winningBit]
-
-			// Leftmost-first + Greedy
 			if bestStart == -1 || currentStart < bestStart || (currentStart == bestStart && winningBit < bestPriority) || (currentStart == bestStart && winningBit == bestPriority && i >= bestEnd) {
 				bestPriority, bestEnd, bestStart = winningBit, i, currentStart
 			}
@@ -357,7 +417,6 @@ func bitParallelExecLoop(re *Regexp, b []byte) (int, int, int, uint64) {
 				inst := re.prog.Inst[bit]
 				outBits := epsilons[inst.Out]
 				nextState |= outBits
-
 				for outBits != 0 {
 					outBit := bits.TrailingZeros64(outBits)
 					if nextStarts[outBit] == -1 || bpStarts[bit] < nextStarts[outBit] {
@@ -381,7 +440,7 @@ func (re *Regexp) applyContextToState(d *ir.DFA, state ir.StateID, context synta
 	if state == ir.InvalidState || context == 0 || d.Stride() <= 256 {
 		return state
 	}
-	trans, _, _, stride := d.Transitions(), d.TagUpdateIndices(), d.TagUpdates(), d.Stride()
+	trans, tagUpdateIndices, tagUpdates, stride := d.Transitions(), d.TagUpdateIndices(), d.TagUpdates(), d.Stride()
 	virtualBytes := [6]int{ir.VirtualBeginLine, ir.VirtualEndLine, ir.VirtualBeginText, ir.VirtualEndText, ir.VirtualWordBoundary, ir.VirtualNoWordBoundary}
 
 	for iter := 0; iter < 6; iter++ {
@@ -393,6 +452,16 @@ func (re *Regexp) applyContextToState(d *ir.DFA, state ir.StateID, context synta
 					rawNext := trans[idx]
 					nextID := rawNext & 0x7FFFFFFF
 					if rawNext != ir.InvalidState && nextID != state {
+						if rawNext < 0 && regs != nil {
+							update := tagUpdates[tagUpdateIndices[idx]]
+							nextPrio := currentPrio + int(update.BasePriority)
+							for _, tu := range update.PreUpdates {
+								if nextPrio+int(tu.RelativePriority) == targetPrio {
+									applyTags(tu.Tags, pos, regs)
+								}
+							}
+							currentPrio = nextPrio
+						}
 						state = nextID
 						changed = true
 					}

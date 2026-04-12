@@ -67,13 +67,12 @@ type DFA struct {
 	isAlwaysTrue       []bool
 	warpPoints         []int16
 	warpPointState     []StateID
+}
 
-	// Bit-parallel Metadata
-	isBitParallel bool
-	bpCharMasks   [256]uint64
-	bpEpsilon     [64]uint64
-	bpMatchMask   uint64
-	bpInstPrio    [64]int
+type BitParallelDFA struct {
+	CharMasks [256]uint64
+	Epsilon   [64]uint64
+	MatchMask uint64
 }
 
 func (d *DFA) Next(current StateID, b int) StateID {
@@ -126,11 +125,6 @@ func (d *DFA) MatchState() StateID           { return d.matchState }
 func (d *DFA) StartUpdates() []PathTagUpdate { return d.startUpdates }
 func (d *DFA) HasAnchors() bool              { return d.hasAnchors }
 func (d *DFA) TrieRoots() [][]*utf8Node      { return d.trieRoots }
-func (d *DFA) IsBitParallel() bool           { return d.isBitParallel }
-func (d *DFA) BPCharMasks() *[256]uint64     { return &d.bpCharMasks }
-func (d *DFA) BPEpsilon() *[64]uint64        { return &d.bpEpsilon }
-func (d *DFA) BPMatchMask() uint64           { return d.bpMatchMask }
-func (d *DFA) BPInstPrio() *[64]int          { return &d.bpInstPrio }
 
 var ErrStateExplosion = fmt.Errorf("regexp: pattern too large or ambiguous")
 
@@ -154,6 +148,44 @@ func NewDFAWithMemoryLimit(ctx context.Context, prog *syntax.Prog, maxMemory int
 	return d, nil
 }
 
+func NewBitParallelDFA(prog *syntax.Prog) *BitParallelDFA {
+	if len(prog.Inst) > 64 {
+		return nil
+	}
+	bp := &BitParallelDFA{}
+	for i, inst := range prog.Inst {
+		switch inst.Op {
+		case syntax.InstRune, syntax.InstRune1, syntax.InstRuneAny, syntax.InstRuneAnyNotNL:
+			for b := 0; b < 256; b++ {
+				if inst.MatchRune(rune(b)) {
+					bp.CharMasks[b] |= (1 << i)
+				}
+			}
+		case syntax.InstMatch:
+			bp.MatchMask |= (1 << i)
+		}
+		var visited uint64
+		var dfs func(int)
+		dfs = func(curr int) {
+			if (visited & (1 << curr)) != 0 {
+				return
+			}
+			visited |= (1 << curr)
+			bp.Epsilon[i] |= (1 << curr)
+			ii := prog.Inst[curr]
+			switch ii.Op {
+			case syntax.InstAlt, syntax.InstAltMatch:
+				dfs(int(ii.Out))
+				dfs(int(ii.Arg))
+			case syntax.InstCapture, syntax.InstNop, syntax.InstEmptyWidth:
+				dfs(int(ii.Out))
+			}
+		}
+		dfs(i)
+	}
+	return bp
+}
+
 type closureCacheKey struct {
 	paths   string
 	context syntax.EmptyOp
@@ -175,44 +207,6 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 	d.stride = 256
 	if d.hasAnchors {
 		d.stride += numVirtualBytes
-	}
-
-	// Bit-parallel Mode: Shift-Or / Glushkov style bitmask construction
-	if len(prog.Inst) <= 64 && !d.hasAnchors {
-		d.isBitParallel = true
-		// Map instructions to absolute priorities based on Start closure
-		// For BP, we use a simpler model: instruction ID is the priority bit.
-		for i, inst := range prog.Inst {
-			switch inst.Op {
-			case syntax.InstRune, syntax.InstRune1, syntax.InstRuneAny, syntax.InstRuneAnyNotNL:
-				for b := 0; b < 256; b++ {
-					if inst.MatchRune(rune(b)) {
-						d.bpCharMasks[b] |= (1 << i)
-					}
-				}
-			case syntax.InstMatch:
-				d.bpMatchMask |= (1 << i)
-			}
-			// Pre-compute epsilon closures as bitmasks
-			var visited uint64
-			var dfs func(int)
-			dfs = func(curr int) {
-				if (visited & (1 << curr)) != 0 {
-					return
-				}
-				visited |= (1 << curr)
-				d.bpEpsilon[i] |= (1 << curr)
-				ii := prog.Inst[curr]
-				switch ii.Op {
-				case syntax.InstAlt, syntax.InstAltMatch:
-					dfs(int(ii.Out))
-					dfs(int(ii.Arg))
-				case syntax.InstCapture, syntax.InstNop, syntax.InstEmptyWidth:
-					dfs(int(ii.Out))
-				}
-			}
-			dfs(i)
-		}
 	}
 
 	d.trieRoots = make([][]*utf8Node, len(prog.Inst))
