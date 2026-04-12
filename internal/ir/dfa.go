@@ -35,15 +35,15 @@ type PathTagUpdate struct {
 
 type TransitionUpdate struct {
 	BasePriority int32
-	PreUpdates   []PathTagUpdate // Tags before consuming byte
-	PostUpdates  []PathTagUpdate // Tags after consuming byte
+	PreUpdates   []PathTagUpdate // Tags recorded at position i
+	PostUpdates  []PathTagUpdate // Tags recorded at position i+1
 }
 
 type DFA struct {
 	transitions      []StateID
 	tagUpdateIndices []uint32
 	tagUpdates       []TransitionUpdate
-	startTags        uint64
+	startUpdates     []PathTagUpdate // Initial tags reachable from Start
 	stride           int
 	numStates        int
 	searchState      StateID
@@ -80,7 +80,7 @@ func (d *DFA) MatchPriority(s StateID) int { if s < 0 || int(s) >= d.numStates {
 func (d *DFA) MatchTags(s StateID) uint64 { if s < 0 || int(s) >= d.numStates { return 0 }; return d.stateMatchTags[s] }
 func (d *DFA) SearchState() StateID { return d.searchState }
 func (d *DFA) MatchState() StateID { return d.matchState }
-func (d *DFA) StartTags() uint64 { return d.startTags }
+func (d *DFA) StartUpdates() []PathTagUpdate { return d.startUpdates }
 func (d *DFA) HasAnchors() bool { return d.hasAnchors }
 func (d *DFA) TrieRoots() [][]*utf8Node { return d.trieRoots }
 
@@ -170,7 +170,7 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 	}
 	defaultStartRes := getCachedClosure([]nfaPath{{nfaState: nfaState{ID: uint32(prog.Start)}}}, 0)
 	d.matchState = addDfaState(defaultStartRes.nextClosure, false)
-	d.startTags = 0; for _, u := range defaultStartRes.updates { if u.RelativePriority == 0 { d.startTags |= u.Tags } }
+	d.startUpdates = defaultStartRes.updates
 	d.searchState = addDfaState(defaultStartRes.nextClosure, true)
 	for i := 0; i < len(dfaToNfa); i++ {
 		if i%100 == 0 { select { case <-ctx.Done(): return ctx.Err(); default: } }

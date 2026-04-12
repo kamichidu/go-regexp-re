@@ -105,12 +105,13 @@ func rescanLoop[T loopTrait](re *Regexp, b []byte, start, end, targetPriority in
 		for i := 0; i < 64; i++ { if (t & (1 << i)) != 0 && i < len(regs) { regs[i] = pos } }
 	}
 	
-	recordTags(dfa.StartTags(), start)
+	innerTarget := targetPriority % ir.SearchRestartPenalty
+	for _, u := range dfa.StartUpdates() {
+		if int(u.RelativePriority) == innerTarget { recordTags(u.Tags, start) }
+	}
 	
 	currentPrio := 0; state := matchState
 	hasAnchors := trait.HasAnchors()
-	
-	innerTarget := targetPriority % ir.SearchRestartPenalty
 
 	for i := start; i <= end; i++ {
 		if hasAnchors {
@@ -122,18 +123,14 @@ func rescanLoop[T loopTrait](re *Regexp, b []byte, start, end, targetPriority in
 		if rawNext != ir.InvalidState {
 			if rawNext < 0 {
 				update := tagUpdates[tagUpdateIndices[idx]]
-				// Find tags consistent with our winning priority path
 				for _, tu := range update.PreUpdates {
-					if currentPrio + int(update.BasePriority) + int(tu.RelativePriority) <= innerTarget {
-						recordTags(tu.Tags, i)
-					}
+					if currentPrio + int(tu.RelativePriority) == innerTarget { recordTags(tu.Tags, i) }
 				}
+				nextPrio := currentPrio + int(update.BasePriority)
 				for _, tu := range update.PostUpdates {
-					if currentPrio + int(update.BasePriority) + int(tu.RelativePriority) <= innerTarget {
-						recordTags(tu.Tags, i+1)
-					}
+					if nextPrio + int(tu.RelativePriority) == innerTarget { recordTags(tu.Tags, i+1) }
 				}
-				currentPrio += int(update.BasePriority)
+				currentPrio = nextPrio
 			}
 			state = rawNext & 0x7FFFFFFF
 		} else { break }
@@ -162,9 +159,7 @@ func (re *Regexp) applyContextToState(d *ir.DFA, state ir.StateID, context synta
 						if rawNext < 0 && regs != nil {
 							update := tagUpdates[tagUpdateIndices[idx]]
 							for _, tu := range update.PreUpdates {
-								if currentPrio + int(update.BasePriority) + int(tu.RelativePriority) <= targetPrio {
-									recordTags(tu.Tags, pos)
-								}
+								if currentPrio + int(tu.RelativePriority) == targetPrio { recordTags(tu.Tags, pos) }
 							}
 						}
 						state = nextID; changed = true
