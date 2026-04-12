@@ -86,10 +86,12 @@ func (re *Regexp) extractSubmatches(b []byte, start, end, targetPriority int, ma
 	dfa := re.dfa
 	
 	basePriority := (targetPriority / ir.SearchRestartPenalty) * ir.SearchRestartPenalty
+	// Start tags from the very beginning of this match attempt
 	for i := 0; i < 64; i++ { if (dfa.StartTags() & (1 << i)) != 0 && i < len(regs) { regs[i] = start } }
 	
 	for _, record := range stack.All() {
-		if record.Priority == targetPriority || record.Priority == basePriority {
+		// Only consider tags up to the best match end position and belonging to the winning priority
+		if record.Pos <= end && (record.Priority == targetPriority || record.Priority == basePriority) {
 			for i := 0; i < 64; i++ {
 				if (record.Tags & (1 << i)) != 0 && i < len(regs) {
 					regs[i] = record.Pos
@@ -98,6 +100,7 @@ func (re *Regexp) extractSubmatches(b []byte, start, end, targetPriority int, ma
 		}
 	}
 	
+	// Final state match tags (e.g. for patterns ending with empty match groups)
 	for i := 0; i < 64; i++ {
 		if (matchTags & (1 << i)) != 0 && i < len(regs) {
 			if regs[i] == -1 || regs[i] < start || regs[i] > end {
@@ -112,7 +115,6 @@ func (re *Regexp) applyContextToState(d *ir.DFA, state ir.StateID, context synta
 	if state == ir.InvalidState || context == 0 || d.Stride() <= 256 { return state }
 	trans, tagUpdateIndices, tagUpdates, stride := d.Transitions(), d.TagUpdateIndices(), d.TagUpdates(), d.Stride()
 	virtualBytes := [6]int{ir.VirtualBeginLine, ir.VirtualEndLine, ir.VirtualBeginText, ir.VirtualEndText, ir.VirtualWordBoundary, ir.VirtualNoWordBoundary}
-	// Safety limit: a state should not need more than 6 virtual transitions to reach a fixed point.
 	for iter := 0; iter < 6; iter++ {
 		changed := false
 		for bit := 0; bit < 6; bit++ {
@@ -165,6 +167,10 @@ func execLoop[T loopTrait](re *Regexp, b []byte, stack *ir.CaptureStack) (int, i
 				if p <= bestPriority {
 					bestPriority, bestEnd, bestMatchTags = p, i, dfa.MatchTags(state)
 					bestStart = p / ir.SearchRestartPenalty
+					// Mandate 2.10: Early exit if we found the absolute best match
+					if dfa.IsBestMatch(state) {
+						return bestStart, bestEnd, bestPriority, bestMatchTags
+					}
 				}
 			}
 		} else if re.anchorStart { break }

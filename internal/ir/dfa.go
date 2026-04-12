@@ -74,6 +74,7 @@ func (d *DFA) TagUpdateIndices() []uint32 { return d.tagUpdateIndices }
 func (d *DFA) TagUpdates() []TransitionUpdate { return d.tagUpdates }
 func (d *DFA) Stride() int { return d.stride }
 func (d *DFA) IsAccepting(s StateID) bool { if s < 0 || int(s) >= d.numStates { return false }; return d.accepting[s] }
+func (d *DFA) IsBestMatch(s StateID) bool { if s < 0 || int(s) >= d.numStates { return false }; return d.stateIsBestMatch[s] }
 func (d *DFA) Accepting() []bool { return d.accepting }
 func (d *DFA) MatchPriority(s StateID) int { if s < 0 || int(s) >= d.numStates { return 1<<30 - 1 }; return d.stateMatchPriority[s] }
 func (d *DFA) MatchTags(s StateID) uint64 { if s < 0 || int(s) >= d.numStates { return 0 }; return d.stateMatchTags[s] }
