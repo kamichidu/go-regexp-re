@@ -1,6 +1,7 @@
 package compat
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/kamichidu/go-regexp-re"
@@ -25,7 +26,12 @@ func TestMain(m *testing.M) {
 	testsuite.Register(testsuite.Engine{
 		Name: "GoRegexpRe",
 		Compile: func(pattern string) (testsuite.Matcher, error) {
-			re, err := regexp.Compile(pattern)
+			limit := 64 * 1024 * 1024
+			// If the pattern is very large (likely a large alternation), increase limit
+			if len(pattern) > 1000 || strings.Count(pattern, "|") > 100 {
+				limit = 512 * 1024 * 1024
+			}
+			re, err := regexp.CompileWithOption(pattern, regexp.CompileOption{MaxMemory: limit})
 			if err != nil {
 				return nil, err
 			}

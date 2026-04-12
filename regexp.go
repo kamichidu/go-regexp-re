@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"math/bits"
 	"unicode"
 	"unsafe"
 
@@ -115,14 +116,29 @@ func CompileContextWithOption(ctx context.Context, expr string, opt CompileOptio
 }
 
 func (re *Regexp) bindMatchLoop() {
-	if re.dfa.HasAnchors() {
+	if re.dfa.IsBitParallel() && !re.hasNonGreedy() {
+		re.match = func(b []byte) (int, int, int) { i, j, k, _ := bitParallelExecLoop(re, b); return i, j, k }
+	} else if re.dfa.HasAnchors() {
 		re.match = func(b []byte) (int, int, int) { i, j, k, _ := execLoop[extendedMatchTrait](re, b); return i, j, k }
 	} else {
 		re.match = func(b []byte) (int, int, int) { i, j, k, _ := execLoop[fastMatchTrait](re, b); return i, j, k }
 	}
 }
 
-func (re *Regexp) Match(b []byte) bool { i, _, _ := re.match(b); return i >= 0 }
+func (re *Regexp) hasNonGreedy() bool {
+	// A non-greedy Alt in syntax.Prog usually has Arg < Out.
+	for _, inst := range re.prog.Inst {
+		if (inst.Op == syntax.InstAlt || inst.Op == syntax.InstAltMatch) && inst.Arg < inst.Out {
+			return true
+		}
+	}
+	return false
+}
+
+func (re *Regexp) Match(b []byte) bool {
+	i, _, _ := re.match(b)
+	return i >= 0
+}
 func (re *Regexp) MatchString(s string) bool {
 	b := unsafe.Slice(unsafe.StringData(s), len(s))
 	return re.Match(b)
@@ -133,7 +149,9 @@ func (re *Regexp) LiteralPrefix() (string, bool) { return string(re.prefix), re.
 func (re *Regexp) FindSubmatchIndex(b []byte) []int {
 	var start, end, targetPriority int
 	var matchTags uint64
-	if re.dfa.HasAnchors() {
+	if re.dfa.IsBitParallel() && !re.hasNonGreedy() {
+		start, end, targetPriority, matchTags = bitParallelExecLoop(re, b)
+	} else if re.dfa.HasAnchors() {
 		start, end, targetPriority, matchTags = execLoop[extendedCaptureTrait](re, b)
 	} else {
 		start, end, targetPriority, matchTags = execLoop[fastCaptureTrait](re, b)
@@ -250,7 +268,7 @@ func (re *Regexp) extractSubmatches(b []byte, start, end, targetPriority int, ma
 						}
 					} else {
 						for j := 0; j < len(inst.Rune); j += 2 {
-							if r >= inst.Rune[j] && r <= inst.Rune[j+1] {
+							if rune(b[i]) >= inst.Rune[j] && rune(b[i]) <= inst.Rune[j+1] {
 								match = true
 								break
 							}
@@ -282,6 +300,81 @@ func (re *Regexp) extractSubmatches(b []byte, start, end, targetPriority int, ma
 		}
 	}
 	return regs
+}
+
+func bitParallelExecLoop(re *Regexp, b []byte) (int, int, int, uint64) {
+	dfa := re.dfa
+	masks := dfa.BPCharMasks()
+	matchMask := dfa.BPMatchMask()
+	epsilons := dfa.BPEpsilon()
+	numBytes := len(b)
+
+	bestStart, bestEnd, bestPriority := -1, -1, 1<<30-1
+
+	var bpStarts [64]int
+	for i := range bpStarts {
+		bpStarts[i] = -1
+	}
+
+	state := uint64(0)
+	for i := 0; i <= numBytes; i++ {
+		// New thread starting at i
+		if !re.anchorStart || i == 0 {
+			startBits := epsilons[re.prog.Start]
+			newBits := startBits & ^state
+			state |= newBits
+			for newBits != 0 {
+				bit := bits.TrailingZeros64(newBits)
+				bpStarts[bit] = i
+				newBits &= ^(uint64(1) << bit)
+			}
+		}
+
+		if (state & matchMask) != 0 {
+			matchingBits := state & matchMask
+			winningBit := bits.TrailingZeros64(matchingBits)
+			currentStart := bpStarts[winningBit]
+
+			// Leftmost-first + Greedy
+			if bestStart == -1 || currentStart < bestStart || (currentStart == bestStart && winningBit < bestPriority) || (currentStart == bestStart && winningBit == bestPriority && i >= bestEnd) {
+				bestPriority, bestEnd, bestStart = winningBit, i, currentStart
+			}
+		}
+		if i == numBytes {
+			break
+		}
+
+		var nextState uint64
+		var nextStarts [64]int
+		for j := range nextStarts {
+			nextStarts[j] = -1
+		}
+
+		tempState := state
+		for tempState != 0 {
+			bit := bits.TrailingZeros64(tempState)
+			if (masks[b[i]] & (1 << bit)) != 0 {
+				inst := re.prog.Inst[bit]
+				outBits := epsilons[inst.Out]
+				nextState |= outBits
+
+				for outBits != 0 {
+					outBit := bits.TrailingZeros64(outBits)
+					if nextStarts[outBit] == -1 || bpStarts[bit] < nextStarts[outBit] {
+						nextStarts[outBit] = bpStarts[bit]
+					}
+					outBits &= ^(uint64(1) << outBit)
+				}
+			}
+			tempState &= ^(uint64(1) << bit)
+		}
+		state = nextState
+		bpStarts = nextStarts
+		if state == 0 && re.anchorStart {
+			break
+		}
+	}
+	return bestStart, bestEnd, bestPriority, 0
 }
 
 func (re *Regexp) applyContextToState(d *ir.DFA, state ir.StateID, context syntax.EmptyOp, pos int, currentPrio int, targetPrio int, regs []int) ir.StateID {

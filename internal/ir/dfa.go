@@ -73,7 +73,7 @@ type DFA struct {
 	bpCharMasks   [256]uint64
 	bpEpsilon     [64]uint64
 	bpMatchMask   uint64
-	bpTagMasks    [64]uint64
+	bpInstPrio    [64]int
 }
 
 func (d *DFA) Next(current StateID, b int) StateID {
@@ -130,6 +130,7 @@ func (d *DFA) IsBitParallel() bool           { return d.isBitParallel }
 func (d *DFA) BPCharMasks() *[256]uint64     { return &d.bpCharMasks }
 func (d *DFA) BPEpsilon() *[64]uint64        { return &d.bpEpsilon }
 func (d *DFA) BPMatchMask() uint64           { return d.bpMatchMask }
+func (d *DFA) BPInstPrio() *[64]int          { return &d.bpInstPrio }
 
 var ErrStateExplosion = fmt.Errorf("regexp: pattern too large or ambiguous")
 
@@ -176,9 +177,11 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 		d.stride += numVirtualBytes
 	}
 
-	// Pre-check for Bit-parallel eligibility
+	// Bit-parallel Mode: Shift-Or / Glushkov style bitmask construction
 	if len(prog.Inst) <= 64 && !d.hasAnchors {
 		d.isBitParallel = true
+		// Map instructions to absolute priorities based on Start closure
+		// For BP, we use a simpler model: instruction ID is the priority bit.
 		for i, inst := range prog.Inst {
 			switch inst.Op {
 			case syntax.InstRune, syntax.InstRune1, syntax.InstRuneAny, syntax.InstRuneAnyNotNL:
@@ -190,16 +193,15 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 			case syntax.InstMatch:
 				d.bpMatchMask |= (1 << i)
 			}
-			// Epsilon closure bitmask calculation
+			// Pre-compute epsilon closures as bitmasks
 			var visited uint64
 			var dfs func(int)
-			strong := uint64(1 << i)
 			dfs = func(curr int) {
 				if (visited & (1 << curr)) != 0 {
 					return
 				}
 				visited |= (1 << curr)
-				strong |= (1 << curr)
+				d.bpEpsilon[i] |= (1 << curr)
 				ii := prog.Inst[curr]
 				switch ii.Op {
 				case syntax.InstAlt, syntax.InstAltMatch:
@@ -210,7 +212,6 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 				}
 			}
 			dfs(i)
-			d.bpEpsilon[i] = strong
 		}
 	}
 
