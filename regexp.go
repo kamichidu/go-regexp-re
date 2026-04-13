@@ -181,9 +181,9 @@ func (re *Regexp) bindMatchLoop() {
 	} else if re.bpDfa != nil {
 		re.match = func(b []byte) (int, int, int) { i, j, k, _ := bitParallelExecLoop(re, b); return i, j, k }
 	} else if re.dfa.HasAnchors() {
-		re.match = func(b []byte) (int, int, int) { i, j, k, _ := execLoop[extendedMatchTrait](re, b); return i, j, k }
+		re.match = func(b []byte) (int, int, int) { i, j, k, _ := extendedExecLoop(re, b); return i, j, k }
 	} else {
-		re.match = func(b []byte) (int, int, int) { i, j, k, _ := execLoop[fastMatchTrait](re, b); return i, j, k }
+		re.match = func(b []byte) (int, int, int) { i, j, k, _ := fastExecLoop(re, b); return i, j, k }
 	}
 }
 
@@ -216,9 +216,9 @@ func (re *Regexp) FindSubmatchIndex(b []byte) []int {
 	if re.bpDfa != nil {
 		start, end, targetPriority, matchTags = bitParallelExecLoop(re, b)
 	} else if re.dfa.HasAnchors() {
-		start, end, targetPriority, matchTags = execLoop[extendedCaptureTrait](re, b)
+		start, end, targetPriority, matchTags = extendedExecLoop(re, b)
 	} else {
-		start, end, targetPriority, matchTags = execLoop[fastCaptureTrait](re, b)
+		start, end, targetPriority, matchTags = fastExecLoop(re, b)
 	}
 	if start < 0 {
 		return nil
@@ -607,8 +607,7 @@ type extendedCaptureTrait struct{}
 func (extendedCaptureTrait) HasAnchors() bool { return true }
 func (extendedCaptureTrait) IsCapture() bool  { return true }
 
-func execLoop[T loopTrait](re *Regexp, b []byte) (int, int, int, uint64) {
-	var trait T
+func fastExecLoop(re *Regexp, b []byte) (int, int, int, uint64) {
 	dfa := re.dfa
 	trans, tagUpdateIndices, tagUpdates, accepting := dfa.Transitions(), dfa.TagUpdateIndices(), dfa.TagUpdates(), dfa.Accepting()
 	numStates, numBytes := dfa.NumStates(), len(b)
@@ -618,21 +617,106 @@ func execLoop[T loopTrait](re *Regexp, b []byte) (int, int, int, uint64) {
 	if re.anchorStart {
 		state = dfa.MatchState()
 	}
-	hasAnchors := trait.HasAnchors()
+
+	for i := 0; i <= numBytes; {
+		if state != ir.InvalidState {
+			idx := int(state)
+			if idx >= 0 && idx < len(accepting) && accepting[idx] {
+				p := currentPriority + dfa.MatchPriority(state)
+				if p <= bestPriority {
+					bestPriority, bestEnd, bestMatchTags = p, i, dfa.MatchTags(state)
+					bestStart = p / ir.SearchRestartPenalty
+					if dfa.IsBestMatch(state) {
+						return bestStart, bestEnd, bestPriority, bestMatchTags
+					}
+				}
+			}
+		}
+		if i < numBytes {
+			sidx := int(state)
+			if sidx >= 0 && sidx < numStates {
+				off := (sidx << 8) | int(lb[i])
+				rawNext := trans[off]
+				if rawNext != ir.InvalidState {
+					state = rawNext & ir.StateIDMask
+					if rawNext < 0 {
+						update := tagUpdates[tagUpdateIndices[off]]
+						currentPriority += int(update.BasePriority)
+					}
+					i++
+					continue
+				}
+			}
+		} else if i == numBytes {
+			break
+		}
+
+		// Restart search or return best match
+		if bestStart != -1 {
+			return bestStart, bestEnd, bestPriority, bestMatchTags
+		}
+		if re.anchorStart {
+			break
+		}
+
+		// Move to next starting position
+		currentPriority = (currentPriority/ir.SearchRestartPenalty + 1) * ir.SearchRestartPenalty
+		i = currentPriority / ir.SearchRestartPenalty
+		if i > numBytes {
+			break
+		}
+
+		// Warp Point / Prefix skip optimization
+		state = dfa.SearchState()
+		warpByte := dfa.WarpPoint(state)
+		if warpByte >= 0 {
+			skip := bytes.Index(lb[i:], []byte{byte(warpByte)})
+			if skip < 0 {
+				break
+			}
+			i += skip
+			currentPriority = (i * ir.SearchRestartPenalty)
+			// Move to target state
+			state = dfa.WarpPointState(state)
+			i++
+		} else if len(re.prefix) > 0 {
+			skip := bytes.Index(lb[i:], re.prefix)
+			if skip < 0 {
+				break
+			}
+			i += skip
+			currentPriority = (i * ir.SearchRestartPenalty)
+			if re.prefixState != ir.InvalidState {
+				state = re.prefixState
+				i += len(re.prefix)
+			}
+		}
+	}
+	return bestStart, bestEnd, bestPriority, bestMatchTags
+}
+
+func extendedExecLoop(re *Regexp, b []byte) (int, int, int, uint64) {
+	dfa := re.dfa
+	trans, tagUpdateIndices, tagUpdates, accepting := dfa.Transitions(), dfa.TagUpdateIndices(), dfa.TagUpdates(), dfa.Accepting()
+	numStates, numBytes := dfa.NumStates(), len(b)
+	lb := b[:numBytes]
+	bestStart, bestEnd, bestPriority, bestMatchTags, currentPriority := -1, -1, 1<<30-1, uint64(0), 0
+	state := dfa.SearchState()
+	if re.anchorStart {
+		state = dfa.MatchState()
+	}
 	usedAnchors := dfa.UsedAnchors()
 
 	for i := 0; i <= numBytes; {
-		if hasAnchors {
-			// OPTIMIZATION: Only calculate context and apply if used anchors are present.
-			// Word boundaries require check at every position.
-			// Text/Line anchors only matter at start, end, or near newlines.
-			if (usedAnchors&(syntax.EmptyWordBoundary|syntax.EmptyNoWordBoundary)) != 0 ||
-				(i == 0 && (usedAnchors&(syntax.EmptyBeginText|syntax.EmptyBeginLine)) != 0) ||
-				(i == numBytes && (usedAnchors&(syntax.EmptyEndText|syntax.EmptyEndLine)) != 0) ||
-				((usedAnchors&syntax.EmptyBeginLine) != 0 && i > 0 && lb[i-1] == '\n') ||
-				((usedAnchors&syntax.EmptyEndLine) != 0 && i < numBytes && lb[i] == '\n') {
-				state = re.applyContextToState(dfa, state, ir.CalculateContext(lb, i), i, &currentPriority, 1<<30-1, nil)
-			}
+		// OPTIMIZATION: Only calculate context and apply if used anchors are present.
+		// Word boundaries require check at every position.
+		// Text/Line anchors only matter at start, end, or near newlines.
+		if (usedAnchors&(syntax.EmptyWordBoundary|syntax.EmptyNoWordBoundary)) != 0 ||
+			(i == 0 && (usedAnchors&(syntax.EmptyBeginText|syntax.EmptyBeginLine)) != 0) ||
+			(i == numBytes && (usedAnchors&(syntax.EmptyEndText|syntax.EmptyEndLine)) != 0) ||
+			((usedAnchors&syntax.EmptyBeginLine) != 0 && i > 0 && lb[i-1] == '\n') ||
+			((usedAnchors&syntax.EmptyEndLine) != 0 && i < numBytes && lb[i] == '\n') {
+			state = re.applyContextToState(dfa, state, ir.CalculateContext(lb, i), i, &currentPriority, 1<<30-1, nil)
 		}
 		if state != ir.InvalidState {
 			idx := int(state)

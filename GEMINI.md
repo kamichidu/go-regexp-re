@@ -29,6 +29,7 @@ To maximize throughput, the engine MUST select the most efficient execution loop
 - **Bit-parallel Path (Glushkov BP-DFA)**: The **"Express Pass"** for small, simple patterns. Utilizes ultra-fast `uint64` bitwise operations to eliminate memory loads.
 - **Fast Path (Pure DFA)**: Automatically selected for larger patterns. It utilizes a minimalist table-based execution loop with **manual restarts and SIMD-accelerated prefix skipping**.
 - **Anchor-Aware Guarded SIMD Warp**: Selected for patterns with anchors. Utilizes a separate `anchorTransitions` table and **guarded warp points** to allow SIMD skipping even in the presence of anchors (e.g., `^`, `$`, `\b`).
+- **Explicit Hot-Loop Monomorphization**: To ensure zero-overhead, the engine MUST avoid Go generics (`GCShape` sharing) for the primary execution loops. Instead, it employs manually monomorphized functions (e.g., `fastExecLoop`, `extendedExecLoop`) to ensure the Go compiler can completely eliminate unreachable branches (like `if hasAnchors`) and avoid runtime dictionary lookups.
 
 ### 2.5 Submatch Extraction Architecture (DFA-First Hybrid)
 The engine follows a **DFA-First Hybrid** strategy to guarantee both performance and Go-compatible precision.
@@ -85,6 +86,12 @@ To ensure scalability to 10,000+ patterns, the DFA construction phase MUST adher
 - **Pointer-Free NFA Paths**: All structures representing NFA state sets (e.g., `nfaPath`) MUST be pointer-free. This ensures binary safety for raw disk I/O (no serialization overhead) and prevents GC scanning of large state sets.
 - **Allocation-Free Minimization**: DFA minimization MUST use a hash-based approach instead of string/byte serialization to eliminate OOM risks during the final optimization phase.
 - **Aggressive Cache Eviction**: Internal build caches (e.g., `closureCache`) MUST have explicit size limits and eviction policies to prevent unbounded memory growth during complex pattern compilation.
+
+### 2.15 Zero-Overhead Execution (Manual Monomorphization Mandate)
+To achieve the goal of $O(1)$ performance per byte without hidden overhead, the engine MUST adhere to these execution principles:
+- **Avoid Runtime Generic Dispatch**: Go's current implementation of generics often uses `GCShape` sharing with runtime dictionaries. For the hot execution loop, this introduces unacceptable latency. The engine MUST use specialized, non-generic functions for the "Fast Path" and "Extended Path".
+- **Constant Folding of Strategy**: Branches based on pattern traits (e.g., `hasAnchors`) MUST be resolved at the function dispatch level (via `bindMatchLoop`), ensuring the loop body itself is free of irrelevant checks.
+- **Anchor Usage Masking**: The engine MUST track `UsedAnchors` in the DFA to skip context calculation (`CalculateContext`) at positions where the specific anchors in the pattern cannot possibly match, further reducing CPU cycles.
 
 ## 3. Feature Selection Policy
 
