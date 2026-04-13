@@ -25,7 +25,7 @@ Every implementation must adhere to these pillars to ensure maximum performance:
 
 ### 2.4 Execution Switching Strategy
 To maximize throughput, the engine MUST select the most efficient execution loop based on pattern characteristics:
-- **0-Pass (Literal Bypass)**: Selected for pure constant strings. Bypasses all regex engines using SIMD-accelerated standard library search (e.g., `bytes.Index`).
+- **0-Pass (Literal Bypass)**: Selected for pure constant strings and anchored literals (e.g., `^abc$`, `^abc`, `abc$`). Bypasses all regex engines using SIMD-accelerated standard library search (e.g., `bytes.Index`, `bytes.HasPrefix`). It utilizes a **Capture Template** to provide submatch indices with zero state-machine overhead.
 - **Bit-parallel Path (Glushkov BP-DFA)**: The **"Express Pass"** for small, simple patterns. Utilizes ultra-fast `uint64` bitwise operations to eliminate memory loads.
 - **Fast Path (Pure DFA)**: Automatically selected for larger patterns. It utilizes a minimalist table-based execution loop with **manual restarts and SIMD-accelerated prefix skipping**.
 - **Anchor-Aware Guarded SIMD Warp**: Selected for patterns with anchors. Utilizes a separate `anchorTransitions` table and **guarded warp points** to allow SIMD skipping even in the presence of anchors (e.g., `^`, `$`, `\b`).
@@ -35,6 +35,7 @@ The engine follows a **DFA-First Hybrid** strategy to guarantee both performance
 
 - **Phase 1: Boundary Discovery**: High-speed DFA scan or Bit-parallel scan determines the match boundaries `[start, end]`. For unanchored searches, the execution loop performs manual restarts at each position, utilizing `bytes.Index` to skip ahead whenever a constant prefix is available.
 - **Phase 2: Strategy Dispatch**:
+    - **Literal Template (O(1))**: For 0-Pass matches, submatches are applied via a pre-calculated relative offset template.
     - **Principal (DFA Rescan)**: For non-greedy or literal-heavy patterns, a second DFA pass (rescan) is used to extract submatches deterministically.
     - **Exception (Targeted NFA Rescan)**: For patterns involving greedy operators (e.g., `a*`, `a+`) or when DFA is skipped (Bit-parallel only), an optimized NFA rescans the confirmed `[start, end]` range.
 - **Priority Sync**: During DFA rescan, the engine MUST synchronize the relative priority with the absolute winner identified in Phase 1 using `<=` matching to capture all valid tag candidates.

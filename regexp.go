@@ -13,18 +13,19 @@ import (
 )
 
 type Regexp struct {
-	expr        string
-	numSubexp   int
-	prefix      []byte
-	prefixState ir.StateID
-	complete    bool
-	anchorStart bool
-	anchorEnd   bool
-	prog        *syntax.Prog
-	dfa         *ir.DFA
-	bpDfa       *ir.BitParallelDFA
-	match       func([]byte) (int, int, int)
-	subexpNames []string
+	expr           string
+	numSubexp      int
+	prefix         []byte
+	prefixState    ir.StateID
+	complete       bool
+	anchorStart    bool
+	anchorEnd      bool
+	prog           *syntax.Prog
+	dfa            *ir.DFA
+	bpDfa          *ir.BitParallelDFA
+	literalMatcher ir.LiteralMatcher
+	match          func([]byte) (int, int, int)
+	subexpNames    []string
 }
 
 type CompileOption struct{ MaxMemory int }
@@ -63,6 +64,7 @@ func CompileContextWithOption(ctx context.Context, expr string, opt CompileOptio
 	}
 	re = syntax.Simplify(re)
 	re = syntax.Optimize(re)
+	literalMatcher := ir.AnalyzeLiteralPattern(re, numSubexp+1)
 	prefixStr, complete := syntax.Prefix(re)
 	prog, err := syntax.Compile(re)
 	if err != nil {
@@ -74,9 +76,18 @@ func CompileContextWithOption(ctx context.Context, expr string, opt CompileOptio
 	var prefixState ir.StateID = ir.InvalidState
 
 	// ARCHITECTURAL SHORTCUT:
-	// If Bit-parallel is possible, skip heavy DFA table construction.
-	if false && len(prog.Inst) <= 64 && !hasNonGreedy(prog) {
-		bpDfa = ir.NewBitParallelDFA(prog)
+	// If literal matcher is possible, skip heavy DFA table construction.
+	if literalMatcher != nil {
+		res := &Regexp{
+			expr:           expr,
+			numSubexp:      numSubexp,
+			subexpNames:    subexpNames,
+			prefix:         []byte(prefixStr),
+			complete:       complete,
+			literalMatcher: literalMatcher,
+		}
+		res.bindMatchLoop()
+		return res, nil
 	}
 	if bpDfa == nil {
 		dfa, err = ir.NewDFAWithMemoryLimit(ctx, prog, opt.MaxMemory)
@@ -149,7 +160,15 @@ func hasNonGreedy(prog *syntax.Prog) bool {
 }
 
 func (re *Regexp) bindMatchLoop() {
-	if re.bpDfa != nil {
+	if re.literalMatcher != nil {
+		re.match = func(b []byte) (int, int, int) {
+			indices := re.literalMatcher.FindSubmatchIndex(b)
+			if indices == nil {
+				return -1, -1, -1
+			}
+			return indices[0], indices[1], 0
+		}
+	} else if re.bpDfa != nil {
 		re.match = func(b []byte) (int, int, int) { i, j, k, _ := bitParallelExecLoop(re, b); return i, j, k }
 	} else if re.dfa.HasAnchors() {
 		re.match = func(b []byte) (int, int, int) { i, j, k, _ := execLoop[extendedMatchTrait](re, b); return i, j, k }
@@ -179,6 +198,9 @@ func (re *Regexp) NumSubexp() int                { return re.numSubexp }
 func (re *Regexp) LiteralPrefix() (string, bool) { return string(re.prefix), re.complete }
 
 func (re *Regexp) FindSubmatchIndex(b []byte) []int {
+	if re.literalMatcher != nil {
+		return re.literalMatcher.FindSubmatchIndex(b)
+	}
 	var start, end, targetPriority int
 	var matchTags uint64
 	if re.bpDfa != nil {

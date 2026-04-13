@@ -178,11 +178,11 @@ const (
 )
 
 const (
-	TaggedStateFlag   StateID = -2147483648 // Bit 31
+	TaggedStateFlag StateID = -2147483648 // Bit 31
 
-	AnchorVerifyFlag StateID = 0x40000000  // Bit 30
-	AnchorMask       StateID = 0x3F000000  // Bits 24-29 (6 bits for syntax.EmptyOp)
-	StateIDMask      StateID = 0x00FFFFFF  // Bits 0-23 (up to 16M states)
+	AnchorVerifyFlag StateID = 0x40000000 // Bit 30
+	AnchorMask       StateID = 0x3F000000 // Bits 24-29 (6 bits for syntax.EmptyOp)
+	StateIDMask      StateID = 0x00FFFFFF // Bits 0-23 (up to 16M states)
 )
 
 type DFA struct {
