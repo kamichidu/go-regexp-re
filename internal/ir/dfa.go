@@ -18,16 +18,6 @@ const (
 	InvalidState StateID = -1
 	StartStateID StateID = 0
 )
-const (
-	VirtualBeginLine = 256 + iota
-	VirtualEndLine
-	VirtualBeginText
-	VirtualEndText
-	VirtualWordBoundary
-	VirtualNoWordBoundary
-	numVirtualBytes = 6
-)
-const TaggedStateFlag StateID = -2147483648
 
 // nfaState represents a state in the NFA.
 type nfaState struct {
@@ -177,31 +167,53 @@ func (s *fileNfaSetStorage) Close() error {
 	return os.Remove(name)
 }
 
+const (
+	AnchorBitBeginLine = iota
+	AnchorBitEndLine
+	AnchorBitBeginText
+	AnchorBitEndText
+	AnchorBitWordBoundary
+	AnchorBitNoWordBoundary
+	numAnchors = 6
+)
+
+const (
+	TaggedStateFlag   StateID = -2147483648 // Bit 31
+
+	AnchorVerifyFlag StateID = 0x40000000  // Bit 30
+	AnchorMask       StateID = 0x3F000000  // Bits 24-29 (6 bits for syntax.EmptyOp)
+	StateIDMask      StateID = 0x00FFFFFF  // Bits 0-23 (up to 16M states)
+)
+
 type DFA struct {
-	transitions        []StateID
-	tagUpdateIndices   []uint32
-	tagUpdates         []TransitionUpdate
-	startUpdates       []PathTagUpdate
-	stride             int
-	numStates          int
-	searchState        StateID
-	matchState         StateID
-	hasAnchors         bool
-	numSubexp          int
-	stateIsSearch      []bool
-	trieRoots          [][]*utf8Node
-	accepting          []bool
-	stateMatchPriority []int
-	stateMatchTags     []uint64
-	stateIsBestMatch   []bool
-	isAlwaysTrue       []bool
-	warpPoints         []int16
-	warpPointState     []StateID
-	nodes              []*utf8Node
+	transitions            []StateID
+	anchorTransitions      []StateID // numStates * 6
+	tagUpdateIndices       []uint32
+	anchorTagUpdateIndices []uint32 // numStates * 6
+	tagUpdates             []TransitionUpdate
+	startUpdates           []PathTagUpdate
+	stride                 int
+	numStates              int
+	searchState            StateID
+	matchState             StateID
+	hasAnchors             bool
+	numSubexp              int
+	stateIsSearch          []bool
+	trieRoots              [][]*utf8Node
+	accepting              []bool
+	stateMatchPriority     []int
+	stateMatchTags         []uint64
+	stateIsBestMatch       []bool
+	isAlwaysTrue           []bool
+	warpPoints             []int16
+	warpPointState         []StateID
+	warpPointGuards        []syntax.EmptyOp
+	nodes                  []*utf8Node
 }
 
 type BitParallelDFA struct {
-	CharMasks       [262]uint64
+	CharMasks       [256]uint64
+	AnchorMasks     [6]uint64
 	SuccessorTable  [8][256]uint64
 	MatchMask       uint64
 	StartMask       uint64
@@ -209,10 +221,10 @@ type BitParallelDFA struct {
 }
 
 func (d *DFA) Next(current StateID, b int) StateID {
-	if current < 0 || int(current) >= d.numStates || b < 0 || b >= d.stride {
+	if current < 0 || int(current) >= d.numStates || b < 0 || b >= 256 {
 		return InvalidState
 	}
-	offset := int(current)*d.stride + b
+	offset := int(current)*256 + b
 	if offset >= len(d.transitions) {
 		return InvalidState
 	}
@@ -220,14 +232,22 @@ func (d *DFA) Next(current StateID, b int) StateID {
 	if raw == InvalidState {
 		return InvalidState
 	}
-	return raw & 0x7FFFFFFF
+	return raw & StateIDMask
 }
-func (d *DFA) NumStates() int                 { return d.numStates }
-func (d *DFA) TotalStates() int               { return d.numStates }
-func (d *DFA) Transitions() []StateID         { return d.transitions }
-func (d *DFA) TagUpdateIndices() []uint32     { return d.tagUpdateIndices }
-func (d *DFA) TagUpdates() []TransitionUpdate { return d.tagUpdates }
-func (d *DFA) Stride() int                    { return d.stride }
+func (d *DFA) AnchorNext(current StateID, bit int) StateID {
+	if current < 0 || int(current) >= d.numStates || bit < 0 || bit >= 6 {
+		return InvalidState
+	}
+	return d.anchorTransitions[int(current)*6+bit]
+}
+func (d *DFA) NumStates() int                   { return d.numStates }
+func (d *DFA) TotalStates() int                 { return d.numStates }
+func (d *DFA) Transitions() []StateID           { return d.transitions }
+func (d *DFA) AnchorTransitions() []StateID     { return d.anchorTransitions }
+func (d *DFA) TagUpdateIndices() []uint32       { return d.tagUpdateIndices }
+func (d *DFA) AnchorTagUpdateIndices() []uint32 { return d.anchorTagUpdateIndices }
+func (d *DFA) TagUpdates() []TransitionUpdate   { return d.tagUpdates }
+func (d *DFA) Stride() int                      { return 256 }
 func (d *DFA) IsAccepting(s StateID) bool {
 	if s < 0 || int(s) >= d.numStates {
 		return false
@@ -258,6 +278,25 @@ func (d *DFA) MatchState() StateID           { return d.matchState }
 func (d *DFA) StartUpdates() []PathTagUpdate { return d.startUpdates }
 func (d *DFA) HasAnchors() bool              { return d.hasAnchors }
 func (d *DFA) TrieRoots() [][]*utf8Node      { return d.trieRoots }
+
+func (d *DFA) WarpPoint(s StateID) int {
+	if s < 0 || int(s) >= d.numStates {
+		return -1
+	}
+	return int(d.warpPoints[s])
+}
+func (d *DFA) WarpPointState(s StateID) StateID {
+	if s < 0 || int(s) >= d.numStates {
+		return InvalidState
+	}
+	return d.warpPointState[s]
+}
+func (d *DFA) WarpPointGuard(s StateID) syntax.EmptyOp {
+	if s < 0 || int(s) >= d.numStates {
+		return 0
+	}
+	return d.warpPointGuards[s]
+}
 
 var ErrStateExplosion = fmt.Errorf("regexp: pattern too large or ambiguous")
 
@@ -338,7 +377,7 @@ func NewBitParallelDFA(prog *syntax.Prog) *BitParallelDFA {
 		case syntax.InstEmptyWidth:
 			for bit := 0; bit < 6; bit++ {
 				if (inst.Arg & (1 << uint(bit))) != 0 {
-					bp.CharMasks[256+bit] |= (1 << uint(i))
+					bp.AnchorMasks[bit] |= (1 << uint(i))
 				}
 			}
 			if matchID >= 0 && (epsilonClosure(int(inst.Out))&(1<<uint(matchID))) != 0 {
@@ -473,9 +512,6 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 		}
 	}
 	d.stride = 256
-	if d.hasAnchors {
-		d.stride += numVirtualBytes
-	}
 
 	d.trieRoots = make([][]*utf8Node, len(prog.Inst))
 	var nodes []*utf8Node
@@ -591,7 +627,7 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 		if errBuild != nil {
 			return InvalidState
 		}
-		if (d.numStates+1)*d.stride*8 > maxMemory {
+		if (d.numStates+1)*256*8 > maxMemory {
 			errBuild = ErrStateExplosion
 			return InvalidState
 		}
@@ -652,9 +688,13 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 		d.stateMatchPriority = append(d.stateMatchPriority, matchP)
 		d.stateMatchTags = append(d.stateMatchTags, matchTags)
 		d.stateIsBestMatch = append(d.stateIsBestMatch, isAcc && (matchP == minPathP))
-		for i := 0; i < d.stride; i++ {
+		for i := 0; i < 256; i++ {
 			d.transitions = append(d.transitions, InvalidState)
 			d.tagUpdateIndices = append(d.tagUpdateIndices, 0)
+		}
+		for i := 0; i < 6; i++ {
+			d.anchorTransitions = append(d.anchorTransitions, InvalidState)
+			d.anchorTagUpdateIndices = append(d.anchorTagUpdateIndices, 0)
 		}
 		d.numStates++
 		return id
@@ -766,7 +806,7 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 				if errBuild != nil {
 					return errBuild
 				}
-				idx := int(currentDfaID)*d.stride + b
+				idx := int(currentDfaID)*256 + b
 
 				var postUpdates []PathTagUpdate
 				if len(nextRes.updates) > 0 {
@@ -785,7 +825,7 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 			}
 		}
 		if d.hasAnchors {
-			for bit := 0; bit < numVirtualBytes; bit++ {
+			for bit := 0; bit < 6; bit++ {
 				op := syntax.EmptyOp(1 << bit)
 				var anchorPaths []nfaPath
 				if currentIsSearch {
@@ -809,7 +849,7 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 				if errBuild != nil {
 					return errBuild
 				}
-				idx := int(currentDfaID)*d.stride + 256 + bit
+				idx := int(currentDfaID)*6 + bit
 
 				var postUpdates []PathTagUpdate
 				if len(nextRes.updates) > 0 {
@@ -820,10 +860,10 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 				}
 
 				if minP != 0 || len(postUpdates) > 0 {
-					d.transitions[idx] = nextDfaID | TaggedStateFlag
-					d.tagUpdateIndices[idx] = addUpdate(TransitionUpdate{BasePriority: int32(minP), PreUpdates: postUpdates})
+					d.anchorTransitions[idx] = nextDfaID | TaggedStateFlag
+					d.anchorTagUpdateIndices[idx] = addUpdate(TransitionUpdate{BasePriority: int32(minP), PreUpdates: postUpdates})
 				} else {
-					d.transitions[idx] = nextDfaID
+					d.anchorTransitions[idx] = nextDfaID
 				}
 			}
 		}
@@ -888,15 +928,35 @@ func (d *DFA) minimize() {
 		for i := 0; i < d.numStates; i++ {
 			h1 := uint64(14695981039346656037)
 			h2 := uint64(1000000000000000003)
-			for b := 0; b < d.stride; b++ {
-				idx := i*d.stride + b
+			for b := 0; b < 256; b++ {
+				idx := i*256 + b
 				target := d.transitions[idx]
 				var tg int32 = -1
 				var updateIdx uint32 = 0
 				if target != InvalidState {
-					tg = stateToGroup[target&0x7FFFFFFF]
+					tg = stateToGroup[target&StateIDMask]
 					if target < 0 {
 						updateIdx = d.tagUpdateIndices[idx] + 1
+					}
+				}
+				h1 ^= uint64(uint32(tg))
+				h1 *= 1099511628211
+				h1 ^= uint64(updateIdx)
+				h1 *= 1099511628211
+				h2 ^= uint64(uint32(tg))
+				h2 *= 1000003
+				h2 ^= uint64(updateIdx)
+				h2 *= 1000003
+			}
+			for bit := 0; bit < 6; bit++ {
+				idx := i*6 + bit
+				target := d.anchorTransitions[idx]
+				var tg int32 = -1
+				var updateIdx uint32 = 0
+				if target != InvalidState {
+					tg = stateToGroup[target&StateIDMask]
+					if target < 0 {
+						updateIdx = d.anchorTagUpdateIndices[idx] + 1
 					}
 				}
 				h1 ^= uint64(uint32(tg))
@@ -927,8 +987,10 @@ func (d *DFA) minimize() {
 	for i, g := range stateToGroup {
 		groupToFirstState[g] = i
 	}
-	newTransitions := make([]StateID, int(numGroups)*d.stride)
-	newUpdateIndices := make([]uint32, int(numGroups)*d.stride)
+	newTransitions := make([]StateID, int(numGroups)*256)
+	newAnchorTransitions := make([]StateID, int(numGroups)*6)
+	newUpdateIndices := make([]uint32, int(numGroups)*256)
+	newAnchorUpdateIndices := make([]uint32, int(numGroups)*6)
 	newAccepting, newPrio, newMatchTags, newBest, newIsSearch := make([]bool, numGroups), make([]int, numGroups), make([]uint64, numGroups), make([]bool, numGroups), make([]bool, numGroups)
 	for g := int32(0); g < numGroups; g++ {
 		oldS := groupToFirstState[g]
@@ -937,27 +999,42 @@ func (d *DFA) minimize() {
 		newMatchTags[g] = d.stateMatchTags[oldS]
 		newBest[g] = d.stateIsBestMatch[oldS]
 		newIsSearch[g] = d.stateIsSearch[oldS]
-		for b := 0; b < d.stride; b++ {
-			oldIdx := oldS*d.stride + b
+		for b := 0; b < 256; b++ {
+			oldIdx := oldS*256 + b
 			target := d.transitions[oldIdx]
 			if target != InvalidState {
-				newID := StateID(stateToGroup[target&0x7FFFFFFF])
+				newID := StateID(stateToGroup[target&StateIDMask])
 				if target < 0 {
-					newTransitions[int(g)*d.stride+b] = newID | TaggedStateFlag
-					newUpdateIndices[int(g)*d.stride+b] = d.tagUpdateIndices[oldIdx]
+					newTransitions[int(g)*256+b] = newID | TaggedStateFlag
+					newUpdateIndices[int(g)*256+b] = d.tagUpdateIndices[oldIdx]
 				} else {
-					newTransitions[int(g)*d.stride+b] = newID
+					newTransitions[int(g)*256+b] = newID
 				}
 			} else {
-				newTransitions[int(g)*d.stride+b] = InvalidState
+				newTransitions[int(g)*256+b] = InvalidState
+			}
+		}
+		for bit := 0; bit < 6; bit++ {
+			oldIdx := oldS*6 + bit
+			target := d.anchorTransitions[oldIdx]
+			if target != InvalidState {
+				newID := StateID(stateToGroup[target&StateIDMask])
+				if target < 0 {
+					newAnchorTransitions[int(g)*6+bit] = newID | TaggedStateFlag
+					newAnchorUpdateIndices[int(g)*6+bit] = d.anchorTagUpdateIndices[oldIdx]
+				} else {
+					newAnchorTransitions[int(g)*6+bit] = newID
+				}
+			} else {
+				newAnchorTransitions[int(g)*6+bit] = InvalidState
 			}
 		}
 	}
-	d.transitions, d.tagUpdateIndices, d.accepting, d.stateMatchPriority, d.stateMatchTags, d.stateIsBestMatch, d.stateIsSearch, d.numStates, d.searchState, d.matchState = newTransitions, newUpdateIndices, newAccepting, newPrio, newMatchTags, newBest, newIsSearch, int(numGroups), StateID(stateToGroup[d.searchState]), StateID(stateToGroup[d.matchState])
+	d.transitions, d.anchorTransitions, d.tagUpdateIndices, d.anchorTagUpdateIndices, d.accepting, d.stateMatchPriority, d.stateMatchTags, d.stateIsBestMatch, d.stateIsSearch, d.numStates, d.searchState, d.matchState = newTransitions, newAnchorTransitions, newUpdateIndices, newAnchorUpdateIndices, newAccepting, newPrio, newMatchTags, newBest, newIsSearch, int(numGroups), StateID(stateToGroup[d.searchState]), StateID(stateToGroup[d.matchState])
 }
 
 func (d *DFA) computePhase2Metadata() {
-	d.isAlwaysTrue, d.warpPoints, d.warpPointState = make([]bool, d.numStates), make([]int16, d.numStates), make([]StateID, d.numStates)
+	d.isAlwaysTrue, d.warpPoints, d.warpPointState, d.warpPointGuards = make([]bool, d.numStates), make([]int16, d.numStates), make([]StateID, d.numStates), make([]syntax.EmptyOp, d.numStates)
 	for i := range d.warpPoints {
 		d.warpPoints[i] = -1
 		d.warpPointState[i] = InvalidState
@@ -971,13 +1048,14 @@ func (d *DFA) findWarpPoints() {
 		if d.accepting[i] {
 			continue
 		}
+		// 1. Check direct character transitions
 		progressByte, targetState, possible := -1, InvalidState, true
 		for b := 0; b < 256; b++ {
-			nextRaw := d.transitions[i*d.stride+b]
+			nextRaw := d.transitions[i*256+b]
 			if nextRaw == InvalidState {
 				continue
 			}
-			next := nextRaw & 0x7FFFFFFF
+			next := nextRaw & StateIDMask
 			if next == currState {
 				continue
 			}
@@ -992,6 +1070,44 @@ func (d *DFA) findWarpPoints() {
 		if possible && progressByte != -1 {
 			d.warpPoints[i] = int16(progressByte)
 			d.warpPointState[i] = targetState
+			continue
+		}
+
+		// 2. Check guarded transitions (e.g., \bH)
+		// Try to find a context where a unique character transition exists.
+		for bit := 0; bit < 6; bit++ {
+			s_ctx := d.anchorTransitions[i*6+bit]
+			if s_ctx == InvalidState {
+				continue
+			}
+			s_ctx &= StateIDMask
+			if s_ctx == currState {
+				continue
+			}
+			pByte, tState, ok := -1, InvalidState, true
+			for b := 0; b < 256; b++ {
+				nextRaw := d.transitions[int(s_ctx)*256+b]
+				if nextRaw == InvalidState {
+					continue
+				}
+				next := nextRaw & StateIDMask
+				if next == s_ctx || next == currState {
+					continue
+				}
+				if pByte == -1 {
+					pByte = b
+					tState = next
+				} else {
+					ok = false
+					break
+				}
+			}
+			if ok && pByte != -1 {
+				d.warpPoints[i] = int16(pByte)
+				d.warpPointState[i] = tState
+				d.warpPointGuards[i] = syntax.EmptyOp(1 << bit)
+				break
+			}
 		}
 	}
 }
@@ -1009,11 +1125,11 @@ func (d *DFA) findSCCs() {
 		stack = append(stack, v)
 		onStack[v] = true
 		for b := 0; b < 256; b++ {
-			nextRaw := d.transitions[v*d.stride+b]
+			nextRaw := d.transitions[v*256+b]
 			if nextRaw == -1 {
 				continue
 			}
-			w := int(nextRaw & 0x7FFFFFFF)
+			w := int(nextRaw & StateIDMask)
 			if index[w] == -1 {
 				strongconnect(w)
 				if lowlink[w] < lowlink[v] {
@@ -1047,12 +1163,12 @@ func (d *DFA) findSCCs() {
 				allTrans := true
 				for _, s := range component {
 					for b := 0; b < 256; b++ {
-						nextRaw := d.transitions[s*d.stride+b]
+						nextRaw := d.transitions[s*256+b]
 						if nextRaw == -1 {
 							allTrans = false
 							break
 						}
-						next := int(nextRaw & 0x7FFFFFFF)
+						next := int(nextRaw & StateIDMask)
 						in := false
 						for _, cs := range component {
 							if cs == next {
@@ -1083,7 +1199,6 @@ func (d *DFA) findSCCs() {
 		}
 	}
 }
-
 func matchesByte(node *utf8Node, b byte) bool {
 	for _, r := range node.ranges {
 		if b >= r.lo && b <= r.hi {

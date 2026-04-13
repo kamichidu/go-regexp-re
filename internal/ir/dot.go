@@ -49,7 +49,7 @@ func ToDOT(d *DFA) string {
 		groupedEdges := make(map[edgeKey]*edgeInfo)
 		var keys []edgeKey
 
-		for b := 0; b < d.stride; b++ {
+		for b := 0; b < 256; b++ {
 			next := d.Next(s, b)
 			if next != InvalidState {
 				key := edgeKey{next}
@@ -58,6 +58,19 @@ func ToDOT(d *DFA) string {
 					keys = append(keys, key)
 				}
 				groupedEdges[key].bytes = append(groupedEdges[key].bytes, b)
+			}
+		}
+
+		for bit := 0; bit < numAnchors; bit++ {
+			next := d.AnchorNext(s, bit)
+			if next != InvalidState {
+				next &= StateIDMask
+				key := edgeKey{next}
+				if _, ok := groupedEdges[key]; !ok {
+					groupedEdges[key] = &edgeInfo{}
+					keys = append(keys, key)
+				}
+				groupedEdges[key].bytes = append(groupedEdges[key].bytes, 256+bit)
 			}
 		}
 
@@ -101,7 +114,7 @@ func formatBytes(bytes []int) string {
 		if start == -1 {
 			start = b
 			end = b
-		} else if b == end+1 {
+		} else if b == end+1 && b < 256 {
 			end = b
 		} else {
 			flush()
@@ -116,18 +129,18 @@ func formatBytes(bytes []int) string {
 
 func formatByte(b int) string {
 	if b >= 256 {
-		switch b {
-		case VirtualBeginLine:
+		switch b - 256 {
+		case AnchorBitBeginLine:
 			return "^L"
-		case VirtualEndLine:
+		case AnchorBitEndLine:
 			return "$L"
-		case VirtualBeginText:
+		case AnchorBitBeginText:
 			return "^T"
-		case VirtualEndText:
+		case AnchorBitEndText:
 			return "$T"
-		case VirtualWordBoundary:
+		case AnchorBitWordBoundary:
 			return "\\b"
-		case VirtualNoWordBoundary:
+		case AnchorBitNoWordBoundary:
 			return "\\B"
 		default:
 			return fmt.Sprintf("V%d", b)

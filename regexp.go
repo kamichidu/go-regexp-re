@@ -85,14 +85,15 @@ func CompileContextWithOption(ctx context.Context, expr string, opt CompileOptio
 		}
 		prefixState = dfa.MatchState()
 		if prefixStr != "" {
-			trans, stride := dfa.Transitions(), dfa.Stride()
+			trans := dfa.Transitions()
 			for _, c := range []byte(prefixStr) {
-				rawNext := trans[int(prefixState)*stride+int(c)]
+				off := (int(prefixState) << 8) | int(c)
+				rawNext := trans[off]
 				if rawNext == ir.InvalidState {
 					prefixState = ir.InvalidState
 					break
 				}
-				prefixState = rawNext & 0x7FFFFFFF
+				prefixState = rawNext & ir.StateIDMask
 			}
 		}
 	}
@@ -338,7 +339,7 @@ func (re *Regexp) nfaRescan(b []byte, start, end int, regs []int) []int {
 func rescanLoop[T loopTrait](re *Regexp, b []byte, start, end, targetPriority int, regs []int) {
 	var trait T
 	dfa := re.dfa
-	trans, tagUpdateIndices, tagUpdates, stride, matchState := dfa.Transitions(), dfa.TagUpdateIndices(), dfa.TagUpdates(), dfa.Stride(), dfa.MatchState()
+	trans, tagUpdateIndices, tagUpdates, matchState := dfa.Transitions(), dfa.TagUpdateIndices(), dfa.TagUpdates(), dfa.MatchState()
 
 	innerTarget := targetPriority % ir.SearchRestartPenalty
 	for _, u := range dfa.StartUpdates() {
@@ -361,7 +362,7 @@ func rescanLoop[T loopTrait](re *Regexp, b []byte, start, end, targetPriority in
 			break
 		}
 
-		idx := int(state)*stride + int(b[i])
+		idx := (int(state) << 8) | int(b[i])
 		rawNext := trans[idx]
 		if rawNext != ir.InvalidState {
 			if rawNext < 0 {
@@ -379,7 +380,7 @@ func rescanLoop[T loopTrait](re *Regexp, b []byte, start, end, targetPriority in
 				}
 				currentPrio = nextPrio
 			}
-			state = rawNext & 0x7FFFFFFF
+			state = rawNext & ir.StateIDMask
 		} else {
 			break
 		}
@@ -398,7 +399,8 @@ func applyTags(t uint64, pos int, regs []int) {
 
 func bitParallelExecLoop(re *Regexp, b []byte) (int, int, int, uint64) {
 	bp := re.bpDfa
-	masks := bp.CharMasks
+	charMasks := bp.CharMasks
+	anchorMasks := bp.AnchorMasks
 	table := bp.SuccessorTable
 	matchMask := bp.MatchMask
 	startMask := bp.StartMask
@@ -412,19 +414,13 @@ func bitParallelExecLoop(re *Regexp, b []byte) (int, int, int, uint64) {
 
 		for j := i; j <= numBytes; j++ {
 			// 1. Apply anchors (Instant transitions)
-			if len(masks) > 256 {
+			if re.dfa.HasAnchors() {
 				context := ir.CalculateContext(b, j)
 				for bit := 0; bit < 6; bit++ {
 					if (context & (1 << uint(bit))) != 0 {
-						active := state & masks[256+bit]
+						mask := anchorMasks[bit]
+						active := state & mask
 						if active != 0 {
-							if (active & matchMask) != 0 {
-								winningBit := bits.TrailingZeros64(active & matchMask)
-								prio := i*ir.SearchRestartPenalty + winningBit
-								if prio < bestPriority || (prio == bestPriority && j >= bestEnd) {
-									bestPriority, bestEnd, bestStart = prio, j, i
-								}
-							}
 							state = table[0][active&0xff] |
 								table[1][(active>>8)&0xff] |
 								table[2][(active>>16)&0xff] |
@@ -438,11 +434,19 @@ func bitParallelExecLoop(re *Regexp, b []byte) (int, int, int, uint64) {
 				}
 			}
 
-			// 2. Check for epsilon match (including bit 63 for Start -> Match)
-			if (matchMask&(1<<63)) != 0 && j == i {
-				prio := i*ir.SearchRestartPenalty + 63
-				if prio <= bestPriority {
-					bestPriority, bestEnd, bestStart = prio, i, i
+			// 2. Check for match
+			if (state&matchMask) != 0 || ((matchMask&(1<<63)) != 0 && j == i) {
+				activeMatch := state & matchMask
+				if j == i && (matchMask&(1<<63)) != 0 {
+					activeMatch |= (1 << 63)
+				}
+				winningBit := bits.TrailingZeros64(activeMatch)
+				prio := i*ir.SearchRestartPenalty + winningBit
+				if prio < bestPriority || (prio == bestPriority && j >= bestEnd) {
+					bestPriority, bestEnd, bestStart = prio, j, i
+					if (1<<uint(winningBit))&bestMatchMask != 0 {
+						return bestStart, bestEnd, bestPriority, 0
+					}
 				}
 			}
 
@@ -451,18 +455,8 @@ func bitParallelExecLoop(re *Regexp, b []byte) (int, int, int, uint64) {
 			}
 
 			// 3. Character transition
-			active := state & masks[b[j]]
+			active := state & charMasks[b[j]]
 			if active != 0 {
-				if (active & matchMask) != 0 {
-					winningBit := bits.TrailingZeros64(active & matchMask)
-					prio := i*ir.SearchRestartPenalty + winningBit
-					if prio < bestPriority || (prio == bestPriority && j+1 >= bestEnd) {
-						bestPriority, bestEnd, bestStart = prio, j+1, i
-						if (1<<uint(winningBit))&bestMatchMask != 0 {
-							return bestStart, bestEnd, bestPriority, 0
-						}
-					}
-				}
 				state = table[0][active&0xff] |
 					table[1][(active>>8)&0xff] |
 					table[2][(active>>16)&0xff] |
@@ -500,26 +494,31 @@ func bitParallelExecLoop(re *Regexp, b []byte) (int, int, int, uint64) {
 }
 
 func (re *Regexp) applyContextToState(d *ir.DFA, state ir.StateID, context syntax.EmptyOp, pos int, currentPrio *int, targetPrio int, regs []int) ir.StateID {
-	if state == ir.InvalidState || context == 0 || d.Stride() <= 256 {
+	if state == ir.InvalidState || context == 0 {
 		return state
 	}
-	trans, tagUpdateIndices, tagUpdates, stride := d.Transitions(), d.TagUpdateIndices(), d.TagUpdates(), d.Stride()
-	virtualBytes := [6]int{ir.VirtualBeginLine, ir.VirtualEndLine, ir.VirtualBeginText, ir.VirtualEndText, ir.VirtualWordBoundary, ir.VirtualNoWordBoundary}
+	tagUpdates := d.TagUpdates()
+	anchorTagUpdateIndices := d.AnchorTagUpdateIndices()
 
 	for iter := 0; iter < 6; iter++ {
 		changed := false
 		for bit := 0; bit < 6; bit++ {
-			if (context & (1 << bit)) != 0 {
-				idx := int(state)*stride + virtualBytes[bit]
-				if idx < len(trans) {
-					rawNext := trans[idx]
-					nextID := rawNext & 0x7FFFFFFF
-					if rawNext != ir.InvalidState && nextID != state {
+			if (context & (1 << uint(bit))) != 0 {
+				idx := int(state)*6 + bit
+				rawNext := d.AnchorNext(state, bit)
+				if rawNext != ir.InvalidState {
+					nextID := rawNext & ir.StateIDMask
+					if nextID != state {
 						if rawNext < 0 {
-							update := tagUpdates[tagUpdateIndices[idx]]
+							update := tagUpdates[anchorTagUpdateIndices[idx]]
 							nextPrio := *currentPrio + int(update.BasePriority)
 							if regs != nil {
 								for _, tu := range update.PreUpdates {
+									if nextPrio+int(tu.RelativePriority) <= targetPrio {
+										applyTags(tu.Tags, pos, regs)
+									}
+								}
+								for _, tu := range update.PostUpdates {
 									if nextPrio+int(tu.RelativePriority) <= targetPrio {
 										applyTags(tu.Tags, pos, regs)
 									}
@@ -576,7 +575,7 @@ func (extendedCaptureTrait) IsCapture() bool  { return true }
 func execLoop[T loopTrait](re *Regexp, b []byte) (int, int, int, uint64) {
 	var trait T
 	dfa := re.dfa
-	trans, tagUpdateIndices, tagUpdates, stride, accepting := dfa.Transitions(), dfa.TagUpdateIndices(), dfa.TagUpdates(), dfa.Stride(), dfa.Accepting()
+	trans, tagUpdateIndices, tagUpdates, accepting := dfa.Transitions(), dfa.TagUpdateIndices(), dfa.TagUpdates(), dfa.Accepting()
 	numStates, numBytes := dfa.NumStates(), len(b)
 	lb := b[:numBytes]
 	bestStart, bestEnd, bestPriority, bestMatchTags, currentPriority := -1, -1, 1<<30-1, uint64(0), 0
@@ -605,11 +604,11 @@ func execLoop[T loopTrait](re *Regexp, b []byte) (int, int, int, uint64) {
 		}
 		if i < numBytes {
 			sidx := int(state)
-			if sidx >= 0 && sidx < numStates && int(lb[i]) < stride {
-				off := sidx*stride + int(lb[i])
+			if sidx >= 0 && sidx < numStates {
+				off := (sidx << 8) | int(lb[i])
 				rawNext := trans[off]
 				if rawNext != ir.InvalidState {
-					state = rawNext & 0x7FFFFFFF
+					state = rawNext & ir.StateIDMask
 					if rawNext < 0 {
 						update := tagUpdates[tagUpdateIndices[off]]
 						currentPriority += int(update.BasePriority)
@@ -637,22 +636,42 @@ func execLoop[T loopTrait](re *Regexp, b []byte) (int, int, int, uint64) {
 			break
 		}
 
-		// Prefix skip optimization
-		if len(re.prefix) > 0 {
+		// Warp Point / Prefix skip optimization
+		state = dfa.SearchState()
+		warpByte := dfa.WarpPoint(state)
+		if warpByte >= 0 {
+			skip := bytes.Index(lb[i:], []byte{byte(warpByte)})
+			if skip < 0 {
+				break
+			}
+
+			// Guarded warp verification
+			guard := dfa.WarpPointGuard(state)
+			if guard != 0 {
+				if ir.CalculateContext(lb, i+skip)&guard == 0 {
+					// Guard failed, skip this byte and continue search
+					i += skip + 1
+					currentPriority = (i * ir.SearchRestartPenalty)
+					continue
+				}
+			}
+
+			i += skip
+			currentPriority = (i * ir.SearchRestartPenalty)
+			// Move to target state
+			state = dfa.WarpPointState(state)
+			i++
+		} else if len(re.prefix) > 0 {
 			skip := bytes.Index(lb[i:], re.prefix)
 			if skip < 0 {
 				break
 			}
 			i += skip
-			currentPriority += skip * ir.SearchRestartPenalty
+			currentPriority = (i * ir.SearchRestartPenalty)
 			if re.prefixState != ir.InvalidState {
 				state = re.prefixState
 				i += len(re.prefix)
-			} else {
-				state = dfa.SearchState()
 			}
-		} else {
-			state = dfa.SearchState()
 		}
 	}
 	return bestStart, bestEnd, bestPriority, bestMatchTags

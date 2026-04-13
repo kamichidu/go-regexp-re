@@ -20,15 +20,15 @@ Every implementation must adhere to these pillars to ensure maximum performance:
 - **Byte-Level Transitions**: All state transitions must operate on raw bytes to minimize branching and memory latency.
 
 ### 2.3 Cache Locality Optimization
-- **Flattened Memory Layout**: Transition tables MUST be stored as a contiguous `int32` array. Access must use `table[state * stride + byte]` to eliminate pointer chasing and maximize L1/L2 cache hit rates.
+- **Flattened Memory Layout**: Transition tables MUST be stored as a contiguous `int32` array. Access must use `table[(state << 8) | byte]` to eliminate multiplication and maximize L1/L2 cache hit rates.
 - **Minimize Memory Latency**: Keep core structures small enough to fit within L2/L3 caches even for large pattern sets.
 
 ### 2.4 Execution Switching Strategy
 To maximize throughput, the engine MUST select the most efficient execution loop based on pattern characteristics:
 - **0-Pass (Literal Bypass)**: Selected for pure constant strings. Bypasses all regex engines using SIMD-accelerated standard library search (e.g., `bytes.Index`).
 - **Bit-parallel Path (Glushkov BP-DFA)**: The **"Express Pass"** for small, simple patterns. Utilizes ultra-fast `uint64` bitwise operations to eliminate memory loads.
-- **Fast Path (Pure DFA)**: Automatically selected for larger anchor-free patterns. It utilizes a minimalist table-based execution loop with **manual restarts and SIMD-accelerated prefix skipping** to guarantee leftmost-first priority.
-- **Extended Path (Virtual Byte Insertion)**: Selected for patterns with anchors (e.g., `^`, `$`, `\b`). The DFA closure MUST include unsatisfied `InstEmptyWidth` instructions to allow states to "wait" for anchor satisfaction via virtual byte transitions.
+- **Fast Path (Pure DFA)**: Automatically selected for larger patterns. It utilizes a minimalist table-based execution loop with **manual restarts and SIMD-accelerated prefix skipping**.
+- **Anchor-Aware Guarded SIMD Warp**: Selected for patterns with anchors. Utilizes a separate `anchorTransitions` table and **guarded warp points** to allow SIMD skipping even in the presence of anchors (e.g., `^`, `$`, `\b`).
 
 ### 2.5 Submatch Extraction Architecture (DFA-First Hybrid)
 The engine follows a **DFA-First Hybrid** strategy to guarantee both performance and Go-compatible precision.
