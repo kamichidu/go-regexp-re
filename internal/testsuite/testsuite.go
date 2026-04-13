@@ -24,6 +24,36 @@ import (
 type Engine struct {
 	Name    string
 	Compile func(pattern string) (Matcher, error)
+	cache   map[string]Matcher
+	mu      sync.Mutex
+}
+
+func (e *Engine) getMatcher(pattern string) (Matcher, error) {
+	e.mu.Lock()
+	if e.cache == nil {
+		e.cache = make(map[string]Matcher)
+	}
+	if re, ok := e.cache[pattern]; ok {
+		e.mu.Unlock()
+		return re, nil
+	}
+	e.mu.Unlock()
+
+	re, err := e.Compile(pattern)
+	if err != nil {
+		return nil, err
+	}
+
+	e.mu.Lock()
+	e.cache[pattern] = re
+	e.mu.Unlock()
+	return re, nil
+}
+
+func (e *Engine) ClearCache() {
+	e.mu.Lock()
+	e.cache = nil
+	e.mu.Unlock()
 }
 
 // Matcher represents a compiled regexp that can match against strings.
@@ -325,13 +355,14 @@ func RunCompatibility(t *testing.T) {
 
 	for _, engine := range engines {
 		t.Run(engine.Name, func(t *testing.T) {
+			defer engine.ClearCache()
 			for i, pat := range patterns {
 				if strings.Contains(pat, "\uFFFD") || strings.Contains(pat, "\\x{fffd}") {
 					continue
 				}
 
 				t.Run(fmt.Sprintf("pat=%q", pat), func(t *testing.T) {
-					re, err := engine.Compile(pat)
+					re, err := engine.getMatcher(pat)
 					if err != nil {
 						if EnableCompatibilityReport {
 							for range grouped[pat] {
@@ -399,13 +430,14 @@ func RunSubmatchCompatibility(t *testing.T) {
 			continue
 		}
 		t.Run(engine.Name, func(t *testing.T) {
+			defer engine.ClearCache()
 			for i, pat := range patterns {
 				if strings.Contains(pat, "\uFFFD") || strings.Contains(pat, "\\x{fffd}") {
 					continue
 				}
 
 				t.Run(fmt.Sprintf("pat=%q", pat), func(t *testing.T) {
-					re, err := engine.Compile(pat)
+					re, err := engine.getMatcher(pat)
 					if err != nil {
 						if EnableCompatibilityReport {
 							for range grouped[pat] {
@@ -416,7 +448,7 @@ func RunSubmatchCompatibility(t *testing.T) {
 						return
 					}
 
-					refRe, err := referenceEngine.Compile(pat)
+					refRe, err := referenceEngine.getMatcher(pat)
 					if err != nil {
 						t.Skipf("reference engine failed to compile %q: %v", pat, err)
 						return
@@ -452,6 +484,7 @@ func RunFowler(t *testing.T) {
 	}
 	for _, engine := range engines {
 		t.Run(engine.Name, func(t *testing.T) {
+			defer engine.ClearCache()
 			errCache := &sync.Map{}
 			for _, ff := range fowlerFiles {
 				t.Run(ff.Name, func(t *testing.T) {
@@ -472,7 +505,7 @@ func RunFowler(t *testing.T) {
 								t.Skipf("failed to compile %q: %v", tt.Pattern, err)
 								return
 							}
-							re, err := engine.Compile(tt.Pattern)
+							re, err := engine.getMatcher(tt.Pattern)
 							if err != nil {
 								errCache.Store(tt.Pattern, err)
 								if EnableCompatibilityReport {
@@ -512,8 +545,9 @@ func RunRE2Search(t *testing.T) {
 	}
 	for _, engine := range engines {
 		t.Run(engine.Name, func(t *testing.T) {
+			defer engine.ClearCache()
 			for _, group := range re2SearchSet.Groups {
-				re, err := engine.Compile(group.Regexp)
+				re, err := engine.getMatcher(group.Regexp)
 				if err != nil {
 					continue
 				}
@@ -572,12 +606,13 @@ func BenchmarkStandardSuite(b *testing.B) {
 	}
 
 	runOnEngines(b, func(b *testing.B, engine Engine) {
+		defer engine.ClearCache()
 		for i, tc := range cases {
+			re, err := engine.getMatcher(tc.Regexp)
+			if err != nil {
+				continue
+			}
 			b.Run(fmt.Sprintf("Case%d", i), func(b *testing.B) {
-				re, err := engine.Compile(tc.Regexp)
-				if err != nil {
-					b.Skip()
-				}
 				input := tc.Text
 				b.ResetTimer()
 				for i := 0; i < b.N; i++ {
@@ -607,16 +642,27 @@ func BenchmarkLargeAlternation(b *testing.B) {
 			pattern := strings.Join(patterns, "|")
 			payload := fmt.Sprintf("My postal code is %s.", patterns[count-1])
 
+			var re Matcher
+			var compileErr error
+
+			re, compileErr = engine.getMatcher(pattern)
+
 			b.Run(fmt.Sprintf("Count=%d", count), func(b *testing.B) {
-				re, err := engine.Compile(pattern)
-				if err != nil {
-					b.Skip()
+				if compileErr != nil {
+					b.Logf("Compile failed: %v", compileErr)
+					b.SkipNow()
 				}
 				b.ResetTimer()
 				for i := 0; i < b.N; i++ {
 					re.MatchString(payload)
 				}
 			})
+
+			// Clear reference and reclaim memory before the next count
+			re = nil
+			compileErr = nil
+			engine.ClearCache()
+			runtime.GC()
 		}
 	})
 }
@@ -634,12 +680,13 @@ func BenchmarkLiteralScan(b *testing.B) {
 	}
 
 	runOnEngines(b, func(b *testing.B, engine Engine) {
+		defer engine.ClearCache()
 		for _, pattern := range patterns {
+			re, err := engine.getMatcher(pattern)
+			if err != nil {
+				continue
+			}
 			b.Run(fmt.Sprintf("pat=%s", pattern), func(b *testing.B) {
-				re, err := engine.Compile(pattern)
-				if err != nil {
-					b.Skip()
-				}
 				b.ResetTimer()
 				for i := 0; i < b.N; i++ {
 					re.MatchString(sherlock)
@@ -663,12 +710,13 @@ func BenchmarkAnchors(b *testing.B) {
 	}
 
 	runOnEngines(b, func(b *testing.B, engine Engine) {
+		defer engine.ClearCache()
 		for _, pattern := range patterns {
+			re, err := engine.getMatcher(pattern)
+			if err != nil {
+				continue
+			}
 			b.Run(fmt.Sprintf("pat=%s", pattern), func(b *testing.B) {
-				re, err := engine.Compile(pattern)
-				if err != nil {
-					b.Skip()
-				}
 				b.ResetTimer()
 				for i := 0; i < b.N; i++ {
 					re.MatchString(httpLogs)
@@ -692,12 +740,13 @@ func BenchmarkCapturing(b *testing.B) {
 	}
 
 	runOnEngines(b, func(b *testing.B, engine Engine) {
+		defer engine.ClearCache()
 		for _, tc := range patterns {
+			re, err := engine.getMatcher(tc.pat)
+			if err != nil {
+				continue
+			}
 			b.Run(tc.name, func(b *testing.B) {
-				re, err := engine.Compile(tc.pat)
-				if err != nil {
-					b.Skip()
-				}
 				b.ResetTimer()
 				for i := 0; i < b.N; i++ {
 					re.FindStringSubmatchIndex(input)
@@ -713,7 +762,8 @@ func BenchmarkNFAWorstCase(b *testing.B) {
 	input := strings.Repeat("a", 25) + "c"
 
 	runOnEngines(b, func(b *testing.B, engine Engine) {
-		re, err := engine.Compile(pattern)
+		defer engine.ClearCache()
+		re, err := engine.getMatcher(pattern)
 		if err != nil {
 			b.Skip()
 		}

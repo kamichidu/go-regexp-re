@@ -64,13 +64,21 @@ To minimize compilation overhead, the engine MUST use an **Architectural Shortcu
 ### 2.11 Early Exit Optimization (IsBestMatch)
 - **Deterministic Finality**: If a DFA state identifies a match whose priority is unbeatable (`IsBestMatch == true`), the engine MUST stop scanning immediately for the current start position.
 
-### 2.12 State Explosion Protection (64MiB Absolute Limit)
-- **Memory Threshold**: The DFA transition table is strictly limited to a maximum estimated size of **64MiB**.
-- **Graceful Failure**: If a pattern exceeds this limit, return `regexp: pattern too large or ambiguous`.
+### 2.12 State Explosion Protection (Configurable & Scalable)
+- **Default Memory Threshold**: The DFA transition table is typically limited to **64MiB**.
+- **Dynamic Offloading**: When `MaxMemory` exceeds 1GiB, the engine MUST switch the NFA path set storage from memory to a **File-based backend** to prevent OOM during massive state explorations.
+- **Graceful Failure**: If a pattern exceeds the configured `MaxMemory`, return `regexp: pattern too large or ambiguous`.
 
 ### 2.13 Syntax-Level Optimization & AST Rewriting
 - **Factoring**: Identical AST nodes MUST be factored out (e.g., `a*c|b*c` -> `(?:a*|b*)c`) to reduce state divergence.
 - **Simplification**: Use `syntax.Simplify` and `syntax.Optimize` to normalize pattern structure.
+
+### 2.14 DFA Construction Memory Discipline (Allocation-Free Mandate)
+To ensure scalability to 10,000+ patterns, the DFA construction phase MUST adhere to strict memory discipline:
+- **Allocation-Free Hot Loop**: The main build loop MUST NOT perform `make` or `append` that triggers new heap allocations. Use pre-allocated buffers (`scratchBuf`, `nextPaths`) and reuse them across iterations.
+- **Pointer-Free NFA Paths**: All structures representing NFA state sets (e.g., `nfaPath`) MUST be pointer-free. This ensures binary safety for raw disk I/O (no serialization overhead) and prevents GC scanning of large state sets.
+- **Allocation-Free Minimization**: DFA minimization MUST use a hash-based approach instead of string/byte serialization to eliminate OOM risks during the final optimization phase.
+- **Aggressive Cache Eviction**: Internal build caches (e.g., `closureCache`) MUST have explicit size limits and eviction policies to prevent unbounded memory growth during complex pattern compilation.
 
 ## 3. Feature Selection Policy
 

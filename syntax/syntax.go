@@ -154,29 +154,38 @@ func factorAlternate(re *Regexp) *Regexp {
 
 	for {
 		oldLen := len(re.Sub)
-		oldStr := re.String()
 
 		// 1. Flatten nested alternates
 		var subs []*Regexp
+		changed := false
 		for _, sub := range re.Sub {
 			if sub.Op == OpAlternate {
 				subs = append(subs, sub.Sub...)
+				changed = true
 			} else {
 				subs = append(subs, sub)
 			}
 		}
 
 		// 2. Prefix factoring
-		subs = factorPrefix(subs)
+		newSubs := factorPrefix(subs)
+		if len(newSubs) != len(subs) {
+			changed = true
+		}
+		subs = newSubs
 
 		// 3. Suffix factoring
-		subs = factorSuffix(subs)
+		newSubs = factorSuffix(subs)
+		if len(newSubs) != len(subs) {
+			changed = true
+		}
+		subs = newSubs
 
 		re.Sub = subs
 		if len(re.Sub) == 1 {
 			return re.Sub[0]
 		}
-		if len(re.Sub) == oldLen && re.String() == oldStr {
+		if !changed && len(re.Sub) == oldLen {
 			break
 		}
 	}
