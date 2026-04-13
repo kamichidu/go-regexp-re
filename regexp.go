@@ -222,6 +222,8 @@ func (re *Regexp) Match(b []byte) bool {
 		start, _, _, _ = extendedExecLoop(re, b)
 	case strategyFast:
 		start, _, _, _ = fastExecLoop(re, b)
+	default:
+		start = -1
 	}
 	return start >= 0
 }
@@ -233,30 +235,28 @@ func (re *Regexp) MatchString(s string) bool {
 func (re *Regexp) NumSubexp() int                { return re.numSubexp }
 func (re *Regexp) LiteralPrefix() (string, bool) { return string(re.prefix), re.complete }
 
-func (re *Regexp) doMatch(b []byte) (int, int, int, uint64) {
+func (re *Regexp) FindSubmatchIndex(b []byte) []int {
+	var start, end, targetPriority int
+	var matchTags uint64
 	switch re.strategy {
 	case strategyLiteralBypass:
-		start, end, prio := re.literalBypass(b)
-		return start, end, prio, 0
+		start, end, targetPriority = re.literalBypass(b)
 	case strategyLiteral:
 		indices := re.literalMatcher.FindSubmatchIndex(b)
-		if indices == nil {
-			return -1, -1, -1, 0
+		if indices != nil {
+			start, end, targetPriority = indices[0], indices[1], 0
+		} else {
+			start = -1
 		}
-		return indices[0], indices[1], 0, 0
 	case strategyBitParallel:
-		return bitParallelExecLoop(re, b)
+		start, end, targetPriority, matchTags = bitParallelExecLoop(re, b)
 	case strategyExtended:
-		return extendedExecLoop(re, b)
+		start, end, targetPriority, matchTags = extendedExecLoop(re, b)
 	case strategyFast:
-		return fastExecLoop(re, b)
+		start, end, targetPriority, matchTags = fastExecLoop(re, b)
 	default:
-		return -1, -1, -1, 0
+		start = -1
 	}
-}
-
-func (re *Regexp) FindSubmatchIndex(b []byte) []int {
-	start, end, targetPriority, matchTags := re.doMatch(b)
 	if start < 0 {
 		return nil
 	}
