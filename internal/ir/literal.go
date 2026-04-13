@@ -126,6 +126,9 @@ func extractLiteral(re *syntax.Regexp, beginText, endText *bool, literal *[]byte
 		*endText = true
 		return true
 	case syntax.OpLiteral:
+		if re.Flags&syntax.FoldCase != 0 {
+			return false
+		}
 		*literal = append(*literal, string(re.Rune)...)
 		return true
 	case syntax.OpCapture:
