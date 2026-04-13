@@ -72,7 +72,6 @@ func CompileContextWithOption(ctx context.Context, expr string, opt CompileOptio
 	if err != nil {
 		return nil, err
 	}
-	// Separated Bit-parallel construction
 	bpDfa := ir.NewBitParallelDFA(prog)
 
 	prefixState := dfa.MatchState()
@@ -188,18 +187,26 @@ func (re *Regexp) extractSubmatches(b []byte, start, end, targetPriority int, ma
 		return regs
 	}
 
-	// 2-Pass Hybrid Strategy:
+	// Principal: DFA Rescan for high performance.
 	// NFA rescan is ONLY used for greedy matches (edge cases).
-	// For literal-heavy or non-greedy, 2nd Pass DFA is more deterministic.
 	if re.isGreedyMatch() {
 		return re.nfaRescan(b, start, end, regs)
 	}
 
-	// Principal: DFA Rescan
 	if re.dfa.HasAnchors() {
 		rescanLoop[extendedMatchTrait](re, b, start, end, targetPriority, regs)
 	} else {
 		rescanLoop[fastMatchTrait](re, b, start, end, targetPriority, regs)
+	}
+
+	// Apply tags from the final match state if they represent higher priority paths
+	// that were correctly determined during Forward scan.
+	for i := 0; i < 64; i++ {
+		if (matchTags&(1<<uint(i))) != 0 && i < len(regs) {
+			if regs[i] == -1 || regs[i] > end {
+				regs[i] = end
+			}
+		}
 	}
 	return regs
 }
@@ -315,7 +322,8 @@ func rescanLoop[T loopTrait](re *Regexp, b []byte, start, end, targetPriority in
 
 	innerTarget := targetPriority % ir.SearchRestartPenalty
 	for _, u := range dfa.StartUpdates() {
-		if int(u.RelativePriority) == innerTarget {
+		// Loosened priority check: adopt any tag consistent with best path
+		if int(u.RelativePriority) <= innerTarget {
 			applyTags(u.Tags, start, regs)
 		}
 	}
@@ -339,12 +347,12 @@ func rescanLoop[T loopTrait](re *Regexp, b []byte, start, end, targetPriority in
 				update := tagUpdates[tagUpdateIndices[idx]]
 				nextPrio := currentPrio + int(update.BasePriority)
 				for _, tu := range update.PreUpdates {
-					if nextPrio+int(tu.RelativePriority) == innerTarget {
+					if nextPrio+int(tu.RelativePriority) <= innerTarget {
 						applyTags(tu.Tags, i, regs)
 					}
 				}
 				for _, tu := range update.PostUpdates {
-					if nextPrio+int(tu.RelativePriority) == innerTarget {
+					if nextPrio+int(tu.RelativePriority) <= innerTarget {
 						applyTags(tu.Tags, i+1, regs)
 					}
 				}
@@ -456,7 +464,7 @@ func (re *Regexp) applyContextToState(d *ir.DFA, state ir.StateID, context synta
 							update := tagUpdates[tagUpdateIndices[idx]]
 							nextPrio := currentPrio + int(update.BasePriority)
 							for _, tu := range update.PreUpdates {
-								if nextPrio+int(tu.RelativePriority) == targetPrio {
+								if nextPrio+int(tu.RelativePriority) <= targetPrio {
 									applyTags(tu.Tags, pos, regs)
 								}
 							}
