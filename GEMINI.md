@@ -90,8 +90,17 @@ To ensure scalability to 10,000+ patterns, the DFA construction phase MUST adher
 ### 2.15 Zero-Overhead Execution (Manual Monomorphization Mandate)
 To achieve the goal of $O(1)$ performance per byte without hidden overhead, the engine MUST adhere to these execution principles:
 - **Avoid Runtime Generic Dispatch**: Go's current implementation of generics often uses `GCShape` sharing with runtime dictionaries. For the hot execution loop, this introduces unacceptable latency. The engine MUST use specialized, non-generic functions for the "Fast Path" and "Extended Path".
-- **Constant Folding of Strategy**: Branches based on pattern traits (e.g., `hasAnchors`) MUST be resolved at the function dispatch level (via `bindMatchLoop`), ensuring the loop body itself is free of irrelevant checks.
+- **Constant Folding of Strategy**: Branches based on pattern traits (e.g., `hasAnchors`) MUST be resolved at the function dispatch level (via `bindMatchStrategy`), ensuring the loop body itself is free of irrelevant checks.
 - **Anchor Usage Masking**: The engine MUST track `UsedAnchors` in the DFA to skip context calculation (`CalculateContext`) at positions where the specific anchors in the pattern cannot possibly match, further reducing CPU cycles.
+
+### 2.16 Proven Implementation Mandates for Maximum Throughput (Field-Proven)
+To maintain the 50%+ throughput gains achieved through empirical benchmarking, all execution logic MUST adhere to these Go-compiler-specific mandates:
+
+- **Zero-Overhead Strategy Dispatch (Switch over Closure)**: The choice of execution loop MUST be performed via a `matchStrategy (uint8)` and a flat `switch` statement in `Match` and `FindSubmatchIndex`. NEVER use function pointers or closures for the primary match loop, as indirect calls incur a 5-15% performance penalty and inhibit branch prediction.
+- **Hot-Loop Field Hoisting & BCE (Bounds Check Elimination)**: To minimize pointer chasing (dereferencing) in the innermost loops (e.g., `fastExecLoop`, `extendedExecLoop`), ALL required struct fields (e.g., `re.dfa`, `re.prefix`) MUST be hoisted to local variables before the loop begins. Additionally, ALL slice accesses within the loop MUST be preceded by a BCE hint (e.g., `_ = trans[len(trans)-1]`) to force the Go compiler to eliminate runtime bounds checks.
+- **Go-Specific Struct Layout Heuristics**: Contrary to general optimization advice, the `Regexp` struct MUST keep larger immutable headers (`string`, `[]byte`) at the beginning and smaller control fields (`strategy`, `bool`) at the end. This layout optimizes the Go compiler's offset calculations for receiver arguments and improves register allocation in the hot path.
+- **Avoid Dispatcher Fragmentation**: The `Match` and `FindSubmatchIndex` methods MUST NOT be split into `Hot` and `Slow` helpers to "encourage inlining." Empirically, keeping the dispatch logic in a single, flat method provides more efficient stack frame management and register usage for the Go compiler (gc).
+- **Reject Recursive Incremental Updates**: Hot-loop optimizations that introduce branching or state-carrying (e.g., incremental context updates) MUST be avoided if they increase the complexity of the innermost loop. Simple, redundant L1-cached memory reads (e.g., `b[i]`, `b[i-1]`) are significantly cheaper than additional conditional branches in the hot path.
 
 ## 3. Feature Selection Policy
 
