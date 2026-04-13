@@ -212,12 +212,21 @@ type DFA struct {
 }
 
 type BitParallelDFA struct {
-	CharMasks       [256]uint64
-	AnchorMasks     [6]uint64
-	SuccessorTable  [8][256]uint64
-	MatchMask       uint64
-	StartMask       uint64
-	IsBestMatchMask uint64
+	CharMasks      [256]uint64
+	AnchorMasks    [6]uint64
+	ContextMasks   [64]uint64
+	SuccessorTable [8][256]uint64
+	MatchMask      uint64
+	StartMask      uint64
+}
+
+func (bp *BitParallelDFA) HasAnchors() bool {
+	for _, m := range bp.AnchorMasks {
+		if m != 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func (d *DFA) Next(current StateID, b int) StateID {
@@ -371,6 +380,7 @@ func NewBitParallelDFA(prog *syntax.Prog) *BitParallelDFA {
 					bp.CharMasks[b] |= (1 << uint(i))
 				}
 			}
+			// If this instruction's Out leads to Match, it means MATCH happens after matching THIS rune.
 			if matchID >= 0 && (epsilonClosure(int(inst.Out))&(1<<uint(matchID))) != 0 {
 				bp.MatchMask |= (1 << uint(i))
 			}
@@ -380,6 +390,7 @@ func NewBitParallelDFA(prog *syntax.Prog) *BitParallelDFA {
 					bp.AnchorMasks[bit] |= (1 << uint(i))
 				}
 			}
+			// If this instruction's Out leads to Match, it means MATCH happens after matching THIS anchor.
 			if matchID >= 0 && (epsilonClosure(int(inst.Out))&(1<<uint(matchID))) != 0 {
 				bp.MatchMask |= (1 << uint(i))
 			}
@@ -396,25 +407,28 @@ func NewBitParallelDFA(prog *syntax.Prog) *BitParallelDFA {
 	}
 
 	for t := 0; t < 8; t++ {
-		for b := 0; b < 256; b++ {
+		for byteVal := 0; byteVal < 256; byteVal++ {
 			var union uint64
 			for bit := 0; bit < 8; bit++ {
-				if (b & (1 << uint(bit))) != 0 {
+				if (byteVal & (1 << uint(bit))) != 0 {
 					idx := t*8 + bit
 					if idx < len(successors) {
 						union |= successors[idx]
 					}
 				}
 			}
-			bp.SuccessorTable[t][b] = union
+			bp.SuccessorTable[t][byteVal] = union
 		}
 	}
 
-	// 4. IsBestMatchMask
-	// Bit 0 is the highest priority.
-	bp.IsBestMatchMask |= 1
-	if (bp.MatchMask & (1 << 63)) != 0 {
-		bp.IsBestMatchMask |= (1 << 63)
+	for c := 0; c < 64; c++ {
+		var m uint64
+		for bit := 0; bit < 6; bit++ {
+			if (c & (1 << uint(bit))) != 0 {
+				m |= bp.AnchorMasks[bit]
+			}
+		}
+		bp.ContextMasks[c] = m
 	}
 
 	return bp

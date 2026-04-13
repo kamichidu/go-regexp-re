@@ -55,7 +55,7 @@ func IsWordBoundary(b []byte, i int) bool {
 	return IsWord(r1) != IsWord(r2)
 }
 
-// IsWord reports whether rune r is considered a "word" character ([a-zA-Z0-9_]).
+// IsWord reports whether rune r is considered a "word" character.
 func IsWord(r rune) bool {
-	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_'
+	return syntax.IsWordChar(r)
 }

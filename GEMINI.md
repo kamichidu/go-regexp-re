@@ -45,12 +45,16 @@ For patterns with 64 or fewer NFA nodes, the engine utilizes a specialized Bit-p
 - **Physical Separation**: BP-DFA data (bitmasks, epsilons) MUST be stored in a dedicated `BitParallelDFA` structure, physically isolated from the primary table-based `DFA`.
 - **Zero Memory Load Transitions**: Transitions must be performed using `uint64` bitwise operations.
 - **L1 Cache Optimization**: BP-DFA utilizing a **16KB Successor Table** (`[8][256]uint64`) ensures that state transitions stay within the L1D cache. The transition loop MUST use 8-bit chunk lookups to achieve $O(1)$ performance per byte.
+- **Context-Aware Anchor Resolution**: BP-DFA utilizes pre-compiled **`ContextMasks`** to resolve all 6 types of anchors (`^`, `$`, `\b`, etc.) via a single bitwise AND operation, eliminating branching in the hot loop.
 - **Priority Tracking Challenge**: Since Go's `syntax.Prog` optimizes for shared prefixes (e.g., `aa|a` -> `a(a|)`), the BP-DFA cannot naturally distinguish submatch priority using only bitsets. If strict leftmost-first priority is required for overlapping paths, the engine MUST fallback to the table-based DFA.
 
 ### 2.7 Architectural Shortcut (Compilation Efficiency)
 To minimize compilation overhead, the engine MUST use an **Architectural Shortcut** for simple patterns.
 - **Skip Heavy DFA**: If a pattern is simple (NFA nodes $\le 62$, no non-greedy), the engine MUST skip the heavy DFA transition table construction and only build the `BitParallelDFA`.
-- **Priority Safety Guard**: The shortcut is restricted to patterns where alternative priorities do not clash due to shared prefixes. For complex alternations, always prefer the DFA path to guarantee 100% Go compatibility.
+- **Priority Safety Guard**: The shortcut is restricted to patterns where alternative priorities do not clash.
+    - **Heuristic**: Allow simple greedy loops (back-edge Alts) but **exclude forward-pointing alternations** (`a|b`) and **non-greedy branches** to guarantee 100% Go submatch compatibility.
+    - **ASCII Restriction**: BP-DFA is currently optimized for ASCII-only runes (0-127). Patterns requiring multi-byte UTF-8 support (e.g., non-ASCII runes or `.`) MUST fallback to the table-based DFA, which provides mature byte-level expansion via its UTF-8 trie.
+    - For complex alternations or multi-byte matching, always prefer the DFA path to guarantee 100% Go compatibility.
 
 ### 2.8 Prefix-Skip Optimization (SIMD Acceleration)
 - **Mandatory Prefix Extraction**: During compilation, the longest constant prefix is extracted.

@@ -1,6 +1,7 @@
 package regexp
 
 import (
+	"fmt"
 	"reflect"
 	goregexp "regexp"
 	"runtime"
@@ -257,6 +258,64 @@ func TestHTTP11Anchor(t *testing.T) {
 	for _, tt := range tests {
 		if got := re.MatchString(tt.input); got != tt.want {
 			t.Errorf("MatchString(%q) = %v; want %v", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestSpecializationPath(t *testing.T) {
+	// Pattern that exceeds 62 instructions for DFA path
+	var longAlt strings.Builder
+	longAlt.WriteString("(")
+	for i := 0; i < 300; i++ {
+		if i > 0 {
+			longAlt.WriteString("|")
+		}
+		fmt.Fprintf(&longAlt, "v%03d", i)
+	}
+	longAlt.WriteString(")")
+	patternDFA := longAlt.String()
+
+	tests := []struct {
+		pattern string
+		want    string // "literal", "bit-parallel", "dfa", "dfa-anchor"
+	}{
+		{"Tokyo", "literal"},
+		{"^abc$", "literal"},
+		{"abc$", "literal"},
+		{"^abc", "literal"},
+		{"a|b|c", "bit-parallel"},
+		{"[a-z]", "bit-parallel"},
+		{"a*", "dfa"},
+		{"(a|b)*", "dfa"},
+		{patternDFA, "dfa"},
+		{"^a|b$", "dfa-anchor"}, // Alternation: takes DFA
+		{"\\bword\\b", "bit-parallel"},
+	}
+
+	for _, tt := range tests {
+		re, err := Compile(tt.pattern)
+		if err != nil {
+			t.Errorf("Compile(%q) error: %v", tt.pattern, err)
+			continue
+		}
+
+		var got string
+		if re.literalMatcher != nil {
+			got = "literal"
+		} else if re.bpDfa != nil {
+			got = "bit-parallel"
+		} else if re.dfa != nil {
+			if re.dfa.HasAnchors() {
+				got = "dfa-anchor"
+			} else {
+				got = "dfa"
+			}
+		} else {
+			got = "unknown"
+		}
+
+		if got != tt.want {
+			t.Errorf("Pattern %q: got path %q, want %q (Inst count: %d)", tt.pattern, got, tt.want, len(re.prog.Inst))
 		}
 	}
 }

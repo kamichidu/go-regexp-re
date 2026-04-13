@@ -85,9 +85,14 @@ func CompileContextWithOption(ctx context.Context, expr string, opt CompileOptio
 			prefix:         []byte(prefixStr),
 			complete:       complete,
 			literalMatcher: literalMatcher,
+			prog:           prog,
 		}
 		res.bindMatchLoop()
 		return res, nil
+	}
+	// If Bit-parallel is possible, skip heavy DFA table construction.
+	if isSimpleForBP(prog) {
+		bpDfa = ir.NewBitParallelDFA(prog)
 	}
 	if bpDfa == nil {
 		dfa, err = ir.NewDFAWithMemoryLimit(ctx, prog, opt.MaxMemory)
@@ -141,24 +146,29 @@ func CompileContextWithOption(ctx context.Context, expr string, opt CompileOptio
 	return res, nil
 }
 
-func hasAnchors(prog *syntax.Prog) bool {
+func isSimpleForBP(prog *syntax.Prog) bool {
+	if len(prog.Inst) > 62 {
+		return false
+	}
 	for _, inst := range prog.Inst {
-		if inst.Op == syntax.InstEmptyWidth {
-			return true
+		switch inst.Op {
+		case syntax.InstAlt, syntax.InstAltMatch:
+			// For now, any Alt takes the DFA path for priority safety.
+			return false
+		case syntax.InstRune, syntax.InstRune1, syntax.InstRuneAny, syntax.InstRuneAnyNotNL:
+			// BP-DFA matches byte-by-byte. Multi-byte runes require DFA path.
+			if inst.Op == syntax.InstRuneAny || inst.Op == syntax.InstRuneAnyNotNL {
+				return false
+			}
+			for _, r := range inst.Rune {
+				if r > 127 {
+					return false
+				}
+			}
 		}
 	}
-	return false
+	return true
 }
-
-func hasNonGreedy(prog *syntax.Prog) bool {
-	for _, inst := range prog.Inst {
-		if (inst.Op == syntax.InstAlt || inst.Op == syntax.InstAltMatch) && inst.Arg < inst.Out {
-			return true
-		}
-	}
-	return false
-}
-
 func (re *Regexp) bindMatchLoop() {
 	if re.literalMatcher != nil {
 		re.match = func(b []byte) (int, int, int) {
@@ -421,55 +431,50 @@ func applyTags(t uint64, pos int, regs []int) {
 
 func bitParallelExecLoop(re *Regexp, b []byte) (int, int, int, uint64) {
 	bp := re.bpDfa
-	charMasks := bp.CharMasks
-	anchorMasks := bp.AnchorMasks
-	table := bp.SuccessorTable
-	matchMask := bp.MatchMask
-	startMask := bp.StartMask
-	bestMatchMask := bp.IsBestMatchMask
 	numBytes := len(b)
-
-	bestStart, bestEnd, bestPriority := -1, -1, 1<<30-1
+	bestStart, bestEnd, bestPriority, bestMatchTags := -1, -1, 1<<30-1, uint64(0)
+	matchMask := bp.MatchMask
+	charMasks := &bp.CharMasks
+	table := &bp.SuccessorTable
 
 	for i := 0; i <= numBytes; i++ {
-		state := startMask
+		state := bp.StartMask
+		currContext := ir.CalculateContext(b, i)
 
-		for j := i; j <= numBytes; j++ {
-			// 1. Apply anchors (Instant transitions)
-			if re.dfa.HasAnchors() {
-				context := ir.CalculateContext(b, j)
-				for bit := 0; bit < 6; bit++ {
-					if (context & (1 << uint(bit))) != 0 {
-						mask := anchorMasks[bit]
-						active := state & mask
-						if active != 0 {
-							state = table[0][active&0xff] |
-								table[1][(active>>8)&0xff] |
-								table[2][(active>>16)&0xff] |
-								table[3][(active>>24)&0xff] |
-								table[4][(active>>32)&0xff] |
-								table[5][(active>>40)&0xff] |
-								table[6][(active>>48)&0xff] |
-								table[7][(active>>56)&0xff] | (state & ^active)
-						}
-					}
-				}
+		// 1. Initial Match Check (Empty string at start i)
+		if (matchMask & (1 << 63)) != 0 {
+			prio := i*ir.SearchRestartPenalty + 63
+			if prio < bestPriority || (prio == bestPriority && i >= bestEnd) {
+				bestPriority, bestEnd, bestStart, bestMatchTags = prio, i, i, (1 << 63)
 			}
+		}
 
-			// 2. Check for match
-			if (state&matchMask) != 0 || ((matchMask&(1<<63)) != 0 && j == i) {
-				activeMatch := state & matchMask
-				if j == i && (matchMask&(1<<63)) != 0 {
-					activeMatch |= (1 << 63)
+		for j := i; ; j++ {
+			// 2. Apply anchors (instant transitions)
+			for k := 0; k < 8; k++ {
+				active := state & bp.ContextMasks[currContext]
+				if active == 0 {
+					break
 				}
-				winningBit := bits.TrailingZeros64(activeMatch)
-				prio := i*ir.SearchRestartPenalty + winningBit
-				if prio < bestPriority || (prio == bestPriority && j >= bestEnd) {
-					bestPriority, bestEnd, bestStart = prio, j, i
-					if (1<<uint(winningBit))&bestMatchMask != 0 {
-						return bestStart, bestEnd, bestPriority, 0
+
+				// MATCH check for anchors
+				if (active & matchMask) != 0 {
+					activeMatch := active & matchMask
+					winningBit := bits.TrailingZeros64(activeMatch)
+					prio := i*ir.SearchRestartPenalty + winningBit
+					if prio < bestPriority || (prio == bestPriority && j >= bestEnd) {
+						bestPriority, bestEnd, bestStart, bestMatchTags = prio, j, i, (1 << uint(winningBit))
 					}
 				}
+
+				state = table[0][active&0xff] |
+					table[1][(active>>8)&0xff] |
+					table[2][(active>>16)&0xff] |
+					table[3][(active>>24)&0xff] |
+					table[4][(active>>32)&0xff] |
+					table[5][(active>>40)&0xff] |
+					table[6][(active>>48)&0xff] |
+					table[7][(active>>56)&0xff] | (state & ^active)
 			}
 
 			if j == numBytes {
@@ -478,41 +483,49 @@ func bitParallelExecLoop(re *Regexp, b []byte) (int, int, int, uint64) {
 
 			// 3. Character transition
 			active := state & charMasks[b[j]]
-			if active != 0 {
-				state = table[0][active&0xff] |
-					table[1][(active>>8)&0xff] |
-					table[2][(active>>16)&0xff] |
-					table[3][(active>>24)&0xff] |
-					table[4][(active>>32)&0xff] |
-					table[5][(active>>40)&0xff] |
-					table[6][(active>>48)&0xff] |
-					table[7][(active>>56)&0xff]
-			} else {
-				state = 0
-			}
-			if state == 0 {
+			if active == 0 {
 				break
 			}
+
+			// MATCH check for characters
+			if (active & matchMask) != 0 {
+				activeMatch := active & matchMask
+				winningBit := bits.TrailingZeros64(activeMatch)
+				prio := i*ir.SearchRestartPenalty + winningBit
+				if prio < bestPriority || (prio == bestPriority && j+1 >= bestEnd) {
+					bestPriority, bestEnd, bestStart, bestMatchTags = prio, j+1, i, (1 << uint(winningBit))
+				}
+			}
+
+			state = table[0][active&0xff] |
+				table[1][(active>>8)&0xff] |
+				table[2][(active>>16)&0xff] |
+				table[3][(active>>24)&0xff] |
+				table[4][(active>>32)&0xff] |
+				table[5][(active>>40)&0xff] |
+				table[6][(active>>48)&0xff] |
+				table[7][(active>>56)&0xff]
+
+			currContext = ir.CalculateContext(b, j+1)
 		}
 
 		if bestStart != -1 {
-			return bestStart, bestEnd, bestPriority, 0
+			return bestStart, bestEnd, bestPriority, bestMatchTags
 		}
 		if re.anchorStart {
 			break
 		}
 
 		// Prefix skip optimization
-		i++
-		if len(re.prefix) > 0 && i < numBytes {
-			skip := bytes.Index(b[i:], re.prefix)
+		if len(re.prefix) > 0 && i+1 < numBytes {
+			skip := bytes.Index(b[i+1:], re.prefix)
 			if skip < 0 {
 				break
 			}
 			i += skip
 		}
 	}
-	return bestStart, bestEnd, bestPriority, 0
+	return bestStart, bestEnd, bestPriority, bestMatchTags
 }
 
 func (re *Regexp) applyContextToState(d *ir.DFA, state ir.StateID, context syntax.EmptyOp, pos int, currentPrio *int, targetPrio int, regs []int) ir.StateID {
