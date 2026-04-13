@@ -27,14 +27,13 @@ Every implementation must adhere to these pillars to ensure maximum performance:
 To maximize throughput, the engine MUST select the most efficient execution loop based on pattern characteristics:
 - **0-Pass (Literal Bypass)**: Selected for pure constant strings. Bypasses all regex engines using SIMD-accelerated standard library search (e.g., `bytes.Index`).
 - **Bit-parallel Path (Glushkov BP-DFA)**: The **"Express Pass"** for small, simple patterns. Utilizes ultra-fast `uint64` bitwise operations to eliminate memory loads.
-- **Fast Path (Pure DFA)**: Automatically selected for larger anchor-free patterns. It utilizes a minimalist table-based execution loop.
-- **Extended Path (Virtual Byte Insertion)**: Selected for patterns with anchors (e.g., `^`, `$`, `\b`).
-- **Submatch Path (DFA-First Hybrid)**: Selected when submatches are requested. It utilizes high-speed DFA/BP boundaries discovery followed by a specialized rescan phase.
+- **Fast Path (Pure DFA)**: Automatically selected for larger anchor-free patterns. It utilizes a minimalist table-based execution loop with **manual restarts and SIMD-accelerated prefix skipping** to guarantee leftmost-first priority.
+- **Extended Path (Virtual Byte Insertion)**: Selected for patterns with anchors (e.g., `^`, `$`, `\b`). The DFA closure MUST include unsatisfied `InstEmptyWidth` instructions to allow states to "wait" for anchor satisfaction via virtual byte transitions.
 
 ### 2.5 Submatch Extraction Architecture (DFA-First Hybrid)
 The engine follows a **DFA-First Hybrid** strategy to guarantee both performance and Go-compatible precision.
 
-- **Phase 1: Boundary Discovery**: High-speed DFA scan or Bit-parallel scan determines the match boundaries `[start, end]`.
+- **Phase 1: Boundary Discovery**: High-speed DFA scan or Bit-parallel scan determines the match boundaries `[start, end]`. For unanchored searches, the execution loop performs manual restarts at each position, utilizing `bytes.Index` to skip ahead whenever a constant prefix is available.
 - **Phase 2: Strategy Dispatch**:
     - **Principal (DFA Rescan)**: For non-greedy or literal-heavy patterns, a second DFA pass (rescan) is used to extract submatches deterministically.
     - **Exception (Targeted NFA Rescan)**: For patterns involving greedy operators (e.g., `a*`, `a+`) or when DFA is skipped (Bit-parallel only), an optimized NFA rescans the confirmed `[start, end]` range.
@@ -44,6 +43,7 @@ The engine follows a **DFA-First Hybrid** strategy to guarantee both performance
 For patterns with 64 or fewer NFA nodes, the engine utilizes a specialized Bit-parallel implementation.
 - **Physical Separation**: BP-DFA data (bitmasks, epsilons) MUST be stored in a dedicated `BitParallelDFA` structure, physically isolated from the primary table-based `DFA`.
 - **Zero Memory Load Transitions**: Transitions must be performed using `uint64` bitwise operations.
+- **Leftmost-First Fallback**: Since the Glushkov BP-DFA naturally favors longest-match, any pattern requiring strict submatch priority (e.g., alternations where submatches are extracted) MUST fallback to the table-based DFA or use a specialized NFA rescan.
 
 ### 2.7 Architectural Shortcut (Compilation Efficiency)
 To minimize compilation overhead, the engine MUST use an **Architectural Shortcut** for simple patterns.

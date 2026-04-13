@@ -15,7 +15,7 @@ func TestOptimize(t *testing.T) {
 		},
 		{
 			pattern: "bananas|apples",
-			want:    "(?:bananas|apple)(?:)",
+			want:    "bananas|apples",
 		},
 		{
 			pattern: "a(b|c)d|a(b|c)e",
@@ -27,15 +27,15 @@ func TestOptimize(t *testing.T) {
 		},
 		{
 			pattern: "abc|def|ghi",
-			want:    "(?:abc|de|gh)(?:)",
+			want:    "abc|def|ghi",
 		},
 		{
 			pattern: "test|testing",
-			want:    "test(?:(?:)|in)(?:)",
+			want:    "test(?:(?:)|ing)",
 		},
 		{
 			pattern: "abcde|fbcde",
-			want:    "(?:abcde|fbcd)(?:)",
+			want:    "abcde|fbcde",
 		},
 	}
 

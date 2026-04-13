@@ -162,7 +162,7 @@ func (s *fileNfaSetStorage) Get(id StateID, buf []nfaPath) ([]nfaPath, error) {
 	if len(buf) < length {
 		buf = make([]nfaPath, length)
 	}
-	
+
 	targetBuf := unsafe.Slice((*byte)(unsafe.Pointer(&buf[0])), length*nfaPathSize)
 	if _, err := s.file.ReadAt(targetBuf, s.offsets[id]); err != nil {
 		return nil, err
@@ -368,18 +368,18 @@ func hashSet(set []nfaPath) [2]uint64 {
 func hashUpdate(u TransitionUpdate) [2]uint64 {
 	h1 := uint64(14695981039346656037)
 	h2 := uint64(1000000000000000003)
-	
+
 	h1 ^= uint64(uint32(u.BasePriority))
 	h1 *= 1099511628211
 	h2 ^= uint64(uint32(u.BasePriority))
 	h2 *= 1000003
-	
+
 	for _, p := range u.PreUpdates {
 		h1 ^= uint64(uint32(p.RelativePriority))
 		h1 *= 1099511628211
 		h1 ^= p.Tags
 		h1 *= 1099511628211
-		
+
 		h2 ^= uint64(uint32(p.RelativePriority))
 		h2 *= 1000003
 		h2 ^= p.Tags
@@ -390,7 +390,7 @@ func hashUpdate(u TransitionUpdate) [2]uint64 {
 		h1 *= 1099511628211
 		h1 ^= p.Tags
 		h1 *= 1099511628211
-		
+
 		h2 ^= uint64(uint32(p.RelativePriority))
 		h2 *= 1000003
 		h2 ^= p.Tags
@@ -416,7 +416,7 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 	d.trieRoots = make([][]*utf8Node, len(prog.Inst))
 	var nodes []*utf8Node
 	nodes = append(nodes, nil) // ID 0 is nil
-	
+
 	getTrie := func(ID uint32) []*utf8Node {
 		if roots := d.trieRoots[ID]; roots != nil {
 			return roots
@@ -498,9 +498,11 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 		}
 		nextClosure, updates := epsilonClosureWithPathTags(normPaths, prog, context, d.nodes)
 		res := closureResult{nextClosure, updates}
-		
+
 		limit := 100000
-		if isFileMode { limit = 10000 } // Aggressive clearing in file mode
+		if isFileMode {
+			limit = 10000
+		} // Aggressive clearing in file mode
 		if len(closureCache) > limit {
 			closureCache = make(map[closureCacheKey]closureResult)
 		}
@@ -560,7 +562,7 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 		}
 		id := StateID(d.numStates)
 		nfaToDfa[key] = id
-		
+
 		if err := storage.Put(id, closure); err != nil {
 			errBuild = err
 			return InvalidState
@@ -593,12 +595,12 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 		d.numStates++
 		return id
 	}
-	
+
 	defaultStartRes := getCachedClosure([]nfaPath{{nfaState: nfaState{ID: uint32(prog.Start), NodeID: 0}}}, 0)
 	d.matchState = addDfaState(defaultStartRes.nextClosure, false)
 	d.startUpdates = defaultStartRes.updates
 	d.searchState = addDfaState(defaultStartRes.nextClosure, true)
-	
+
 	scratchBuf := make([]nfaPath, 0, 1024)
 	nextPaths := make([]nfaPath, 0, 1024)
 
@@ -612,7 +614,7 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 		}
 		currentDfaID := StateID(i)
 		currentIsSearch := d.stateIsSearch[i]
-		
+
 		currentClosure, err := storage.Get(currentDfaID, scratchBuf)
 		if err != nil {
 			return err
@@ -716,10 +718,6 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 				} else {
 					d.transitions[idx] = nextDfaID
 				}
-			} else if currentIsSearch {
-				idx := int(currentDfaID)*d.stride + b
-				d.transitions[idx] = d.searchState | TaggedStateFlag
-				d.tagUpdateIndices[idx] = addUpdate(TransitionUpdate{BasePriority: int32(SearchRestartPenalty)})
 			}
 		}
 		if d.hasAnchors {
@@ -768,19 +766,21 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 	}
 	d.minimize()
 	d.computePhase2Metadata()
-	
+
 	// HELP GC: Clear local maps before returning
 	nfaToDfa = nil
 	updateToIdx = nil
 	closureCache = nil
 	scratchBuf = nil
 	nextPaths = nil
-	
+
 	return nil
 }
 
 func (d *DFA) registerNodes(node *utf8Node, nodes *[]*utf8Node) {
-	if node == nil { return }
+	if node == nil {
+		return
+	}
 	for len(*nodes) <= node.ID {
 		*nodes = append(*nodes, nil)
 	}
@@ -1097,7 +1097,7 @@ func epsilonClosureWithPathTags(paths []nfaPath, prog *syntax.Prog, context synt
 		}
 		inst := prog.Inst[k.ID]
 		switch inst.Op {
-		case syntax.InstRune, syntax.InstRune1, syntax.InstRuneAny, syntax.InstRuneAnyNotNL, syntax.InstMatch:
+		case syntax.InstRune, syntax.InstRune1, syntax.InstRuneAny, syntax.InstRuneAnyNotNL, syntax.InstMatch, syntax.InstEmptyWidth:
 			result = append(result, nfaPath{nfaState: nfaState{ID: k.ID, NodeID: k.NodeID}, Priority: prio, Tags: k.Tags})
 		}
 	}

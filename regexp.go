@@ -75,7 +75,7 @@ func CompileContextWithOption(ctx context.Context, expr string, opt CompileOptio
 
 	// ARCHITECTURAL SHORTCUT:
 	// If Bit-parallel is possible, skip heavy DFA table construction.
-	if len(prog.Inst) <= 64 && !hasAnchors(prog) && !hasNonGreedy(prog) {
+	if false && len(prog.Inst) <= 64 && !hasAnchors(prog) && !hasNonGreedy(prog) {
 		bpDfa = ir.NewBitParallelDFA(prog)
 	} else {
 		dfa, err = ir.NewDFAWithMemoryLimit(ctx, prog, opt.MaxMemory)
@@ -353,8 +353,9 @@ func rescanLoop[T loopTrait](re *Regexp, b []byte, start, end, targetPriority in
 
 	for i := start; i <= end; i++ {
 		if hasAnchors {
-			state = re.applyContextToState(dfa, state, ir.CalculateContext(b, i), i, currentPrio, innerTarget, regs)
+			state = re.applyContextToState(dfa, state, ir.CalculateContext(b, i), i, &currentPrio, innerTarget, regs)
 		}
+
 		if i == end {
 			break
 		}
@@ -463,7 +464,7 @@ func bitParallelExecLoop(re *Regexp, b []byte) (int, int, int, uint64) {
 	return bestStart, bestEnd, bestPriority, 0
 }
 
-func (re *Regexp) applyContextToState(d *ir.DFA, state ir.StateID, context syntax.EmptyOp, pos int, currentPrio int, targetPrio int, regs []int) ir.StateID {
+func (re *Regexp) applyContextToState(d *ir.DFA, state ir.StateID, context syntax.EmptyOp, pos int, currentPrio *int, targetPrio int, regs []int) ir.StateID {
 	if state == ir.InvalidState || context == 0 || d.Stride() <= 256 {
 		return state
 	}
@@ -479,15 +480,17 @@ func (re *Regexp) applyContextToState(d *ir.DFA, state ir.StateID, context synta
 					rawNext := trans[idx]
 					nextID := rawNext & 0x7FFFFFFF
 					if rawNext != ir.InvalidState && nextID != state {
-						if rawNext < 0 && regs != nil {
+						if rawNext < 0 {
 							update := tagUpdates[tagUpdateIndices[idx]]
-							nextPrio := currentPrio + int(update.BasePriority)
-							for _, tu := range update.PreUpdates {
-								if nextPrio+int(tu.RelativePriority) <= targetPrio {
-									applyTags(tu.Tags, pos, regs)
+							nextPrio := *currentPrio + int(update.BasePriority)
+							if regs != nil {
+								for _, tu := range update.PreUpdates {
+									if nextPrio+int(tu.RelativePriority) <= targetPrio {
+										applyTags(tu.Tags, pos, regs)
+									}
 								}
 							}
-							currentPrio = nextPrio
+							*currentPrio = nextPrio
 						}
 						state = nextID
 						changed = true
@@ -548,9 +551,9 @@ func execLoop[T loopTrait](re *Regexp, b []byte) (int, int, int, uint64) {
 	}
 	hasAnchors := trait.HasAnchors()
 
-	for i := 0; i <= numBytes; i++ {
+	for i := 0; i <= numBytes; {
 		if hasAnchors {
-			state = re.applyContextToState(dfa, state, ir.CalculateContext(lb, i), i, currentPriority, 1<<30-1, nil)
+			state = re.applyContextToState(dfa, state, ir.CalculateContext(lb, i), i, &currentPriority, 1<<30-1, nil)
 		}
 		if state != ir.InvalidState {
 			idx := int(state)
@@ -564,8 +567,6 @@ func execLoop[T loopTrait](re *Regexp, b []byte) (int, int, int, uint64) {
 					}
 				}
 			}
-		} else if re.anchorStart {
-			break
 		}
 		if i < numBytes {
 			sidx := int(state)
@@ -578,18 +579,45 @@ func execLoop[T loopTrait](re *Regexp, b []byte) (int, int, int, uint64) {
 						update := tagUpdates[tagUpdateIndices[off]]
 						currentPriority += int(update.BasePriority)
 					}
-				} else {
-					state = ir.InvalidState
+					i++
+					continue
 				}
+			}
+		} else if i == numBytes {
+			break
+		}
+
+		// Restart search or return best match
+		if bestStart != -1 {
+			return bestStart, bestEnd, bestPriority, bestMatchTags
+		}
+		if re.anchorStart {
+			break
+		}
+
+		// Move to next starting position
+		currentPriority = (currentPriority/ir.SearchRestartPenalty + 1) * ir.SearchRestartPenalty
+		i = currentPriority / ir.SearchRestartPenalty
+		if i > numBytes {
+			break
+		}
+
+		// Prefix skip optimization
+		if len(re.prefix) > 0 {
+			skip := bytes.Index(lb[i:], re.prefix)
+			if skip < 0 {
+				break
+			}
+			i += skip
+			currentPriority += skip * ir.SearchRestartPenalty
+			if re.prefixState != ir.InvalidState {
+				state = re.prefixState
+				i += len(re.prefix)
 			} else {
-				state = ir.InvalidState
+				state = dfa.SearchState()
 			}
-			if state == ir.InvalidState {
-				if re.anchorStart {
-					break
-				}
-				state, currentPriority = dfa.SearchState(), currentPriority+ir.SearchRestartPenalty
-			}
+		} else {
+			state = dfa.SearchState()
 		}
 	}
 	return bestStart, bestEnd, bestPriority, bestMatchTags
