@@ -645,34 +645,49 @@ func (extendedCaptureTrait) HasAnchors() bool { return true }
 func (extendedCaptureTrait) IsCapture() bool  { return true }
 
 func fastExecLoop(re *Regexp, b []byte) (int, int, int, uint64) {
-	dfa := re.dfa
-	trans, tagUpdateIndices, tagUpdates, accepting := dfa.Transitions(), dfa.TagUpdateIndices(), dfa.TagUpdates(), dfa.Accepting()
-	numStates, numBytes := dfa.NumStates(), len(b)
-	lb := b[:numBytes]
+	d := re.dfa
+	trans := d.Transitions()
+	tagUpdateIndices := d.TagUpdateIndices()
+	tagUpdates := d.TagUpdates()
+	accepting := d.Accepting()
+	numStates := d.NumStates()
+	numBytes := len(b)
+
+	// Regexp fields
+	anchorStart := re.anchorStart
+	prefix := re.prefix
+	prefixState := re.prefixState
+
+	// BCE hints
+	if len(trans) == 0 {
+		return -1, -1, -1, 0
+	}
+	_ = trans[len(trans)-1]
+	if len(accepting) > 0 {
+		_ = accepting[len(accepting)-1]
+	}
+
 	bestStart, bestEnd, bestPriority, bestMatchTags, currentPriority := -1, -1, 1<<30-1, uint64(0), 0
-	state := dfa.SearchState()
-	if re.anchorStart {
-		state = dfa.MatchState()
+	state := d.SearchState()
+	if anchorStart {
+		state = d.MatchState()
 	}
 
 	for i := 0; i <= numBytes; {
-		if state != ir.InvalidState {
-			idx := int(state)
-			if idx >= 0 && idx < len(accepting) && accepting[idx] {
-				p := currentPriority + dfa.MatchPriority(state)
-				if p <= bestPriority {
-					bestPriority, bestEnd, bestMatchTags = p, i, dfa.MatchTags(state)
-					bestStart = p / ir.SearchRestartPenalty
-					if dfa.IsBestMatch(state) {
-						return bestStart, bestEnd, bestPriority, bestMatchTags
-					}
+		sidx := int(state)
+		if sidx >= 0 && sidx < len(accepting) && accepting[sidx] {
+			p := currentPriority + d.MatchPriority(state)
+			if p <= bestPriority {
+				bestPriority, bestEnd, bestMatchTags = p, i, d.MatchTags(state)
+				bestStart = p / ir.SearchRestartPenalty
+				if d.IsBestMatch(state) {
+					return bestStart, bestEnd, bestPriority, bestMatchTags
 				}
 			}
 		}
 		if i < numBytes {
-			sidx := int(state)
 			if sidx >= 0 && sidx < numStates {
-				off := (sidx << 8) | int(lb[i])
+				off := (sidx << 8) | int(b[i])
 				rawNext := trans[off]
 				if rawNext != ir.InvalidState {
 					state = rawNext & ir.StateIDMask
@@ -692,7 +707,7 @@ func fastExecLoop(re *Regexp, b []byte) (int, int, int, uint64) {
 		if bestStart != -1 {
 			return bestStart, bestEnd, bestPriority, bestMatchTags
 		}
-		if re.anchorStart {
+		if anchorStart {
 			break
 		}
 
@@ -704,28 +719,28 @@ func fastExecLoop(re *Regexp, b []byte) (int, int, int, uint64) {
 		}
 
 		// Warp Point / Prefix skip optimization
-		state = dfa.SearchState()
-		warpByte := dfa.WarpPoint(state)
+		state = d.SearchState()
+		warpByte := d.WarpPoint(state)
 		if warpByte >= 0 {
-			skip := bytes.Index(lb[i:], []byte{byte(warpByte)})
+			skip := bytes.Index(b[i:], []byte{byte(warpByte)})
 			if skip < 0 {
 				break
 			}
 			i += skip
 			currentPriority = (i * ir.SearchRestartPenalty)
 			// Move to target state
-			state = dfa.WarpPointState(state)
+			state = d.WarpPointState(state)
 			i++
-		} else if len(re.prefix) > 0 {
-			skip := bytes.Index(lb[i:], re.prefix)
+		} else if len(prefix) > 0 {
+			skip := bytes.Index(b[i:], prefix)
 			if skip < 0 {
 				break
 			}
 			i += skip
 			currentPriority = (i * ir.SearchRestartPenalty)
-			if re.prefixState != ir.InvalidState {
-				state = re.prefixState
-				i += len(re.prefix)
+			if prefixState != ir.InvalidState {
+				state = prefixState
+				i += len(prefix)
 			}
 		}
 	}
@@ -733,45 +748,58 @@ func fastExecLoop(re *Regexp, b []byte) (int, int, int, uint64) {
 }
 
 func extendedExecLoop(re *Regexp, b []byte) (int, int, int, uint64) {
-	dfa := re.dfa
-	trans, tagUpdateIndices, tagUpdates, accepting := dfa.Transitions(), dfa.TagUpdateIndices(), dfa.TagUpdates(), dfa.Accepting()
-	numStates, numBytes := dfa.NumStates(), len(b)
-	lb := b[:numBytes]
-	bestStart, bestEnd, bestPriority, bestMatchTags, currentPriority := -1, -1, 1<<30-1, uint64(0), 0
-	state := dfa.SearchState()
-	if re.anchorStart {
-		state = dfa.MatchState()
+	d := re.dfa
+	trans := d.Transitions()
+	tagUpdateIndices := d.TagUpdateIndices()
+	tagUpdates := d.TagUpdates()
+	accepting := d.Accepting()
+	numStates := d.NumStates()
+	numBytes := len(b)
+
+	// Regexp fields
+	anchorStart := re.anchorStart
+	prefix := re.prefix
+	prefixState := re.prefixState
+
+	// BCE hints
+	if len(trans) == 0 {
+		return -1, -1, -1, 0
 	}
-	usedAnchors := dfa.UsedAnchors()
+	_ = trans[len(trans)-1]
+	if len(accepting) > 0 {
+		_ = accepting[len(accepting)-1]
+	}
+
+	bestStart, bestEnd, bestPriority, bestMatchTags, currentPriority := -1, -1, 1<<30-1, uint64(0), 0
+	state := d.SearchState()
+	if anchorStart {
+		state = d.MatchState()
+	}
+	usedAnchors := d.UsedAnchors()
 
 	for i := 0; i <= numBytes; {
 		// OPTIMIZATION: Only calculate context and apply if used anchors are present.
-		// Word boundaries require check at every position.
-		// Text/Line anchors only matter at start, end, or near newlines.
 		if (usedAnchors&(syntax.EmptyWordBoundary|syntax.EmptyNoWordBoundary)) != 0 ||
 			(i == 0 && (usedAnchors&(syntax.EmptyBeginText|syntax.EmptyBeginLine)) != 0) ||
 			(i == numBytes && (usedAnchors&(syntax.EmptyEndText|syntax.EmptyEndLine)) != 0) ||
-			((usedAnchors&syntax.EmptyBeginLine) != 0 && i > 0 && lb[i-1] == '\n') ||
-			((usedAnchors&syntax.EmptyEndLine) != 0 && i < numBytes && lb[i] == '\n') {
-			state = re.applyContextToState(dfa, state, ir.CalculateContext(lb, i), i, &currentPriority, 1<<30-1, nil)
+			((usedAnchors&syntax.EmptyBeginLine) != 0 && i > 0 && b[i-1] == '\n') ||
+			((usedAnchors&syntax.EmptyEndLine) != 0 && i < numBytes && b[i] == '\n') {
+			state = re.applyContextToState(d, state, ir.CalculateContext(b, i), i, &currentPriority, 1<<30-1, nil)
 		}
-		if state != ir.InvalidState {
-			idx := int(state)
-			if idx >= 0 && idx < len(accepting) && accepting[idx] {
-				p := currentPriority + dfa.MatchPriority(state)
-				if p <= bestPriority {
-					bestPriority, bestEnd, bestMatchTags = p, i, dfa.MatchTags(state)
-					bestStart = p / ir.SearchRestartPenalty
-					if dfa.IsBestMatch(state) {
-						return bestStart, bestEnd, bestPriority, bestMatchTags
-					}
+		sidx := int(state)
+		if sidx >= 0 && sidx < len(accepting) && accepting[sidx] {
+			p := currentPriority + d.MatchPriority(state)
+			if p <= bestPriority {
+				bestPriority, bestEnd, bestMatchTags = p, i, d.MatchTags(state)
+				bestStart = p / ir.SearchRestartPenalty
+				if d.IsBestMatch(state) {
+					return bestStart, bestEnd, bestPriority, bestMatchTags
 				}
 			}
 		}
 		if i < numBytes {
-			sidx := int(state)
 			if sidx >= 0 && sidx < numStates {
-				off := (sidx << 8) | int(lb[i])
+				off := (sidx << 8) | int(b[i])
 				rawNext := trans[off]
 				if rawNext != ir.InvalidState {
 					state = rawNext & ir.StateIDMask
@@ -791,7 +819,7 @@ func extendedExecLoop(re *Regexp, b []byte) (int, int, int, uint64) {
 		if bestStart != -1 {
 			return bestStart, bestEnd, bestPriority, bestMatchTags
 		}
-		if re.anchorStart {
+		if anchorStart {
 			break
 		}
 
@@ -803,18 +831,18 @@ func extendedExecLoop(re *Regexp, b []byte) (int, int, int, uint64) {
 		}
 
 		// Warp Point / Prefix skip optimization
-		state = dfa.SearchState()
-		warpByte := dfa.WarpPoint(state)
+		state = d.SearchState()
+		warpByte := d.WarpPoint(state)
 		if warpByte >= 0 {
-			skip := bytes.Index(lb[i:], []byte{byte(warpByte)})
+			skip := bytes.Index(b[i:], []byte{byte(warpByte)})
 			if skip < 0 {
 				break
 			}
 
 			// Guarded warp verification
-			guard := dfa.WarpPointGuard(state)
+			guard := d.WarpPointGuard(state)
 			if guard != 0 {
-				if ir.CalculateContext(lb, i+skip)&guard == 0 {
+				if ir.CalculateContext(b, i+skip)&guard == 0 {
 					// Guard failed, skip this byte and continue search
 					i += skip + 1
 					currentPriority = (i * ir.SearchRestartPenalty)
@@ -825,18 +853,18 @@ func extendedExecLoop(re *Regexp, b []byte) (int, int, int, uint64) {
 			i += skip
 			currentPriority = (i * ir.SearchRestartPenalty)
 			// Move to target state
-			state = dfa.WarpPointState(state)
+			state = d.WarpPointState(state)
 			i++
-		} else if len(re.prefix) > 0 {
-			skip := bytes.Index(lb[i:], re.prefix)
+		} else if len(prefix) > 0 {
+			skip := bytes.Index(b[i:], prefix)
 			if skip < 0 {
 				break
 			}
 			i += skip
 			currentPriority = (i * ir.SearchRestartPenalty)
-			if re.prefixState != ir.InvalidState {
-				state = re.prefixState
-				i += len(re.prefix)
+			if prefixState != ir.InvalidState {
+				state = prefixState
+				i += len(prefix)
 			}
 		}
 	}
