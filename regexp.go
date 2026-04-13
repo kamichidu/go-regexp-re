@@ -12,6 +12,17 @@ import (
 	"github.com/kamichidu/go-regexp-re/syntax"
 )
 
+type matchStrategy uint8
+
+const (
+	strategyNone matchStrategy = iota
+	strategyLiteral
+	strategyBitParallel
+	strategyFast
+	strategyExtended
+	strategyLiteralBypass
+)
+
 type Regexp struct {
 	expr           string
 	numSubexp      int
@@ -24,8 +35,8 @@ type Regexp struct {
 	dfa            *ir.DFA
 	bpDfa          *ir.BitParallelDFA
 	literalMatcher ir.LiteralMatcher
-	match          func([]byte) (int, int, int)
 	subexpNames    []string
+	strategy       matchStrategy
 }
 
 type CompileOption struct{ MaxMemory int }
@@ -86,8 +97,8 @@ func CompileContextWithOption(ctx context.Context, expr string, opt CompileOptio
 			complete:       complete,
 			literalMatcher: literalMatcher,
 			prog:           prog,
+			strategy:       strategyLiteral,
 		}
-		res.bindMatchLoop()
 		return res, nil
 	}
 	// If Bit-parallel is possible, skip heavy DFA table construction.
@@ -116,32 +127,9 @@ func CompileContextWithOption(ctx context.Context, expr string, opt CompileOptio
 
 	res := &Regexp{expr: expr, numSubexp: numSubexp, prefix: []byte(prefixStr), prefixState: prefixState, complete: complete, anchorStart: anchorStart, anchorEnd: anchorEnd, prog: prog, dfa: dfa, bpDfa: bpDfa, subexpNames: subexpNames}
 	if complete && numSubexp == 0 {
-		res.match = func(b []byte) (int, int, int) {
-			if res.anchorStart && res.anchorEnd {
-				if bytes.Equal(b, res.prefix) {
-					return 0, len(b), 0
-				}
-				return -1, -1, -1
-			}
-			if res.anchorStart {
-				if bytes.HasPrefix(b, res.prefix) {
-					return 0, len(res.prefix), 0
-				}
-				return -1, -1, -1
-			}
-			if res.anchorEnd {
-				if bytes.HasSuffix(b, res.prefix) {
-					return len(b) - len(res.prefix), len(b), 0
-				}
-				return -1, -1, -1
-			}
-			if i := bytes.Index(b, res.prefix); i >= 0 {
-				return i, i + len(res.prefix), 0
-			}
-			return -1, -1, -1
-		}
+		res.strategy = strategyLiteralBypass
 	} else {
-		res.bindMatchLoop()
+		res.bindMatchStrategy()
 	}
 	return res, nil
 }
@@ -169,21 +157,41 @@ func isSimpleForBP(prog *syntax.Prog) bool {
 	}
 	return true
 }
-func (re *Regexp) bindMatchLoop() {
-	if re.literalMatcher != nil {
-		re.match = func(b []byte) (int, int, int) {
-			indices := re.literalMatcher.FindSubmatchIndex(b)
-			if indices == nil {
-				return -1, -1, -1
-			}
-			return indices[0], indices[1], 0
+
+func (re *Regexp) literalBypass(b []byte) (int, int, int) {
+	if re.anchorStart && re.anchorEnd {
+		if bytes.Equal(b, re.prefix) {
+			return 0, len(b), 0
 		}
+		return -1, -1, -1
+	}
+	if re.anchorStart {
+		if bytes.HasPrefix(b, re.prefix) {
+			return 0, len(re.prefix), 0
+		}
+		return -1, -1, -1
+	}
+	if re.anchorEnd {
+		if bytes.HasSuffix(b, re.prefix) {
+			return len(b) - len(re.prefix), len(b), 0
+		}
+		return -1, -1, -1
+	}
+	if i := bytes.Index(b, re.prefix); i >= 0 {
+		return i, i + len(re.prefix), 0
+	}
+	return -1, -1, -1
+}
+
+func (re *Regexp) bindMatchStrategy() {
+	if re.literalMatcher != nil {
+		re.strategy = strategyLiteral
 	} else if re.bpDfa != nil {
-		re.match = func(b []byte) (int, int, int) { i, j, k, _ := bitParallelExecLoop(re, b); return i, j, k }
+		re.strategy = strategyBitParallel
 	} else if re.dfa.HasAnchors() {
-		re.match = func(b []byte) (int, int, int) { i, j, k, _ := extendedExecLoop(re, b); return i, j, k }
+		re.strategy = strategyExtended
 	} else {
-		re.match = func(b []byte) (int, int, int) { i, j, k, _ := fastExecLoop(re, b); return i, j, k }
+		re.strategy = strategyFast
 	}
 }
 
@@ -197,9 +205,27 @@ func (re *Regexp) isGreedyMatch() bool {
 }
 
 func (re *Regexp) Match(b []byte) bool {
-	i, _, _ := re.match(b)
-	return i >= 0
+	var start int
+	switch re.strategy {
+	case strategyLiteralBypass:
+		start, _, _ = re.literalBypass(b)
+	case strategyLiteral:
+		indices := re.literalMatcher.FindSubmatchIndex(b)
+		if indices != nil {
+			start = indices[0]
+		} else {
+			start = -1
+		}
+	case strategyBitParallel:
+		start, _, _, _ = bitParallelExecLoop(re, b)
+	case strategyExtended:
+		start, _, _, _ = extendedExecLoop(re, b)
+	case strategyFast:
+		start, _, _, _ = fastExecLoop(re, b)
+	}
+	return start >= 0
 }
+
 func (re *Regexp) MatchString(s string) bool {
 	b := unsafe.Slice(unsafe.StringData(s), len(s))
 	return re.Match(b)
@@ -207,19 +233,30 @@ func (re *Regexp) MatchString(s string) bool {
 func (re *Regexp) NumSubexp() int                { return re.numSubexp }
 func (re *Regexp) LiteralPrefix() (string, bool) { return string(re.prefix), re.complete }
 
+func (re *Regexp) doMatch(b []byte) (int, int, int, uint64) {
+	switch re.strategy {
+	case strategyLiteralBypass:
+		start, end, prio := re.literalBypass(b)
+		return start, end, prio, 0
+	case strategyLiteral:
+		indices := re.literalMatcher.FindSubmatchIndex(b)
+		if indices == nil {
+			return -1, -1, -1, 0
+		}
+		return indices[0], indices[1], 0, 0
+	case strategyBitParallel:
+		return bitParallelExecLoop(re, b)
+	case strategyExtended:
+		return extendedExecLoop(re, b)
+	case strategyFast:
+		return fastExecLoop(re, b)
+	default:
+		return -1, -1, -1, 0
+	}
+}
+
 func (re *Regexp) FindSubmatchIndex(b []byte) []int {
-	if re.literalMatcher != nil {
-		return re.literalMatcher.FindSubmatchIndex(b)
-	}
-	var start, end, targetPriority int
-	var matchTags uint64
-	if re.bpDfa != nil {
-		start, end, targetPriority, matchTags = bitParallelExecLoop(re, b)
-	} else if re.dfa.HasAnchors() {
-		start, end, targetPriority, matchTags = extendedExecLoop(re, b)
-	} else {
-		start, end, targetPriority, matchTags = fastExecLoop(re, b)
-	}
+	start, end, targetPriority, matchTags := re.doMatch(b)
 	if start < 0 {
 		return nil
 	}
