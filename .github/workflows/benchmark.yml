@@ -23,23 +23,39 @@ jobs:
       - name: Run Go standard regexp benchmark
         run: |
           cd internal/benchmark
-          go test -bench . -benchmem -tags goregexp -count 5 > ../../benchmark-std.txt
+          go test -bench . -benchmem -tags goregexp -count 5 | tee ../../benchmark-std.txt
 
       - name: Run go-regexp-re benchmark
         run: |
           cd internal/benchmark
-          go test -bench . -benchmem -tags goregexpre -count 5 > ../../benchmark-re.txt
+          go test -bench . -benchmem -tags goregexpre -count 5 | tee ../../benchmark-re.txt
 
       - name: Compare results
         run: |
-          go tool benchstat benchmark-std.txt benchmark-re.txt > comparison.txt
+          go tool benchstat benchmark-std.txt benchmark-re.txt | tee comparison.txt
           echo "### Benchmark Comparison: Go Standard vs go-regexp-re" >> $GITHUB_STEP_SUMMARY
           echo "The following comparison uses \`benchstat\` to show the performance difference." >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
           cat comparison.txt >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
 
-      - name: Upload results
+      - name: Store and Push Benchmark Trend
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: go-regexp-re Benchmark Trend
+          tool: 'go'
+          output-file-path: benchmark-re.txt
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: true
+          # Alert when performance drops by 10% (1.1x degradation)
+          alert-threshold: '110%'
+          comment-on-commit: true
+          # Fail the CI if performance regresses to catch issues early
+          fail-on-alert: true
+          gh-pages-branch: gh-pages
+          benchmark-data-dir-path: results/trend
+
+      - name: Upload results as artifacts
         uses: actions/upload-artifact@v4
         with:
           name: benchmark-results
