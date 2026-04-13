@@ -26,72 +26,72 @@ Every implementation must adhere to these pillars to ensure maximum performance:
 ### 2.4 Execution Switching Strategy
 To maximize throughput, the engine MUST select the most efficient execution loop based on pattern characteristics:
 - **0-Pass (Literal Bypass)**: Selected for pure constant strings. Bypasses all regex engines using SIMD-accelerated standard library search (e.g., `bytes.Index`).
-- **Bit-parallel Path (Glushkov BP-DFA)**: The **"Express Pass"** for patterns with 64 or fewer NFA instructions, no anchors, and no non-greedy operators. Utilizes ultra-fast `uint64` bitwise operations to eliminate memory loads.
-- **Fast Path (Pure DFA)**: Automatically selected for larger anchor-free patterns. It utilizes a minimalist table-based execution loop with zero boundary/context checks.
-- **Extended Path (Virtual Byte Insertion)**: Selected for patterns with anchors (e.g., `^`, `$`, `\b`). It employs "Virtual Bytes" (indices 256+) injected at character boundaries.
-- **Submatch Path (Hybrid 2-Pass)**: Selected when submatches are requested. It utilizes a high-speed DFA/BP scan to identify match boundaries, followed by an optimized NFA rescan for precise submatch extraction.
+- **Bit-parallel Path (Glushkov BP-DFA)**: The **"Express Pass"** for small, simple patterns. Utilizes ultra-fast `uint64` bitwise operations to eliminate memory loads.
+- **Fast Path (Pure DFA)**: Automatically selected for larger anchor-free patterns. It utilizes a minimalist table-based execution loop.
+- **Extended Path (Virtual Byte Insertion)**: Selected for patterns with anchors (e.g., `^`, `$`, `\b`).
+- **Submatch Path (DFA-First Hybrid)**: Selected when submatches are requested. It utilizes high-speed DFA/BP boundaries discovery followed by a specialized rescan phase.
 
-### 2.5 Submatch Extraction Architecture (Hybrid 2-Pass Strategy)
-The engine adopts a **Hybrid 2-Pass** strategy as its definitive strategy for submatch extraction, balancing DFA execution speed with NFA coordinate precision.
+### 2.5 Submatch Extraction Architecture (DFA-First Hybrid)
+The engine follows a **DFA-First Hybrid** strategy to guarantee both performance and Go-compatible precision.
 
-- **Phase 1: DFA/BP Boundary Scan**: A high-speed DFA (table-based) or Bit-parallel engine identifies the overall match boundaries `[start, end]` and determines the winning **Absolute Priority** using leftmost-first semantics.
-- **Phase 2: Targeted NFA Rescan**: An optimized NFA rescans ONLY within the identified `[start, end]` bounds. This eliminates "1-byte Index Dragging" and coordinate mismatches inherent in pure DFA tagging.
-- **Separation of Concerns**: The DFA/BP is responsible for the deterministic determination of "Match Existence" and "Overall Boundaries," while the NFA is responsible for the precise extraction of "Internal Tag Positions" within that confirmed range.
+- **Phase 1: Boundary Discovery**: High-speed DFA scan or Bit-parallel scan determines the match boundaries `[start, end]`.
+- **Phase 2: Strategy Dispatch**:
+    - **Principal (DFA Rescan)**: For non-greedy or literal-heavy patterns, a second DFA pass (rescan) is used to extract submatches deterministically.
+    - **Exception (Targeted NFA Rescan)**: For patterns involving greedy operators (e.g., `a*`, `a+`) or when DFA is skipped (Bit-parallel only), an optimized NFA rescans the confirmed `[start, end]` range.
+- **Priority Sync**: During DFA rescan, the engine MUST synchronize the relative priority with the absolute winner identified in Phase 1 using `<=` matching to capture all valid tag candidates.
 
-### 2.6 Bit-parallel DFA (BP-DFA) Implementation
-For small patterns (NFA nodes $\le 64$), the engine MUST prioritize Bit-parallel execution:
-- **Zero Memory Load**: State transitions must be performed using `uint64` bitwise OR/AND/SHIFT against pre-computed `bpCharMasks`.
-- **Leftmost-First Bit Tracking**: Start positions for each bit (NFA thread) must be tracked using a fixed-size `[64]int` array to maintain leftmost-first semantics without heap allocation.
-- **O(1) Priority Selection**: The winning path must be identified using `bits.TrailingZeros64` on the result of `state & matchMask`.
+### 2.6 Isolated Bit-parallel DFA (BP-DFA)
+For patterns with 64 or fewer NFA nodes, the engine utilizes a specialized Bit-parallel implementation.
+- **Physical Separation**: BP-DFA data (bitmasks, epsilons) MUST be stored in a dedicated `BitParallelDFA` structure, physically isolated from the primary table-based `DFA`.
+- **Zero Memory Load Transitions**: Transitions must be performed using `uint64` bitwise operations.
 
-### 2.7 Prefix-Skip Optimization (SIMD Acceleration)
+### 2.7 Architectural Shortcut (Compilation Efficiency)
+To minimize compilation overhead, the engine MUST use an **Architectural Shortcut** for simple patterns.
+- **Skip Heavy DFA**: If a pattern is simple (NFA nodes $\le 64$, no anchors, no non-greedy), the engine MUST skip the heavy DFA transition table construction and only build the `BitParallelDFA`.
+- **Safety Guard**: Complex repetitions that risk state explosion MUST still undergo DFA construction to trigger the 64MiB memory limit protection, even if the instruction count is low.
+
+### 2.8 Prefix-Skip Optimization (SIMD Acceleration)
 - **Mandatory Prefix Extraction**: During compilation, the longest constant prefix is extracted.
-- **SIMD-Accelerated Skipping**: All execution loops (DFA, BP, and 0-Pass) MUST use `bytes.Index` to rapidly skip non-matching segments.
-
-### 2.8 Literal Match Bypass (0-Pass Strategy)
-- **Direct Literal Resolution**: If the entire pattern is a constant literal and no capturing groups are present, the engine MUST completely bypass all DFA/BP stages and use `bytes.Index` directly.
+- **SIMD-Accelerated Skipping**: All execution loops MUST use `bytes.Index` to rapidly skip non-matching segments.
 
 ### 2.9 Pure Go (No CGO)
-- **Zero Overhead**: CGO is strictly prohibited to avoid context-switching overhead and maintain Go's native portability.
+- **Zero Overhead**: Native Go only. CGO is strictly prohibited.
 
 ### 2.10 Priority Normalization & Absolute Tracking
-To achieve Go-compatible leftmost-first matching without state explosion:
-- **Priority Normalization**: During DFA construction, NFA path priorities within each state MUST be normalized (subtracting the minimum priority).
-- **Absolute Priority Tracking**: The engine MUST track the cumulative priority (including `SearchRestartPenalty`) to identify the true leftmost-first match when multiple potential start positions exist in a single scan.
+- **Priority Normalization**: During DFA construction, NFA path priorities within each state MUST be normalized.
+- **Absolute Priority Tracking**: The engine MUST track cumulative priority to identify the true leftmost-first match during Phase 1.
 
 ### 2.11 Early Exit Optimization (IsBestMatch)
-- **Deterministic Finality**: If a DFA state identifies a match whose priority is unbeatable by any other active path (`IsBestMatch == true`), the engine MUST stop scanning for the current start position. This is critical for non-greedy patterns (`*?`).
+- **Deterministic Finality**: If a DFA state identifies a match whose priority is unbeatable (`IsBestMatch == true`), the engine MUST stop scanning immediately for the current start position.
 
 ### 2.12 State Explosion Protection (64MiB Absolute Limit)
 - **Memory Threshold**: The DFA transition table is strictly limited to a maximum estimated size of **64MiB**.
-- **Graceful Failure**: If a pattern exceeds this limit, return the error `regexp: pattern too large or ambiguous`. Do NOT fall back to NFA for the first pass; the engine must maintain $O(n)$ time guarantees via DFA.
+- **Graceful Failure**: If a pattern exceeds this limit, return `regexp: pattern too large or ambiguous`.
 
 ### 2.13 Syntax-Level Optimization & AST Rewriting
-Before DFA compilation, the syntax tree MUST be optimized to reduce redundancy and mitigate state explosion.
-- **Prefix/Suffix Factoring**: Identical AST nodes MUST be factored out (e.g., `a*c|b*c` -> `(?:a*|b*)c`) to reduce ambiguity and state divergence.
-- **Simplification**: Use `syntax.Simplify` and `syntax.Optimize` to normalize the pattern structure before generating instructions.
+- **Factoring**: Identical AST nodes MUST be factored out (e.g., `a*c|b*c` -> `(?:a*|b*)c`) to reduce state divergence.
+- **Simplification**: Use `syntax.Simplify` and `syntax.Optimize` to normalize pattern structure.
 
-## 3. Feature Selection Policy (Performance over Features)
+## 3. Feature Selection Policy
 
 ### 3.1 Supported Features
-- **Standard Syntax Compatibility**: Accept `syntax.Prog` instruction sequences from the standard Go parser.
-- **Anchors & Boundaries**: Support via the **Virtual Byte Insertion** mechanism.
-- **Capturing Groups**: Supported via the **Hybrid 2-Pass Strategy**.
+- **Standard Syntax**: Support `syntax.Prog`.
+- **Anchors & Boundaries**: Supported via Virtual Byte Insertion.
+- **Capturing Groups**: Supported via the DFA-First Hybrid Strategy.
 
 ### 3.2 Excluded Features
-- **Backreferences**: Strictly excluded to maintain $O(n)$ complexity.
-- **Dynamic Lookaround**: Restricted to maintain $O(n)$ and prevent backtracking.
-- **POSIX Semantics**: Leftmost-longest matching is explicitly unsupported.
+- **Backreferences & Dynamic Lookaround**: Strictly excluded.
+- **POSIX Semantics**: Unsupported to maintain $O(n)$.
 
 ## 4. Engineering & Validation Standards
-- **Memory Accumulation Prevention**: During mass testing (thousands of patterns), compiled `Regexp` objects must be disposed of promptly. Do NOT use persistent global caches for unique test patterns.
-- **Explicit GC Discipline**: In test suites and heavy build processes, invoke `runtime.GC()` strategically after processing complex patterns to prevent OOM Killer intervention.
-- **100% DFA Validation**: DFA match boundaries MUST strictly match the standard library's leftmost-first boundaries. Discrepancies are bugs in DFA construction (tag/priority logic) or AST optimization.
+- **Memory Accumulation Prevention**: Dispose of compiled `Regexp` objects promptly during mass testing.
+- **Explicit GC Discipline**: Use `runtime.GC()` strategically after processing complex patterns to prevent OOM.
+- **100% DFA Validation**: DFA match boundaries MUST strictly match the standard library's boundaries.
 
 ## 5. Coding Conventions
-- **Explicit Aliasing for Standard Regexp Packages**: 
-  - `regexp` must be imported as `goregexp`.
-  - `regexp/syntax` must be imported as `gosyntax`.
+- **Explicit Aliasing**:
+  - `regexp` -> `goregexp`
+  - `regexp/syntax` -> `gosyntax`
 
 ---
-**Note**: If a user request involves changing the 64MiB limit or re-introducing persistent caches that risk OOM, you MUST highlight the impact on system stability and resource mandates before proceeding.
+**Note**: Any modification to the compilation shortcut or rescan dispatch must be validated against the **"Efficiency First, Precision Mandatory"** principle.

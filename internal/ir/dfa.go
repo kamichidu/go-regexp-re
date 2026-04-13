@@ -507,9 +507,18 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 					return errBuild
 				}
 				idx := int(currentDfaID)*d.stride + 256 + bit
-				if minP != 0 || len(nextRes.updates) > 0 {
+
+				var postUpdates []PathTagUpdate
+				if len(nextRes.updates) > 0 {
+					postUpdates = make([]PathTagUpdate, len(nextRes.updates))
+					for j, u := range nextRes.updates {
+						postUpdates[j] = PathTagUpdate{RelativePriority: u.RelativePriority - int32(minP), Tags: u.Tags}
+					}
+				}
+
+				if minP != 0 || len(postUpdates) > 0 {
 					d.transitions[idx] = nextDfaID | TaggedStateFlag
-					d.tagUpdateIndices[idx] = addUpdate(TransitionUpdate{BasePriority: int32(minP), PreUpdates: nextRes.updates})
+					d.tagUpdateIndices[idx] = addUpdate(TransitionUpdate{BasePriority: int32(minP), PreUpdates: postUpdates})
 				} else {
 					d.transitions[idx] = nextDfaID
 				}

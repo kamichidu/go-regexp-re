@@ -304,7 +304,11 @@ func TestStateExplosion(t *testing.T) {
 				if err != nil {
 					t.Errorf("Compile(%q) failed: %v", tt.pattern, err)
 				} else {
-					t.Logf("Pattern %q successfully compiled with %d DFA states", tt.pattern, re.dfa.TotalStates())
+					states := 0
+					if re.dfa != nil {
+						states = re.dfa.TotalStates()
+					}
+					t.Logf("Pattern %q successfully compiled with %d DFA states", tt.pattern, states)
 				}
 			}
 			// Cleanup after potential explosion
