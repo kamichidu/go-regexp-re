@@ -1,0 +1,28 @@
+= AST-Level Optimization & Factoring
+:sectnums:
+
+== Concept
+
+Before a regular expression is converted into an NFA or DFA, its Abstract Syntax Tree (AST) undergoes a series of strategic rewrites. The goal is to simplify the expression and factor out common sub-expressions, which prevents "state divergence" and ensures the resulting state machine is as compact as possible.
+
+== Key Techniques
+
+=== 1. Common Suffix/Prefix Factoring
+When an expression contains alternations with identical prefixes or suffixes, the engine merges them.
+* **Example**: `a*c|b*c` is rewritten into `(?:a*|b*)c`.
+* **Impact**: Without factoring, the DFA would need to track two independent paths for `a*` and `b*` before merging at `c`, potentially doubling the number of states. By factoring early, the engine collapses these paths into a single terminal sequence, significantly reducing memory footprint and improving cache locality.
+
+=== 2. Syntax Simplification (`syntax.Simplify`)
+The engine utilizes the standard `regexp/syntax` package's simplification pass to normalize the pattern.
+* **Transformations**:
+  - `x{3,5}` -> `xxx(x(x|)|)`
+  - `[a-z]` -> Byte-range classes
+* **Benefit**: By reducing the variety of operators to a core set, the NFA-to-DFA converter can focus on a few primitive transitions, leading to more predictable and optimized code generation.
+
+=== 3. Literal Prefix Extraction
+During the AST traversal, the engine extracts the longest possible fixed-string prefix from the entire expression.
+* **Usage**: This extracted prefix is then used to drive the **Anchor-Aware Guarded SIMD Warp**. Even if the pattern is complex, the engine knows it must at least find this literal sequence before the full state machine needs to be engaged.
+
+== Strategic Importance
+
+AST optimization is not just about making the DFA smaller; it's about **preventing the exponential explosion of states** in complex alternations. By cleaning the "noise" at the AST level, we ensure that the subsequent $O(n)$ execution phase operates on the most efficient representation of the logic, minimizing the constant-factor overhead.

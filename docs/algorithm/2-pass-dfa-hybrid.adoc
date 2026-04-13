@@ -1,0 +1,28 @@
+= DFA-First Hybrid (2-Pass Strategy)
+:sectnums:
+
+== Concept
+
+DFAs are traditionally poor at extracting submatches (capturing groups). This is because when multiple NFA paths merge into a single DFA state, the history of which path "won" is lost. To extract submatches identical to the Go standard library, this project employs a "2-Pass Strategy."
+
+== The Two Phases
+
+=== Phase 1: Boundary Discovery
+* **Objective**: Find the `[start, end]` boundaries of a match as quickly as possible.
+* **Mechanism**: Uses a "pure DFA loop" or a loop with minimal tagging.
+
+=== Phase 2: Localized Forward Scan
+* **Objective**: Extract precise submatch information within the confirmed boundary.
+* **Mechanism**:
+  - Identifies the "absolute winning path ID" (NFA state ID) from Phase 1.
+  - Performs a rescan of only the target segment using a DFA or BP-DFA.
+  - **Lazy-Tagging**: Instead of "baking" tags into the DFA construction, it selects the optimal tags from "living paths" at runtime.
+
+== Key Technology: Winning Absolute Priority
+The engine maintains a temporary stack for multiple tag candidates within each state. At the end of the match, it picks only the tags associated with the absolute winner identified in Phase 1 (Leftmost-First). This prevents coordinate "overtakes" or "drifts."
+
+== Advantages
+
+* **$O(n)$ Guarantees**: All steps stay within a constant multiple of the input length; no backtracking.
+* **Memory Bandwidth Savings**: Minimizes writes in Phase 1, keeping CPU caches hot for the data in Phase 2.
+* **Full Standard Compatibility**: Guarantees results identical to the `regexp` package, even for complex patterns like `a*(a)`.

@@ -1,0 +1,32 @@
+= Memory-Efficient DFA Construction
+:sectnums:
+
+== Concept
+
+When constructing a DFA for a large set of patterns (e.g., 10,000+ regexps), memory usage and GC overhead become the biggest bottlenecks. This algorithm manages to stay within a 64MiB limit through allocation-free and pointer-free construction.
+
+== Implementation Details
+
+=== 1. Allocation-Free Hot Loop
+The construction loop eliminates `make` and `append` operations.
+It pre-allocates a fixed-size `scratchBuf` and reuses it across iterations to minimize heap allocations.
+
+=== 2. Pointer-Free NFA Paths
+The data structures representing NFA paths and state sets are entirely pointer-free.
+* **Benefits**:
+  - Eliminates the need for GC to scan these structures, dramatically reducing pause times during large builds.
+  - Allows structures to be directly serialized for disk or file-based offloading.
+
+=== 3. State ID Information Embedding
+Maximizes the use of 32-bit state IDs.
+* **Bit 31 (MSB)**: `TaggedStateFlag` (indicates tag updates are needed).
+* **Bit 30**: `AnchorVerifyFlag` (indicates anchor verification is required).
+* **Bit 0-29**: Pure `StateID` (supports up to ~500 million states).
+
+This allows a single `int32` element in the transition table to represent both the "next state" and any "side effects," minimizing the need for external table lookups.
+
+== Advantages
+
+* **Scalability**: Can compile massive datasets (like a list of 125,000 zip codes) within a fixed memory limit.
+* **Low GC Overhead**: Pointer-free structures prevent the Go runtime from becoming overwhelmed during large-scale compilation.
+* **Seamless Offloading**: When `MaxMemory` is exceeded, pointer-free structures allow for direct offloading to file-based storage.

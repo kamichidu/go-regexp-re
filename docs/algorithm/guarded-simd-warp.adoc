@@ -1,0 +1,56 @@
+= Anchor-Aware Guarded SIMD Warp
+:sectnums:
+
+== Concept
+
+A SIMD acceleration technique designed to maximize scanning speed for regular expressions containing anchors (`^`, `$`, `\b`, etc.). Traditionally, anchors cause the engine to fallback to byte-by-byte scanning. This algorithm combines "speculative SIMD skipping" with "guarded post-verification" to maintain performance.
+
+== Guarded Warp Mechanism
+
+The following diagram illustrates how the engine uses SIMD to skip non-matching segments while preserving anchor integrity.
+
+[source]
+----
+Input Stream:
+ [h][t][t][p][:][/][/][a][n][c][h][o][r][h][t][t][p]...
+                     |               |
+                     +-- Anchor? (\b) +-- Match? (h)
+
+Execution Flow:
+
+1. SIMD Skip Phase (Warp)
+   Target: 'h' (Literal Prefix)
+   [h][t][t][p]...[a][n][c][h][o][r][h][t][t][p]
+   -------------------------------->> [h] found!
+                                      |
+2. Guard Verification Phase           |
+   State ID contains Bit 30 (AnchorVerifyFlag)
+   [a][n][c][h][o][r][h]
+                  ^   ^
+                  |   |
+          Check i-1   Current (i)
+          Is input[i-1] a word char? ('r' is yes)
+          Is input[i] a word char?   ('h' is yes)
+          ---------------------------------------
+          Result: \b (boundary) is FALSE -> Resume Scan
+----
+
+== Architecture
+
+=== 1. Stride 256 Regression and Shift Optimization
+The engine fixes the transition table stride to 256 (no virtual bytes).
+This allows address calculation using a simple bit shift: `state << 8 + byte`, eliminating multiplication instructions at the CPU level.
+
+=== 2. Guard-Verified SIMD Warp
+* **Speculative Skipping**: Uses SIMD instructions to search for literal segments within the pattern (e.g., searching for 'H' in `\bHTTP`).
+* **AnchorVerifyFlag (Bit 30)**:
+  - Uses Bit 30 of the state transition ID as a flag.
+  - When the SIMD search hits a match, it checks if this flag is set on the target state ID.
+  - Only then does it verify the anchor condition using the preceding byte (`input[i-1]`).
+* **Fallback**: If the condition is not met, the engine follows the standard transition table.
+
+== Advantages
+
+* **SIMD Continuity**: SIMD skipping does not stop even when anchors are present; it only performs minimal verification upon hits.
+* **Cache Efficiency**: Stride 256 ensures transition tables are well-aligned with cache lines, improving memory locality.
+* **Branchless Verification**: Anchor logic is implemented using bitwise operations to minimize branch prediction misses.

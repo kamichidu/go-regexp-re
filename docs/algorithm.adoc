@@ -1,0 +1,63 @@
+= Technical Deep Dive: go-regexp-re Algorithms
+:toc: left
+:toclevels: 3
+:sectnums:
+
+== Overview
+
+`go-regexp-re` is a high-density, high-performance Deterministic Finite Automaton (DFA) engine implemented in **Pure Go**.
+The project's primary objective is to push the boundaries of regular expression processing speed within the Go ecosystem while maintaining 100% compatibility with the standard `regexp` library's `leftmost-first` matching semantics.
+
+By combining $O(n)$ time complexity with advanced SIMD acceleration and bit-parallel processing, this engine explores the theoretical and physical limits of string matching in a memory-safe, native Go environment.
+
+== Core Architectural Innovations
+
+=== 1. xref:algorithm/0-pass-literal-bypass.adoc[0-Pass (Literal Bypass) & Capture Template]
+An $O(1)$ bypass strategy for pure literals and anchored fixed strings, extracting submatches without driving the state machine.
+
+=== 2. xref:algorithm/bit-parallel-dfa.adoc[Bit-parallel DFA (BP-DFA)]
+A specialized execution path for small patterns using `uint64` bit vectors to achieve branchless state transitions and anchor resolution.
+
+=== 3. xref:algorithm/guarded-simd-warp.adoc[Anchor-Aware Guarded SIMD Warp]
+A speculative SIMD skipping logic designed to maintain high-speed scanning even in the presence of anchors.
+
+=== 4. xref:algorithm/2-pass-dfa-hybrid.adoc[DFA-First Hybrid (2-Pass Strategy)]
+A deterministic strategy that reconciles DFA scanning performance with the precise submatch extraction required by the Go standard library.
+
+=== 5. xref:algorithm/memory-efficient-construction.adoc[Memory-Efficient DFA Construction]
+An allocation-free and pointer-free construction algorithm designed to scale to massive pattern sets within strict memory constraints.
+
+=== 6. xref:algorithm/implementation-techniques.adoc[High-Efficiency Implementation Techniques]
+Advanced Go-specific optimizations, including manual loop monomorphization and byte-level UTF-8 trie expansion.
+
+=== 7. xref:algorithm/ast-optimization.adoc[AST-Level Optimization & Factoring]
+Pre-compilation AST rewriting and common sub-expression factoring to minimize state divergence and memory footprint.
+
+== Design Philosophy
+
+* **Pure Go (Zero CGO)**: Achieving maximum performance without sacrificing portability or introducing the overhead of C-interop.
+* **Optimization for Physical Constraints**: Strategic alignment with CPU cache lines, pipeline efficiency, and Go's runtime characteristics.
+* **Deterministic Guarantees**: Ensuring $O(n)$ time complexity to prevent ReDoS (Regular Expression Denial of Service) and provide predictable latency.
+* **Precision Mandatory**: Performance enhancements never compromise the exact matching behavior defined by Go's standard `regexp` package.
+
+== Explicit Design Trade-offs & Incompatibilities
+
+The project makes deliberate sacrifices to achieve its performance targets:
+
+=== 1. Shift to Compilation
+Complexity is pushed from execution to the `Compile` phase. The engine performs exhaustive NFA-to-DFA conversion, DFA minimization, and AST optimization during compilation. While this ensures ultra-fast execution, it results in longer compilation times compared to NFA engines.
+
+=== 2. Memory-Centric Architecture
+Performance is essentially "bought" with memory. A single DFA state occupies 1KB (256 * 4 bytes). A pattern with thousands of states can consume significant memory (e.g., 64MiB+). While the engine provides `Memory-Efficient Construction` to manage this, memory consumption will always be higher than the standard library.
+
+=== 3. State Explosion Protection (MaxMemory)
+DFA construction can lead to an exponential explosion of states for patterns with high ambiguity (e.g., multiple overlapping wildcards). To prevent system exhaustion (OOM), `go-regexp-re` enforces a configurable memory limit.
+- **Default Limit**: 64MiB.
+- **Failure Mode**: If a pattern exceeds the limit, the compiler returns an error: `regexp: pattern too large or ambiguous`.
+- **Mitigation**: Users must either simplify the pattern or explicitly increase the `MaxMemory` via `CompileOption`.
+
+=== 4. No POSIX Semantics
+POSIX regex semantics are explicitly unsupported. Following POSIX would break the $O(n)$ guarantee and introduce complex branching that would cripple the DFA's throughput.
+
+=== 5. Byte-Oriented vs. Rune-Oriented
+By scanning raw bytes, we achieve maximum CPU throughput. However, this means we cannot emulate the standard library's behavior of matching invalid UTF-8 bytes with `\uFFFD`. We treat all inputs as a raw byte stream.

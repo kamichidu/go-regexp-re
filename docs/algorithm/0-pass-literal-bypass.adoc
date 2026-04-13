@@ -1,0 +1,22 @@
+= 0-Pass (Literal Bypass) & Capture Template
+:sectnums:
+
+== Concept
+
+Many regular expressions are effectively just fixed strings (literals) or anchored literals. The `0-Pass` strategy detects these cases and bypasses the state machine entirely, delegating the search to SIMD-accelerated standard library functions like `bytes.Index`.
+
+== Algorithm Mechanism
+
+1. **Pattern Analysis**: During compilation, the engine identifies whether a pattern is a simple literal such as `^abc$`, `^abc`, or `abc$`.
+2. **Capture Template Generation**:
+   - If the expression contains capturing groups (e.g., `^(abc)$`), the engine pre-calculates the relative start and end positions of each group from the match's head.
+   - This pre-calculated offset map is called a "Capture Template."
+3. **Execution**:
+   - The engine uses `bytes.Index` or `bytes.HasPrefix` to locate the match.
+   - On a successful match, it uses the template to generate submatch indices in $O(1)$ time.
+
+== Advantages
+
+* **Zero State Transition Cost**: No need to access DFA transition tables.
+* **Maximum SIMD Utilization**: Leverages Go's standard library, which utilizes CPU-specific instructions like `PCMPESTRI`.
+* **Submatch Extraction Speed**: Eliminates the overhead of loop-based tag recording by replacing it with simple addition.

@@ -1,0 +1,71 @@
+= Bit-parallel DFA (BP-DFA)
+:sectnums:
+
+== Concept
+
+The BP-DFA is a specialized, branchless execution path implemented in Pure Go for patterns with 64 or fewer states.
+By leveraging bitwise operations on `uint64` vectors, it eliminates memory loads and executes almost entirely within CPU registers, targeting the theoretical speed limit of string matching on modern hardware.
+
+== Bit-parallel State Representation
+
+The BP-DFA uses a single `uint64` to represent the active set of NFA states. Each bit corresponds to a specific NFA state, with the bit position defining its priority.
+
+[source]
+----
+ uint64 State Vector:
+ MSB (Bit 63)                                          LSB (Bit 0)
+  |                                                     |
+ [ ] [ ] [ ] ... [ ] [ ] [ ] [ ] [ ] [ ] [ ] [ ] [ ] [ ] [1]
+  |               |   |   |   |   |   |   |   |   |   |   |
+  +-------+-------+---+---+---+---+---+---+---+---+---+---+
+          |           |   |   |   |   |   |   |   |   |   |
+      Low Priority    |   |   |   |   |   |   |   |   | Higher Priority
+                      |   |   |   |   |   |   |   |   | (Leftmost-First)
+                      |   |   |   |   |   |   |   |   +-- Start State / Prio 0
+                      |   |   |   |   |   |   |   +------ State 1 / Prio 1
+                      |   |   |   |   |   |   +---------- State 2 / Prio 2
+----
+
+== Core Transition Logic
+
+The transition is performed by shifting the state vector and applying a character mask. This allows the engine to track all possible matching paths simultaneously in constant time.
+
+[source]
+----
+1. Shift & Insert: (state << 1 | 1)
+   Moves all active paths forward and seeds a new match at the start state.
+
+   Before: [0][0][0][1][0][1]
+   After:  [0][0][1][0][1][1] (LSB is always set to 1 to allow starting new matches)
+
+2. Masking: & masks[input[i]]
+   Filters the active paths based on the current input byte.
+
+   Shifted: [0][0][1][0][1][1]
+   Mask 'a': [0][0][1][1][0][1] (States that can transition on 'a')
+   ---------------------------
+   Result:  [0][0][1][0][0][1] (Only bits 0 and 3 survived)
+
+3. Context Filtering: & bp.ContextMasks[currContext]
+   Filters paths based on anchor conditions (e.g., ^, $, \b).
+
+   Result:  [0][0][1][0][0][1]
+   Context: [0][0][0][1][1][1] (Only bits 0, 1, 2 are valid for current boundary)
+   ---------------------------
+   Final:   [0][0][0][0][0][1] (Only path with highest priority survived context check)
+----
+
+== Key Technologies
+
+=== 1. Context-Aware Anchor Resolution
+Rather than using branching or virtual bytes, the BP-DFA uses pre-compiled `ContextMasks [8][256]uint64`. This aggregates the character classes and boundary conditions into a single bitwise AND.
+This ensures that anchors like `\b`, `^`, and `$` are resolved with the same $O(1)$ cost as matching a literal character.
+
+=== 2. Winning Absolute Priority
+In a bit-parallel environment, multiple NFA paths can overlap. The engine resolves submatch priorities at the bit-level, ensuring that the "absolute winning path" is determined deterministically without the overhead of tracking individual path histories at runtime.
+
+== Advantages
+
+* **Pure Go High Performance**: Achieves performance comparable to low-level C implementations by aligning perfectly with the Go compiler's register allocation.
+* **L1 Cache Optimization**: The data structures required for transitions are kept small enough to fit within the L1 data cache.
+* **Deterministic Execution**: Guarantees a constant instruction count per byte, providing predictable and low-latency matching.

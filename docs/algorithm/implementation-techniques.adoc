@@ -1,0 +1,58 @@
+= High-Efficiency Implementation Techniques
+:sectnums:
+
+== Concept
+
+Beyond architectural algorithms, `go-regexp-re` employs advanced implementation-level techniques specifically tuned for the Go compiler and runtime to achieve maximum hardware utilization.
+
+== Branchless State ID Packing
+
+The transition table stores "Packed State IDs" as 32-bit signed integers. These are not simple pointers; they are bit-fields containing both the target state and operational flags.
+
+[source]
+----
+ 32-bit Packed State ID:
+ [31] [30] [29] ... [0]
+  |    |    |        |
+  |    |    +--------+--- State ID (up to 536,870,912 states)
+  |    |
+  |    +--- AnchorVerifyFlag (Bit 30)
+  |         If set, current character MUST be verified against its anchor logic.
+  |
+  +-------- TaggedStateFlag (MSB/Bit 31)
+            If set, a capture group (tag) must be updated at this transition.
+
+Hot-Loop Execution:
+
+rawNext := transitions[idx]
+
+if rawNext < 0: (MSB is set)
+   - Handle Capture Tags
+   - Handle Anchor Guards (if Bit 30 is set)
+else:
+   - FAST PATH: Directly jump to state ID
+----
+
+== Key Techniques
+
+=== 1. Hot-Loop Monomorphization (Manual Inlining)
+The engine provides three physically distinct execution loops: `bitParallelExecLoop`, `fastExecLoop`, and `extendedExecLoop`.
+* **Problem**: Go generics (introduced in 1.18) can introduce runtime dictionary lookups for function shapes (`GCShape`), and standard polymorphism can prevent aggressive constant folding.
+* **Solution**: By manually duplicating and specializing these loops (Monomorphization), the engine ensures that the Go compiler can:
+  - Completely eliminate unreachable branches (e.g., `if hasAnchors`) during compilation.
+  - Apply aggressive register allocation specific to the complexity of the loop.
+  - Avoid any runtime indirection within the most critical performance path.
+
+=== 2. Byte-Level UTF-8 Trie Expansion
+Unlike many engines that decode UTF-8 into runes (`int32`) during execution, `go-regexp-re` processes raw bytes.
+* **Mechanism**: During the NFA-to-DFA conversion, any non-ASCII character (UTF-8) is expanded into a byte-level Trie. This Trie is then "baked" directly into the DFA transition table.
+* **Benefit**: This eliminates the overhead of `utf8.DecodeRune` (which involves complex branching and bit shifting) and allows multi-byte characters to be matched with the same $O(1)$ per byte performance as ASCII characters.
+
+=== 3. Branchless State ID Packing
+The state ID in the transition table is not just a pointer to a state; it's a packed 32-bit integer carrying metadata (e.g., `TaggedStateFlag`, `AnchorVerifyFlag`).
+* **Design**: By using Bit 31 and Bit 30 as flags, the engine can check for "special handling" (like tag updates or anchor verification) using a single signed integer comparison (`raw < 0` for Tagged) or a bitwise AND.
+* **Impact**: This ensures that the "Common Path" (simple transitions) remains perfectly straight and branch-predictor friendly.
+
+== Summary of Performance Gains
+
+These techniques ensure that the "theoretical" $O(n)$ performance of the DFA becomes a "physical" reality, minimizing the "constant factor" cost to just a handful of CPU cycles per byte.
