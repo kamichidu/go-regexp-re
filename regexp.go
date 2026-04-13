@@ -619,10 +619,20 @@ func execLoop[T loopTrait](re *Regexp, b []byte) (int, int, int, uint64) {
 		state = dfa.MatchState()
 	}
 	hasAnchors := trait.HasAnchors()
+	usedAnchors := dfa.UsedAnchors()
 
 	for i := 0; i <= numBytes; {
 		if hasAnchors {
-			state = re.applyContextToState(dfa, state, ir.CalculateContext(lb, i), i, &currentPriority, 1<<30-1, nil)
+			// OPTIMIZATION: Only calculate context and apply if used anchors are present.
+			// Word boundaries require check at every position.
+			// Text/Line anchors only matter at start, end, or near newlines.
+			if (usedAnchors&(syntax.EmptyWordBoundary|syntax.EmptyNoWordBoundary)) != 0 ||
+				(i == 0 && (usedAnchors&(syntax.EmptyBeginText|syntax.EmptyBeginLine)) != 0) ||
+				(i == numBytes && (usedAnchors&(syntax.EmptyEndText|syntax.EmptyEndLine)) != 0) ||
+				((usedAnchors&syntax.EmptyBeginLine) != 0 && i > 0 && lb[i-1] == '\n') ||
+				((usedAnchors&syntax.EmptyEndLine) != 0 && i < numBytes && lb[i] == '\n') {
+				state = re.applyContextToState(dfa, state, ir.CalculateContext(lb, i), i, &currentPriority, 1<<30-1, nil)
+			}
 		}
 		if state != ir.InvalidState {
 			idx := int(state)

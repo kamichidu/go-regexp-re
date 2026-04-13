@@ -114,3 +114,37 @@ func BenchmarkComplexity(b *testing.B) {
 		fn(b, MustCompile(pattern))
 	})
 }
+
+func BenchmarkIP(b *testing.B) {
+	cases := []struct {
+		name    string
+		pattern string
+	}{
+		{"Unanchored", `127.0.0.1`},
+		{"Start", `^127.0.0.1`},
+		{"End", `127.0.0.1$`},
+		{"Exact", `^127.0.0.1$`},
+		{"Word", `\b127.0.0.1\b`},
+		{"Literal", `^127\.0\.0\.1$`},
+	}
+	input := []byte("127.0.0.1")
+
+	for _, c := range cases {
+		b.Run(c.name, func(b *testing.B) {
+			b.Run("Go", func(b *testing.B) {
+				r := goregexp.MustCompile(c.pattern)
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					r.Match(input)
+				}
+			})
+			b.Run("Re", func(b *testing.B) {
+				r := MustCompile(c.pattern)
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					r.Match(input)
+				}
+			})
+		})
+	}
+}

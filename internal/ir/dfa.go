@@ -197,6 +197,7 @@ type DFA struct {
 	searchState            StateID
 	matchState             StateID
 	hasAnchors             bool
+	usedAnchors            syntax.EmptyOp
 	numSubexp              int
 	stateIsSearch          []bool
 	trieRoots              [][]*utf8Node
@@ -286,6 +287,7 @@ func (d *DFA) SearchState() StateID          { return d.searchState }
 func (d *DFA) MatchState() StateID           { return d.matchState }
 func (d *DFA) StartUpdates() []PathTagUpdate { return d.startUpdates }
 func (d *DFA) HasAnchors() bool              { return d.hasAnchors }
+func (d *DFA) UsedAnchors() syntax.EmptyOp   { return d.usedAnchors }
 func (d *DFA) TrieRoots() [][]*utf8Node      { return d.trieRoots }
 
 func (d *DFA) WarpPoint(s StateID) int {
@@ -519,10 +521,11 @@ func hashUpdate(u TransitionUpdate) [2]uint64 {
 func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error {
 	cache := newUTF8NodeCache()
 	d.hasAnchors = false
+	d.usedAnchors = 0
 	for _, inst := range prog.Inst {
 		if inst.Op == syntax.InstEmptyWidth {
 			d.hasAnchors = true
-			break
+			d.usedAnchors |= syntax.EmptyOp(inst.Arg)
 		}
 	}
 	d.stride = 256
