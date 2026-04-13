@@ -43,12 +43,13 @@ The engine follows a **DFA-First Hybrid** strategy to guarantee both performance
 For patterns with 64 or fewer NFA nodes, the engine utilizes a specialized Bit-parallel implementation.
 - **Physical Separation**: BP-DFA data (bitmasks, epsilons) MUST be stored in a dedicated `BitParallelDFA` structure, physically isolated from the primary table-based `DFA`.
 - **Zero Memory Load Transitions**: Transitions must be performed using `uint64` bitwise operations.
-- **Leftmost-First Fallback**: Since the Glushkov BP-DFA naturally favors longest-match, any pattern requiring strict submatch priority (e.g., alternations where submatches are extracted) MUST fallback to the table-based DFA or use a specialized NFA rescan.
+- **L1 Cache Optimization**: BP-DFA utilizing a **16KB Successor Table** (`[8][256]uint64`) ensures that state transitions stay within the L1D cache. The transition loop MUST use 8-bit chunk lookups to achieve $O(1)$ performance per byte.
+- **Priority Tracking Challenge**: Since Go's `syntax.Prog` optimizes for shared prefixes (e.g., `aa|a` -> `a(a|)`), the BP-DFA cannot naturally distinguish submatch priority using only bitsets. If strict leftmost-first priority is required for overlapping paths, the engine MUST fallback to the table-based DFA.
 
 ### 2.7 Architectural Shortcut (Compilation Efficiency)
 To minimize compilation overhead, the engine MUST use an **Architectural Shortcut** for simple patterns.
-- **Skip Heavy DFA**: If a pattern is simple (NFA nodes $\le 64$, no anchors, no non-greedy), the engine MUST skip the heavy DFA transition table construction and only build the `BitParallelDFA`.
-- **Safety Guard**: Complex repetitions that risk state explosion MUST still undergo DFA construction to trigger the 64MiB memory limit protection, even if the instruction count is low.
+- **Skip Heavy DFA**: If a pattern is simple (NFA nodes $\le 62$, no non-greedy), the engine MUST skip the heavy DFA transition table construction and only build the `BitParallelDFA`.
+- **Priority Safety Guard**: The shortcut is restricted to patterns where alternative priorities do not clash due to shared prefixes. For complex alternations, always prefer the DFA path to guarantee 100% Go compatibility.
 
 ### 2.8 Prefix-Skip Optimization (SIMD Acceleration)
 - **Mandatory Prefix Extraction**: During compilation, the longest constant prefix is extracted.

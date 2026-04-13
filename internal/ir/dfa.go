@@ -201,9 +201,11 @@ type DFA struct {
 }
 
 type BitParallelDFA struct {
-	CharMasks [256]uint64
-	Epsilon   [64]uint64
-	MatchMask uint64
+	CharMasks       [262]uint64
+	SuccessorTable  [8][256]uint64
+	MatchMask       uint64
+	StartMask       uint64
+	IsBestMatchMask uint64
 }
 
 func (d *DFA) Next(current StateID, b int) StateID {
@@ -280,40 +282,102 @@ func NewDFAWithMemoryLimit(ctx context.Context, prog *syntax.Prog, maxMemory int
 }
 
 func NewBitParallelDFA(prog *syntax.Prog) *BitParallelDFA {
-	if len(prog.Inst) > 64 {
+	if len(prog.Inst) > 62 { // Reserve bit 63
 		return nil
 	}
 	bp := &BitParallelDFA{}
+
+	// epsilonClosure returns a bitmask of states reachable from i via epsilons.
+	epsilonClosure := func(start int) uint64 {
+		var visited uint64
+		var dfs func(int)
+		dfs = func(curr int) {
+			if (visited & (1 << uint(curr))) != 0 {
+				return
+			}
+			visited |= (1 << uint(curr))
+			inst := prog.Inst[curr]
+			switch inst.Op {
+			case syntax.InstAlt, syntax.InstAltMatch:
+				dfs(int(inst.Out))
+				dfs(int(inst.Arg))
+			case syntax.InstCapture, syntax.InstNop:
+				dfs(int(inst.Out))
+			}
+		}
+		dfs(start)
+		return visited
+	}
+
+	matchID := -1
+	for i, inst := range prog.Inst {
+		if inst.Op == syntax.InstMatch {
+			matchID = i
+			break
+		}
+	}
+
+	// 1. Initial State
+	bp.StartMask = epsilonClosure(prog.Start)
+	if matchID >= 0 && (bp.StartMask&(1<<uint(matchID))) != 0 {
+		bp.MatchMask |= (1 << 63)
+	}
+
+	// 2. Instruction Properties
 	for i, inst := range prog.Inst {
 		switch inst.Op {
 		case syntax.InstRune, syntax.InstRune1, syntax.InstRuneAny, syntax.InstRuneAnyNotNL:
 			for b := 0; b < 256; b++ {
 				if inst.MatchRune(rune(b)) {
-					bp.CharMasks[b] |= (1 << i)
+					bp.CharMasks[b] |= (1 << uint(i))
 				}
 			}
-		case syntax.InstMatch:
-			bp.MatchMask |= (1 << i)
-		}
-		var visited uint64
-		var dfs func(int)
-		dfs = func(curr int) {
-			if (visited & (1 << curr)) != 0 {
-				return
+			if matchID >= 0 && (epsilonClosure(int(inst.Out))&(1<<uint(matchID))) != 0 {
+				bp.MatchMask |= (1 << uint(i))
 			}
-			visited |= (1 << curr)
-			bp.Epsilon[i] |= (1 << curr)
-			ii := prog.Inst[curr]
-			switch ii.Op {
-			case syntax.InstAlt, syntax.InstAltMatch:
-				dfs(int(ii.Out))
-				dfs(int(ii.Arg))
-			case syntax.InstCapture, syntax.InstNop, syntax.InstEmptyWidth:
-				dfs(int(ii.Out))
+		case syntax.InstEmptyWidth:
+			for bit := 0; bit < 6; bit++ {
+				if (inst.Arg & (1 << uint(bit))) != 0 {
+					bp.CharMasks[256+bit] |= (1 << uint(i))
+				}
+			}
+			if matchID >= 0 && (epsilonClosure(int(inst.Out))&(1<<uint(matchID))) != 0 {
+				bp.MatchMask |= (1 << uint(i))
 			}
 		}
-		dfs(i)
 	}
+
+	// 3. Successor Table
+	successors := make([]uint64, len(prog.Inst))
+	for i, inst := range prog.Inst {
+		switch inst.Op {
+		case syntax.InstRune, syntax.InstRune1, syntax.InstRuneAny, syntax.InstRuneAnyNotNL, syntax.InstEmptyWidth:
+			successors[i] = epsilonClosure(int(inst.Out))
+		}
+	}
+
+	for t := 0; t < 8; t++ {
+		for b := 0; b < 256; b++ {
+			var union uint64
+			for bit := 0; bit < 8; bit++ {
+				if (b & (1 << uint(bit))) != 0 {
+					idx := t*8 + bit
+					if idx < len(successors) {
+						union |= successors[idx]
+					}
+				}
+			}
+			bp.SuccessorTable[t][b] = union
+		}
+	}
+
+	// 4. IsBestMatchMask
+	// Bit 0 is the highest priority.
+	bp.IsBestMatchMask |= 1
+	if (bp.MatchMask & (1 << 63)) != 0 {
+		bp.IsBestMatchMask |= (1 << 63)
+	}
+
 	return bp
 }
 

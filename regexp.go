@@ -75,9 +75,10 @@ func CompileContextWithOption(ctx context.Context, expr string, opt CompileOptio
 
 	// ARCHITECTURAL SHORTCUT:
 	// If Bit-parallel is possible, skip heavy DFA table construction.
-	if false && len(prog.Inst) <= 64 && !hasAnchors(prog) && !hasNonGreedy(prog) {
+	if false && len(prog.Inst) <= 64 && !hasNonGreedy(prog) {
 		bpDfa = ir.NewBitParallelDFA(prog)
-	} else {
+	}
+	if bpDfa == nil {
 		dfa, err = ir.NewDFAWithMemoryLimit(ctx, prog, opt.MaxMemory)
 		if err != nil {
 			return nil, err
@@ -398,67 +399,101 @@ func applyTags(t uint64, pos int, regs []int) {
 func bitParallelExecLoop(re *Regexp, b []byte) (int, int, int, uint64) {
 	bp := re.bpDfa
 	masks := bp.CharMasks
+	table := bp.SuccessorTable
 	matchMask := bp.MatchMask
-	epsilons := bp.Epsilon
+	startMask := bp.StartMask
+	bestMatchMask := bp.IsBestMatchMask
 	numBytes := len(b)
 
 	bestStart, bestEnd, bestPriority := -1, -1, 1<<30-1
-	var bpStarts [64]int
-	for i := range bpStarts {
-		bpStarts[i] = -1
-	}
 
-	state := uint64(0)
 	for i := 0; i <= numBytes; i++ {
-		if !re.anchorStart || i == 0 {
-			startBits := epsilons[re.prog.Start]
-			newBits := startBits & ^state
-			state |= newBits
-			for newBits != 0 {
-				bit := bits.TrailingZeros64(newBits)
-				bpStarts[bit] = i
-				newBits &= ^(uint64(1) << bit)
-			}
-		}
+		state := startMask
 
-		if (state & matchMask) != 0 {
-			winningBit := bits.TrailingZeros64(state & matchMask)
-			currentStart := bpStarts[winningBit]
-			if bestStart == -1 || currentStart < bestStart || (currentStart == bestStart && winningBit < bestPriority) || (currentStart == bestStart && winningBit == bestPriority && i >= bestEnd) {
-				bestPriority, bestEnd, bestStart = winningBit, i, currentStart
-			}
-		}
-		if i == numBytes {
-			break
-		}
-
-		var nextState uint64
-		var nextStarts [64]int
-		for j := range nextStarts {
-			nextStarts[j] = -1
-		}
-
-		tempState := state
-		for tempState != 0 {
-			bit := bits.TrailingZeros64(tempState)
-			if (masks[b[i]] & (1 << bit)) != 0 {
-				inst := re.prog.Inst[bit]
-				outBits := epsilons[inst.Out]
-				nextState |= outBits
-				for outBits != 0 {
-					outBit := bits.TrailingZeros64(outBits)
-					if nextStarts[outBit] == -1 || bpStarts[bit] < nextStarts[outBit] {
-						nextStarts[outBit] = bpStarts[bit]
+		for j := i; j <= numBytes; j++ {
+			// 1. Apply anchors (Instant transitions)
+			if len(masks) > 256 {
+				context := ir.CalculateContext(b, j)
+				for bit := 0; bit < 6; bit++ {
+					if (context & (1 << uint(bit))) != 0 {
+						active := state & masks[256+bit]
+						if active != 0 {
+							if (active & matchMask) != 0 {
+								winningBit := bits.TrailingZeros64(active & matchMask)
+								prio := i*ir.SearchRestartPenalty + winningBit
+								if prio < bestPriority || (prio == bestPriority && j >= bestEnd) {
+									bestPriority, bestEnd, bestStart = prio, j, i
+								}
+							}
+							state = table[0][active&0xff] |
+								table[1][(active>>8)&0xff] |
+								table[2][(active>>16)&0xff] |
+								table[3][(active>>24)&0xff] |
+								table[4][(active>>32)&0xff] |
+								table[5][(active>>40)&0xff] |
+								table[6][(active>>48)&0xff] |
+								table[7][(active>>56)&0xff] | (state & ^active)
+						}
 					}
-					outBits &= ^(uint64(1) << outBit)
 				}
 			}
-			tempState &= ^(uint64(1) << bit)
+
+			// 2. Check for epsilon match (including bit 63 for Start -> Match)
+			if (matchMask&(1<<63)) != 0 && j == i {
+				prio := i*ir.SearchRestartPenalty + 63
+				if prio <= bestPriority {
+					bestPriority, bestEnd, bestStart = prio, i, i
+				}
+			}
+
+			if j == numBytes {
+				break
+			}
+
+			// 3. Character transition
+			active := state & masks[b[j]]
+			if active != 0 {
+				if (active & matchMask) != 0 {
+					winningBit := bits.TrailingZeros64(active & matchMask)
+					prio := i*ir.SearchRestartPenalty + winningBit
+					if prio < bestPriority || (prio == bestPriority && j+1 >= bestEnd) {
+						bestPriority, bestEnd, bestStart = prio, j+1, i
+						if (1<<uint(winningBit))&bestMatchMask != 0 {
+							return bestStart, bestEnd, bestPriority, 0
+						}
+					}
+				}
+				state = table[0][active&0xff] |
+					table[1][(active>>8)&0xff] |
+					table[2][(active>>16)&0xff] |
+					table[3][(active>>24)&0xff] |
+					table[4][(active>>32)&0xff] |
+					table[5][(active>>40)&0xff] |
+					table[6][(active>>48)&0xff] |
+					table[7][(active>>56)&0xff]
+			} else {
+				state = 0
+			}
+			if state == 0 {
+				break
+			}
 		}
-		state = nextState
-		bpStarts = nextStarts
-		if state == 0 && re.anchorStart {
+
+		if bestStart != -1 {
+			return bestStart, bestEnd, bestPriority, 0
+		}
+		if re.anchorStart {
 			break
+		}
+
+		// Prefix skip optimization
+		i++
+		if len(re.prefix) > 0 && i < numBytes {
+			skip := bytes.Index(b[i:], re.prefix)
+			if skip < 0 {
+				break
+			}
+			i += skip
 		}
 	}
 	return bestStart, bestEnd, bestPriority, 0
