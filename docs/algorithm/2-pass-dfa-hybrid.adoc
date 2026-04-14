@@ -1,35 +1,52 @@
-= DFA-First Hybrid (2-Pass Strategy)
+= DFA-First Hybrid (4-Phase Strategy)
 :sectnums:
 
 == Concept
 
-DFAs are traditionally poor at extracting submatches (capturing groups). This is because when multiple NFA paths merge into a single DFA state, the history of which path "won" is lost. To extract submatches identical to the Go standard library, this project employs a "2-Pass Strategy."
+DFAs are traditionally poor at extracting submatches (capturing groups). This is because when multiple NFA paths merge into a single DFA state, the history of which path "won" is lost. To extract submatches identical to the Go standard library while maintaining $O(n)$ performance and avoiding NFA simulators, this project employs a refined "4-Phase Strategy" based on deterministic traceback.
 
-== The Two Phases
+== The Four Phases
 
-=== Phase 1: Boundary Discovery
+=== Phase 1: Match Discovery (Forward Scan)
 * **Objective**: Find the `[start, end]` boundaries of a match as quickly as possible.
-* **Mechanism**: Uses a "pure DFA loop" or a loop with minimal tagging.
+* **Mechanism**: Uses a high-speed DFA or BP-DFA loop.
+* **History Recording**: During this phase, the engine records the history of active states at each byte position.
+    - For BP-DFA: A sequence of `uint64` bitmasks.
+    - For Table-DFA: A sequence of `ir.StateID`.
 
-=== Phase 2: Localized Forward Scan
-* **Objective**: Extract precise submatch information within the confirmed boundary.
+=== Phase 2: Terminal Arbitration
+* **Objective**: Identify the single winning NFA path at the match end.
 * **Mechanism**:
-  - **Principal DFA Rescan**: Performs a forward scan using the primary DFA. During the scan, capture registers (`regs`) are updated according to the priority-aware `applyTags` logic.
-  - **BP-DFA Handover (Greedy Arbitration)**: When the scan reaches the `end` position, and the pattern involves greedy operators, the engine hands over the DFA state to the BP-DFA.
-  - **Winning Bit Selection**: The BP-DFA converts the final DFA state into a bitmask to identify the "absolute winning NFA path" (the bit that reached `InstMatch` at exactly the `end` position).
-  - **Greedy Tag Refinement**: Using pre-calculated `greedyTags`, the engine ensures that only tags belonging to greedy operators are overridden by the BP-DFA's terminal arbitration. This resolves the 1-byte ambiguity inherent in DFA greedy loops without affecting non-greedy captures.
-  - **Zero-NFA Mandate**: This hybrid approach completely eliminates the need for a backtracking or thread-managed NFA rescan, maintaining pure $O(n)$ time complexity and zero runtime heap allocations.
+    - At the `end` position, the engine inspects the current context (anchors like `^`, `$`, `\b`).
+    - It uses a pre-calculated `MatchMasks[context]` to identify all NFA bits that reached a `Match` instruction at this exact position.
+    - It selects the highest-priority bit (leftmost-first) as the `winningBit`.
 
-== Key Technology: Winning Bit Arbitration
-The core challenge in DFA submatch extraction is "Greedy Overrun." In a pattern like `(a*)b`, the DFA state at the match end might simultaneously contain a path that matched `a*` and a path that moved to `b`.
+=== Phase 3: Backward Traceback
+* **Objective**: Reconstruct the unique prioritized path from `end` back to `start`.
+* **Mechanism**:
+    - Starting from the `winningBit` at position `end`, the engine moves backward to `start`.
+    - For each byte position `i`, it consults the recorded `history[i]` to find a predecessor bit `k` such that:
+        1. Bit `k` is present in the historical state at position `i`.
+        2. Bit `k` matches the byte at `b[i]`.
+        3. Bit `k` can reach the current path bit via epsilon transitions.
+    - If multiple predecessors exist, the highest-priority one is chosen to resolve ambiguities in greedy loops (e.g., `a*(a)`).
 
-By bridging the DFA state with a BP-DFA bitmask (`uint64`), the engine can:
-1. **Materialize the Set**: Convert the abstract DFA state ID back into its constituent NFA states (bits).
-2. **Identify the Victor**: Select the highest priority bit (leftmost-first) that is in a matching state at the exact `end` coordinate.
-3. **Correct the Boundary**: Precisely finalize capture indices based on this specific winning path, ensuring 100% compatibility with Go's `regexp` package.
+=== Phase 4: Forward Recap (Tag Application)
+* **Objective**: Apply capture tags along the now-deterministic path.
+* **Mechanism**:
+    - The engine walks forward from the regex `Start` instruction to the `winningBit` along the path identified in Phase 3.
+    - Since the path is unique and confirmed, all `InstCapture` instructions encountered are applied to the result registers (`regs`) without risk of incorrect over-shadowing or priority conflicts.
+
+== Key Technology: Context-Aware MatchMasks
+A match is not just about runes; it also depends on the context at the match end (e.g., `abc$` requires `$` to match the context after `c`).
+
+The engine pre-calculates a `MatchMasks` array for all 64 possible anchor contexts. This allows the Terminal Arbitration phase to be:
+1. **Deterministic**: One bitwise AND operation resolves all anchor constraints.
+2. **Standard-Compliant**: Perfectly follows Go's rules for where a match can legally end.
 
 == Advantages
 
-* **$O(n)$ Guarantees**: All steps stay within a constant multiple of the input length; no backtracking.
-* **Memory Bandwidth Savings**: Minimizes writes in Phase 1, keeping CPU caches hot for the data in Phase 2.
-* **Full Standard Compatibility**: Guarantees results identical to the `regexp` package, even for complex patterns like `a*(a)`.
+* **$O(n)$ Guarantees**: Time complexity is strictly linear with respect to the input length.
+* **Allocation-Free**: History buffers and register sets are pre-allocated or pooled, ensuring zero heap allocations during the extraction phase.
+* **Architectural Integrity**: Eliminates the need for general-purpose NFA simulators (PikeVM), keeping the engine's core deterministic and DFA-based.
+* **Full Standard Compatibility**: Successfully handles complex edge cases like greedy/non-greedy overlaps and multiline anchors.
