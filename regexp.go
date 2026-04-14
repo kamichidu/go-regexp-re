@@ -37,13 +37,16 @@ type Regexp struct {
 	strategy       matchStrategy
 }
 
-type CompileOption struct{ MaxMemory int }
+type CompileOptions struct{ MaxMemory int }
 
 func Compile(expr string) (*Regexp, error) { return CompileContext(context.Background(), expr) }
-func CompileContext(ctx context.Context, expr string) (*Regexp, error) {
-	return CompileContextWithOptions(ctx, expr, CompileOption{MaxMemory: ir.MaxDFAMemory})
+func CompileWithOptions(expr string, opt CompileOptions) (*Regexp, error) {
+	return CompileContextWithOptions(context.Background(), expr, opt)
 }
-func CompileContextWithOptions(ctx context.Context, expr string, opt CompileOption) (*Regexp, error) {
+func CompileContext(ctx context.Context, expr string) (*Regexp, error) {
+	return CompileContextWithOptions(ctx, expr, CompileOptions{MaxMemory: ir.MaxDFAMemory})
+}
+func CompileContextWithOptions(ctx context.Context, expr string, opt CompileOptions) (*Regexp, error) {
 	s, err := syntax.Parse(expr, syntax.Perl)
 	if err != nil {
 		return nil, err

@@ -54,7 +54,7 @@ Performance is essentially "bought" with memory. A single DFA state occupies 1KB
 DFA construction can lead to an exponential explosion of states for patterns with high ambiguity (e.g., multiple overlapping wildcards). To prevent system exhaustion (OOM), `go-regexp-re` enforces a configurable memory limit.
 - **Default Limit**: 64MiB.
 - **Failure Mode**: If a pattern exceeds the limit, the compiler returns an error: `regexp: pattern too large or ambiguous`.
-- **Mitigation**: Users must either simplify the pattern or explicitly increase the `MaxMemory` via `CompileOption`.
+- **Mitigation**: Users must either simplify the pattern or explicitly increase the `MaxMemory` via `CompileOptions`.
 
 === 4. No POSIX Semantics
 POSIX regex semantics are explicitly unsupported. Following POSIX would break the $O(n)$ guarantee and introduce complex branching that would cripple the DFA's throughput.

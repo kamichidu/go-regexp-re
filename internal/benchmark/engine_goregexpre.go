@@ -18,7 +18,7 @@ func init() {
 			if strings.Count(pattern, "|") > 100 {
 				limit = 1024 * 1024 * 1024 // 1GB limit
 			}
-			re, err := regexp.CompileWithOption(pattern, regexp.CompileOption{MaxMemory: limit})
+			re, err := regexp.CompileWithOptions(pattern, regexp.CompileOptions{MaxMemory: limit})
 			if err != nil {
 				return nil, err
 			}

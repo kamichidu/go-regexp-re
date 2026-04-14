@@ -38,7 +38,7 @@ designed to surpass the throughput limits of the standard `regexp` package while
 
 === Basic Usage
 
-The default memory limit for DFA construction is **64MiB**. For complex patterns, use `CompileWithOption`.
+The default memory limit for DFA construction is **64MiB**. For complex patterns, use `CompileWithOptions`.
 
 [source,go]
 ----
