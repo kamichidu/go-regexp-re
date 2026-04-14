@@ -27,96 +27,23 @@ type nfaThread[R any] struct {
 	regs R
 }
 
-type nfaMachine[R any] struct {
-	vBuf  [256]uint32
-	q1Buf [64]nfaThread[R]
-	q2Buf [64]nfaThread[R]
-
-	visited  []uint32
-	visitGen uint32
-	curr     []nfaThread[R]
-	next     []nfaThread[R]
-}
-
-func (m *nfaMachine[R]) init(numInst int) {
-	if numInst <= len(m.vBuf) {
-		m.visited = m.vBuf[:]
-	} else {
-		m.visited = make([]uint32, numInst)
-	}
-	m.curr = m.q1Buf[:0]
-	m.next = m.q2Buf[:0]
-}
-
-func (m *nfaMachine[R]) regsSlice(r *R) []int {
+func regsSlice[R any](r *R) []int {
 	var zero R
-	switch any(zero).(type) {
-	case []int:
-		return any(*r).([]int)
-	default:
-		return unsafe.Slice((*int)(unsafe.Pointer(r)), int(unsafe.Sizeof(zero)/unsafe.Sizeof(int(0))))
+	if unsafe.Sizeof(zero) == unsafe.Sizeof([]int(nil)) {
+		return *(*[]int)(unsafe.Pointer(r))
 	}
+	return unsafe.Slice((*int)(unsafe.Pointer(r)), int(unsafe.Sizeof(zero)/unsafe.Sizeof(int(0))))
 }
 
 func cloneRegs[R any](r R) R {
 	var zero R
-	switch any(zero).(type) {
-	case []int:
-		src := any(r).([]int)
+	if unsafe.Sizeof(zero) == unsafe.Sizeof([]int(nil)) {
+		src := *(*[]int)(unsafe.Pointer(&r))
 		dst := make([]int, len(src))
 		copy(dst, src)
-		return any(dst).(R)
-	default:
-		return r // Array is copied by value
+		return *(*R)(unsafe.Pointer(&dst))
 	}
-}
-
-func (m *nfaMachine[R]) addThread(re *Regexp, b []byte, isNext bool, instID uint32, r R, pos int) {
-	if m.visitGen == 0xffffffff {
-		for i := range m.visited {
-			m.visited[i] = 0
-		}
-		m.visitGen = 0
-	}
-	m.visitGen++
-	m.dfs(re, b, isNext, instID, r, pos, m.visitGen)
-}
-
-func (m *nfaMachine[R]) dfs(re *Regexp, b []byte, isNext bool, id uint32, currentRegs R, pos int, gen uint32) {
-	if m.visited[id] == gen {
-		return
-	}
-	m.visited[id] = gen
-	q := &m.curr
-	if isNext {
-		q = &m.next
-	}
-	for i := 0; i < len(*q); i++ {
-		if (*q)[i].id == id {
-			return
-		}
-	}
-	inst := re.prog.Inst[id]
-	switch inst.Op {
-	case syntax.InstCapture:
-		newRegs := cloneRegs(currentRegs)
-		s := m.regsSlice(&newRegs)
-		if int(inst.Arg) < len(s) {
-			s[inst.Arg] = pos
-		}
-		m.dfs(re, b, isNext, inst.Out, newRegs, pos, gen)
-	case syntax.InstNop:
-		m.dfs(re, b, isNext, inst.Out, currentRegs, pos, gen)
-	case syntax.InstAlt, syntax.InstAltMatch:
-		m.dfs(re, b, isNext, inst.Out, currentRegs, pos, gen)
-		m.dfs(re, b, isNext, inst.Arg, currentRegs, pos, gen)
-	case syntax.InstEmptyWidth:
-		if syntax.EmptyOp(inst.Arg)&ir.CalculateContext(b, pos) == syntax.EmptyOp(inst.Arg) {
-			m.dfs(re, b, isNext, inst.Out, currentRegs, pos, gen)
-		}
-	default:
-		*q = append(*q, nfaThread[R]{id, currentRegs})
-	}
+	return r
 }
 
 type Regexp struct {
@@ -366,6 +293,9 @@ func (re *Regexp) extractSubmatches(b []byte, start, end, targetPriority int, ma
 
 func (re *Regexp) nfaRescan(b []byte, start, end int, regs []int) []int {
 	numSub := re.numSubexp
+	if numSub <= 4 {
+		return nfaRescanGeneric[[10]int](re, b, start, end, regs)
+	}
 	if numSub <= 16 {
 		return nfaRescanGeneric[[34]int](re, b, start, end, regs)
 	}
@@ -376,27 +306,82 @@ func (re *Regexp) nfaRescan(b []byte, start, end int, regs []int) []int {
 }
 
 func nfaRescanGeneric[R any](re *Regexp, b []byte, start, end int, regs []int) []int {
-	var m nfaMachine[R]
-	m.init(len(re.prog.Inst))
+	var vBuf [128]uint32
+	var q1Buf [32]nfaThread[R]
+	var q2Buf [32]nfaThread[R]
+	var wBuf [32]nfaThread[R]
+	var visitGen uint32
 
+	visited := vBuf[:]
+	if len(re.prog.Inst) > len(vBuf) {
+		visited = make([]uint32, len(re.prog.Inst))
+	}
+	curr := q1Buf[:0]
+	next := q2Buf[:0]
+
+	regSize := len(regs)
 	var initialRegs R
 	var zero R
-	switch any(zero).(type) {
-	case []int:
-		initialRegs = any(make([]int, len(regs))).(R)
+	if unsafe.Sizeof(zero) == unsafe.Sizeof([]int(nil)) {
+		initialRegs = any(make([]int, regSize)).(R)
 	}
-
-	s := m.regsSlice(&initialRegs)
+	s := regsSlice(&initialRegs)
 	for i := range s {
 		s[i] = -1
 	}
 	s[0] = start
-	m.addThread(re, b, false, uint32(re.prog.Start), initialRegs, start)
+
+	// Initial step
+	visitGen++
+	gen := visitGen
+	work := wBuf[:0]
+	work = append(work, nfaThread[R]{uint32(re.prog.Start), initialRegs})
+	for len(work) > 0 {
+		th := work[len(work)-1]
+		work = work[:len(work)-1]
+		if visited[th.id] == gen {
+			continue
+		}
+		visited[th.id] = gen
+		found := false
+		for i := 0; i < len(curr); i++ {
+			if curr[i].id == th.id {
+				found = true
+				break
+			}
+		}
+		if found {
+			continue
+		}
+		inst := re.prog.Inst[th.id]
+		switch inst.Op {
+		case syntax.InstCapture:
+			newRegs := cloneRegs(th.regs)
+			rs := regsSlice(&newRegs)
+			if int(inst.Arg) < len(rs) {
+				rs[inst.Arg] = start
+			}
+			work = append(work, nfaThread[R]{inst.Out, newRegs})
+		case syntax.InstNop:
+			work = append(work, nfaThread[R]{inst.Out, th.regs})
+		case syntax.InstAlt, syntax.InstAltMatch:
+			work = append(work, nfaThread[R]{inst.Arg, th.regs})
+			work = append(work, nfaThread[R]{inst.Out, th.regs})
+		case syntax.InstEmptyWidth:
+			if syntax.EmptyOp(inst.Arg)&ir.CalculateContext(b, start) == syntax.EmptyOp(inst.Arg) {
+				work = append(work, nfaThread[R]{inst.Out, th.regs})
+			}
+		default:
+			curr = append(curr, th)
+		}
+	}
 
 	for i := start; i < end; i++ {
-		m.next = m.next[:0]
-		for j := 0; j < len(m.curr); j++ {
-			th := m.curr[j]
+		next = next[:0]
+		visitGen++
+		gen = visitGen
+		for j := 0; j < len(curr); j++ {
+			th := curr[j]
 			inst := re.prog.Inst[th.id]
 			match := false
 			switch inst.Op {
@@ -424,20 +409,105 @@ func nfaRescanGeneric[R any](re *Regexp, b []byte, start, end int, regs []int) [
 				match = b[i] != '\n'
 			}
 			if match {
-				m.addThread(re, b, true, inst.Out, th.regs, i+1)
+				// Inline addThread for next
+				work = wBuf[:0]
+				work = append(work, nfaThread[R]{inst.Out, th.regs})
+				for len(work) > 0 {
+					wth := work[len(work)-1]
+					work = work[:len(work)-1]
+					if visited[wth.id] == gen {
+						continue
+					}
+					visited[wth.id] = gen
+					found := false
+					for k := 0; k < len(next); k++ {
+						if next[k].id == wth.id {
+							found = true
+							break
+						}
+					}
+					if found {
+						continue
+					}
+					inst2 := re.prog.Inst[wth.id]
+					switch inst2.Op {
+					case syntax.InstCapture:
+						newRegs := cloneRegs(wth.regs)
+						rs := regsSlice(&newRegs)
+						if int(inst2.Arg) < len(rs) {
+							rs[inst2.Arg] = i + 1
+						}
+						work = append(work, nfaThread[R]{inst2.Out, newRegs})
+					case syntax.InstNop:
+						work = append(work, nfaThread[R]{inst2.Out, wth.regs})
+					case syntax.InstAlt, syntax.InstAltMatch:
+						work = append(work, nfaThread[R]{inst2.Arg, wth.regs})
+						work = append(work, nfaThread[R]{inst2.Out, wth.regs})
+					case syntax.InstEmptyWidth:
+						if syntax.EmptyOp(inst2.Arg)&ir.CalculateContext(b, i+1) == syntax.EmptyOp(inst2.Arg) {
+							work = append(work, nfaThread[R]{inst2.Out, wth.regs})
+						}
+					default:
+						next = append(next, wth)
+					}
+				}
 			}
 		}
-		m.curr, m.next = m.next, m.curr
+		curr, next = next, curr
 	}
 
-	m.next = m.next[:0]
-	for i := 0; i < len(m.curr); i++ {
-		m.addThread(re, b, true, m.curr[i].id, m.curr[i].regs, end)
+	// Final epsilon closure at end
+	visitGen++
+	gen = visitGen
+	next = next[:0]
+	for i := 0; i < len(curr); i++ {
+		th := curr[i]
+		work = wBuf[:0]
+		work = append(work, th)
+		for len(work) > 0 {
+			wth := work[len(work)-1]
+			work = work[:len(work)-1]
+			if visited[wth.id] == gen {
+				continue
+			}
+			visited[wth.id] = gen
+			found := false
+			for k := 0; k < len(next); k++ {
+				if next[k].id == wth.id {
+					found = true
+					break
+				}
+			}
+			if found {
+				continue
+			}
+			inst := re.prog.Inst[wth.id]
+			switch inst.Op {
+			case syntax.InstCapture:
+				newRegs := cloneRegs(wth.regs)
+				rs := regsSlice(&newRegs)
+				if int(inst.Arg) < len(rs) {
+					rs[inst.Arg] = end
+				}
+				work = append(work, nfaThread[R]{inst.Out, newRegs})
+			case syntax.InstNop:
+				work = append(work, nfaThread[R]{inst.Out, wth.regs})
+			case syntax.InstAlt, syntax.InstAltMatch:
+				work = append(work, nfaThread[R]{inst.Arg, wth.regs})
+				work = append(work, nfaThread[R]{inst.Out, wth.regs})
+			case syntax.InstEmptyWidth:
+				if syntax.EmptyOp(inst.Arg)&ir.CalculateContext(b, end) == syntax.EmptyOp(inst.Arg) {
+					work = append(work, nfaThread[R]{inst.Out, wth.regs})
+				}
+			default:
+				next = append(next, wth)
+			}
+		}
 	}
 
-	for i := 0; i < len(m.next); i++ {
-		if re.prog.Inst[m.next[i].id].Op == syntax.InstMatch {
-			thRegs := m.regsSlice(&m.next[i].regs)
+	for i := 0; i < len(next); i++ {
+		if re.prog.Inst[next[i].id].Op == syntax.InstMatch {
+			thRegs := regsSlice(&next[i].regs)
 			copy(regs, thRegs[:len(regs)])
 			regs[1] = end
 			return regs
