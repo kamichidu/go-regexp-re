@@ -22,6 +22,103 @@ const (
 	strategyExtended
 )
 
+type nfaThread[R any] struct {
+	id   uint32
+	regs R
+}
+
+type nfaMachine[R any] struct {
+	vBuf  [256]uint32
+	q1Buf [64]nfaThread[R]
+	q2Buf [64]nfaThread[R]
+
+	visited  []uint32
+	visitGen uint32
+	curr     []nfaThread[R]
+	next     []nfaThread[R]
+}
+
+func (m *nfaMachine[R]) init(numInst int) {
+	if numInst <= len(m.vBuf) {
+		m.visited = m.vBuf[:]
+	} else {
+		m.visited = make([]uint32, numInst)
+	}
+	m.curr = m.q1Buf[:0]
+	m.next = m.q2Buf[:0]
+}
+
+func (m *nfaMachine[R]) regsSlice(r *R) []int {
+	var zero R
+	switch any(zero).(type) {
+	case []int:
+		return any(*r).([]int)
+	default:
+		return unsafe.Slice((*int)(unsafe.Pointer(r)), int(unsafe.Sizeof(zero)/unsafe.Sizeof(int(0))))
+	}
+}
+
+func cloneRegs[R any](r R) R {
+	var zero R
+	switch any(zero).(type) {
+	case []int:
+		src := any(r).([]int)
+		dst := make([]int, len(src))
+		copy(dst, src)
+		return any(dst).(R)
+	default:
+		return r // Array is copied by value
+	}
+}
+
+func (m *nfaMachine[R]) addThread(re *Regexp, b []byte, isNext bool, instID uint32, r R, pos int) {
+	if m.visitGen == 0xffffffff {
+		for i := range m.visited {
+			m.visited[i] = 0
+		}
+		m.visitGen = 0
+	}
+	m.visitGen++
+	m.dfs(re, b, isNext, instID, r, pos, m.visitGen)
+}
+
+func (m *nfaMachine[R]) dfs(re *Regexp, b []byte, isNext bool, id uint32, currentRegs R, pos int, gen uint32) {
+	if m.visited[id] == gen {
+		return
+	}
+	m.visited[id] = gen
+	q := &m.curr
+	if isNext {
+		q = &m.next
+	}
+	for i := 0; i < len(*q); i++ {
+		if (*q)[i].id == id {
+			return
+		}
+	}
+	inst := re.prog.Inst[id]
+	switch inst.Op {
+	case syntax.InstCapture:
+		newRegs := cloneRegs(currentRegs)
+		s := m.regsSlice(&newRegs)
+		if int(inst.Arg) < len(s) {
+			s[inst.Arg] = pos
+		}
+		m.dfs(re, b, isNext, inst.Out, newRegs, pos, gen)
+	case syntax.InstNop:
+		m.dfs(re, b, isNext, inst.Out, currentRegs, pos, gen)
+	case syntax.InstAlt, syntax.InstAltMatch:
+		m.dfs(re, b, isNext, inst.Out, currentRegs, pos, gen)
+		m.dfs(re, b, isNext, inst.Arg, currentRegs, pos, gen)
+	case syntax.InstEmptyWidth:
+		if syntax.EmptyOp(inst.Arg)&ir.CalculateContext(b, pos) == syntax.EmptyOp(inst.Arg) {
+			m.dfs(re, b, isNext, inst.Out, currentRegs, pos, gen)
+		}
+	default:
+		*q = append(*q, nfaThread[R]{id, currentRegs})
+	}
+}
+
 type Regexp struct {
 	expr           string
 	numSubexp      int
@@ -268,61 +365,38 @@ func (re *Regexp) extractSubmatches(b []byte, start, end, targetPriority int, ma
 }
 
 func (re *Regexp) nfaRescan(b []byte, start, end int, regs []int) []int {
-	type thread struct {
-		id   uint32
-		regs []int
+	numSub := re.numSubexp
+	if numSub <= 16 {
+		return nfaRescanGeneric[[34]int](re, b, start, end, regs)
 	}
-	curr := make([]thread, 0, 16)
-	next := make([]thread, 0, 16)
+	if numSub <= 32 {
+		return nfaRescanGeneric[[66]int](re, b, start, end, regs)
+	}
+	return nfaRescanGeneric[[]int](re, b, start, end, regs)
+}
 
-	addThread := func(q *[]thread, instID uint32, r []int, pos int) {
-		visited := make(map[uint32]bool)
-		var dfs func(id uint32, currentRegs []int)
-		dfs = func(id uint32, currentRegs []int) {
-			if visited[id] {
-				return
-			}
-			visited[id] = true
-			for _, th := range *q {
-				if th.id == id {
-					return
-				}
-			}
-			inst := re.prog.Inst[id]
-			switch inst.Op {
-			case syntax.InstCapture:
-				newRegs := make([]int, len(currentRegs))
-				copy(newRegs, currentRegs)
-				if int(inst.Arg) < len(newRegs) {
-					newRegs[inst.Arg] = pos
-				}
-				dfs(inst.Out, newRegs)
-			case syntax.InstNop:
-				dfs(inst.Out, currentRegs)
-			case syntax.InstAlt, syntax.InstAltMatch:
-				dfs(inst.Out, currentRegs)
-				dfs(inst.Arg, currentRegs)
-			case syntax.InstEmptyWidth:
-				if syntax.EmptyOp(inst.Arg)&ir.CalculateContext(b, pos) == syntax.EmptyOp(inst.Arg) {
-					dfs(inst.Out, currentRegs)
-				}
-			default:
-				*q = append(*q, thread{id, currentRegs})
-			}
-		}
-		dfs(instID, r)
+func nfaRescanGeneric[R any](re *Regexp, b []byte, start, end int, regs []int) []int {
+	var m nfaMachine[R]
+	m.init(len(re.prog.Inst))
+
+	var initialRegs R
+	var zero R
+	switch any(zero).(type) {
+	case []int:
+		initialRegs = any(make([]int, len(regs))).(R)
 	}
 
-	initialRegs := make([]int, len(regs))
-	for i := range initialRegs {
-		initialRegs[i] = -1
+	s := m.regsSlice(&initialRegs)
+	for i := range s {
+		s[i] = -1
 	}
-	initialRegs[0] = start
-	addThread(&curr, uint32(re.prog.Start), initialRegs, start)
+	s[0] = start
+	m.addThread(re, b, false, uint32(re.prog.Start), initialRegs, start)
 
 	for i := start; i < end; i++ {
-		next = next[:0]
-		for _, th := range curr {
+		m.next = m.next[:0]
+		for j := 0; j < len(m.curr); j++ {
+			th := m.curr[j]
 			inst := re.prog.Inst[th.id]
 			match := false
 			switch inst.Op {
@@ -337,8 +411,8 @@ func (re *Regexp) nfaRescan(b []byte, start, end int, regs []int) []int {
 						match = (r == r0)
 					}
 				} else {
-					for j := 0; j < len(inst.Rune); j += 2 {
-						if r >= inst.Rune[j] && r <= inst.Rune[j+1] {
+					for k := 0; k < len(inst.Rune); k += 2 {
+						if r >= inst.Rune[k] && r <= inst.Rune[k+1] {
 							match = true
 							break
 						}
@@ -350,20 +424,21 @@ func (re *Regexp) nfaRescan(b []byte, start, end int, regs []int) []int {
 				match = b[i] != '\n'
 			}
 			if match {
-				addThread(&next, inst.Out, th.regs, i+1)
+				m.addThread(re, b, true, inst.Out, th.regs, i+1)
 			}
 		}
-		curr, next = next, curr
+		m.curr, m.next = m.next, m.curr
 	}
 
-	next = next[:0]
-	for _, th := range curr {
-		addThread(&next, th.id, th.regs, end)
+	m.next = m.next[:0]
+	for i := 0; i < len(m.curr); i++ {
+		m.addThread(re, b, true, m.curr[i].id, m.curr[i].regs, end)
 	}
 
-	for _, th := range next {
-		if re.prog.Inst[th.id].Op == syntax.InstMatch {
-			copy(regs, th.regs)
+	for i := 0; i < len(m.next); i++ {
+		if re.prog.Inst[m.next[i].id].Op == syntax.InstMatch {
+			thRegs := m.regsSlice(&m.next[i].regs)
+			copy(regs, thRegs[:len(regs)])
 			regs[1] = end
 			return regs
 		}
