@@ -1,0 +1,93 @@
+name: Pull Request Performance Comparison
+
+on:
+  pull_request:
+    branches: [ main ]
+    paths:
+      - '**.go'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/benchmark-pr.yml'
+
+jobs:
+  compare-performance:
+    name: Compare PR vs Main
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Checkout PR Branch
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Run PR Benchmarks
+        run: |
+          cd internal/benchmark
+          go test -bench . -benchmem -tags goregexpre -count 5 | tee ../../benchmark-re.txt
+
+      - name: Checkout Main (Baseline)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.base_ref }}
+          path: baseline
+
+      - name: Run Baseline Benchmarks
+        run: |
+          cd baseline/internal/benchmark
+          go test -bench . -benchmem -tags goregexpre -count 5 | tee ../../benchmark-main.txt
+
+      - name: Compare Benchmarks (10% Threshold)
+        run: |
+          # Use benchstat to compare
+          go tool benchstat baseline/benchmark-main.txt benchmark-re.txt > comparison.txt
+          cat comparison.txt
+
+          # Detect regression >= 10%
+          # Matches lines with +[1-9][0-9]% or more, and those with p-values (significant)
+          # Specifically: +10.0% to +99.9%, or +100% and up
+          if grep -E "\+([1-9][0-9]|[1-9][0-9][0-9]+)\.[0-9]+%" comparison.txt | grep -qE "p=[0-9.]+"; then
+            echo "REGRESSION_DETECTED=true" >> $GITHUB_ENV
+          fi
+
+      - name: Generate PR Comment
+        run: |
+          echo "### 🚀 Performance Comparison: \`main\` vs \`PR\`" > pr_comment.md
+          if [ "${{ env.REGRESSION_DETECTED }}" = "true" ]; then
+            echo "⚠️ **Alert: Performance regression >= 10% detected!**" >> pr_comment.md
+          else
+            echo "✅ Performance is within acceptable limits (< 10% degradation)." >> pr_comment.md
+          fi
+          echo "" >> pr_comment.md
+          echo '```' >> pr_comment.md
+          cat comparison.txt >> pr_comment.md
+          echo '```' >> pr_comment.md
+
+          # Also write to summary
+          cat pr_comment.md >> $GITHUB_STEP_SUMMARY
+
+      - name: Post PR Comment
+        uses: thollander/actions-comment-pull-request@v3
+        with:
+          file-path: pr_comment.md
+          comment-tag: benchmark-results
+
+      - name: Fail if Regression
+        if: env.REGRESSION_DETECTED == 'true'
+        run: |
+          echo "Performance regression >= 10% detected. Failing CI."
+          exit 1
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: |
+            benchmark-re.txt
+            baseline/benchmark-main.txt
