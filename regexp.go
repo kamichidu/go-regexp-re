@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"math/bits"
-	"unicode"
 	"unsafe"
 
 	"github.com/kamichidu/go-regexp-re/internal/ir"
@@ -21,30 +20,6 @@ const (
 	strategyFast
 	strategyExtended
 )
-
-type nfaThread[R any] struct {
-	id   uint32
-	regs R
-}
-
-func regsSlice[R any](r *R) []int {
-	var zero R
-	if unsafe.Sizeof(zero) == unsafe.Sizeof([]int(nil)) {
-		return *(*[]int)(unsafe.Pointer(r))
-	}
-	return unsafe.Slice((*int)(unsafe.Pointer(r)), int(unsafe.Sizeof(zero)/unsafe.Sizeof(int(0))))
-}
-
-func cloneRegs[R any](r R) R {
-	var zero R
-	if unsafe.Sizeof(zero) == unsafe.Sizeof([]int(nil)) {
-		src := *(*[]int)(unsafe.Pointer(&r))
-		dst := make([]int, len(src))
-		copy(dst, src)
-		return *(*R)(unsafe.Pointer(&dst))
-	}
-	return r
-}
 
 type Regexp struct {
 	expr           string
@@ -65,80 +40,70 @@ type Regexp struct {
 type CompileOption struct{ MaxMemory int }
 
 func Compile(expr string) (*Regexp, error) { return CompileContext(context.Background(), expr) }
-func CompileWithOption(expr string, opt CompileOption) (*Regexp, error) {
-	return CompileContextWithOption(context.Background(), expr, opt)
-}
 func CompileContext(ctx context.Context, expr string) (*Regexp, error) {
-	return CompileContextWithOption(ctx, expr, CompileOption{})
+	return CompileContextWithOptions(ctx, expr, CompileOption{MaxMemory: ir.MaxDFAMemory})
 }
+func CompileContextWithOptions(ctx context.Context, expr string, opt CompileOption) (*Regexp, error) {
+	s, err := syntax.Parse(expr, syntax.Perl)
+	if err != nil {
+		return nil, err
+	}
+	numSubexp := s.MaxCap()
+	s = syntax.Simplify(s)
+	prog, err := syntax.Compile(s)
+	if err != nil {
+		return nil, err
+	}
 
-func CompileContextWithOption(ctx context.Context, expr string, opt CompileOption) (*Regexp, error) {
-	if opt.MaxMemory <= 0 {
-		opt.MaxMemory = ir.MaxDFAMemory
-	}
-	re, err := syntax.Parse(expr, syntax.Perl)
-	if err != nil {
-		return nil, err
-	}
-	numSubexp := re.MaxCap()
 	subexpNames := make([]string, numSubexp+1)
-	extractCapNames(re, subexpNames)
-	anchorStart, anchorEnd := false, false
-	if re.Op == syntax.OpConcat && len(re.Sub) > 0 {
-		if re.Sub[0].Op == syntax.OpBeginText {
-			anchorStart = true
+	extractCapNames(s, subexpNames)
+
+	complete := false
+	prefixStr := ""
+	if s.Op == syntax.OpConcat && len(s.Sub) > 0 && s.Sub[0].Op == syntax.OpLiteral {
+		prefixStr = string(s.Sub[0].Rune)
+		if len(s.Sub) == 1 {
+			complete = true
 		}
-		if re.Sub[len(re.Sub)-1].Op == syntax.OpEndText {
-			anchorEnd = true
-		}
-	} else if re.Op == syntax.OpBeginText {
-		anchorStart = true
-	} else if re.Op == syntax.OpEndText {
-		anchorEnd = true
+	} else if s.Op == syntax.OpLiteral {
+		prefixStr = string(s.Rune)
+		complete = true
 	}
-	re = syntax.Simplify(re)
-	re = syntax.Optimize(re)
-	literalMatcher := ir.AnalyzeLiteralPattern(re, numSubexp+1)
-	prefixStr, complete := syntax.Prefix(re)
-	prog, err := syntax.Compile(re)
-	if err != nil {
-		return nil, err
-	}
+
+	anchorStart := s.Op == syntax.OpConcat && len(s.Sub) > 0 && s.Sub[0].Op == syntax.OpBeginText
+	anchorEnd := s.Op == syntax.OpConcat && len(s.Sub) > 0 && s.Sub[len(s.Sub)-1].Op == syntax.OpEndText
 
 	var dfa *ir.DFA
 	var bpDfa *ir.BitParallelDFA
-	var prefixState ir.StateID = ir.InvalidState
 
-	// ARCHITECTURAL SHORTCUT:
-	// If literal matcher is possible, skip heavy DFA table construction.
-	if literalMatcher != nil {
-		res := &Regexp{
-			expr:           expr,
-			numSubexp:      numSubexp,
-			subexpNames:    subexpNames,
-			prefix:         []byte(prefixStr),
-			complete:       complete,
-			literalMatcher: literalMatcher,
-			prog:           prog,
-			strategy:       strategyLiteral,
-		}
-		return res, nil
-	}
-	// If Bit-parallel is possible, skip heavy DFA table construction.
-	if isSimpleForBP(prog) {
+	// Strategy selection:
+	// If the pattern is simple enough for BP-DFA AND no submatches are required (numSubexp == 0),
+	// use only BP-DFA. Otherwise, build a DFA to support precise rescan.
+	if isSimpleForBP(prog) && prog.NumCap <= 2 {
 		bpDfa = ir.NewBitParallelDFA(prog)
 	}
 	if bpDfa == nil {
+		var err error
 		dfa, err = ir.NewDFAWithMemoryLimit(ctx, prog, opt.MaxMemory)
 		if err != nil {
 			return nil, err
 		}
-		prefixState = dfa.MatchState()
-		if prefixStr != "" {
-			trans := dfa.Transitions()
-			for _, c := range []byte(prefixStr) {
-				off := (int(prefixState) << 8) | int(c)
-				rawNext := trans[off]
+		// Even for complex patterns, we build a BP-DFA to serve as a terminal arbiter
+		// if it fits within 62 states.
+		if len(prog.Inst) <= 62 {
+			bpDfa = ir.NewBitParallelDFA(prog)
+		}
+	}
+
+	var prefixState ir.StateID = ir.InvalidState
+	if dfa != nil && len(prefixStr) > 0 {
+		prefixState = dfa.SearchState()
+		if anchorStart {
+			prefixState = dfa.MatchState()
+		}
+		for i := 0; i < len(prefixStr); i++ {
+			if prefixState != ir.InvalidState {
+				rawNext := dfa.Transitions()[(int(prefixState)<<8)|int(prefixStr[i])]
 				if rawNext == ir.InvalidState {
 					prefixState = ir.InvalidState
 					break
@@ -160,10 +125,8 @@ func isSimpleForBP(prog *syntax.Prog) bool {
 	for _, inst := range prog.Inst {
 		switch inst.Op {
 		case syntax.InstAlt, syntax.InstAltMatch:
-			// For now, any Alt takes the DFA path for priority safety.
 			return false
 		case syntax.InstRune, syntax.InstRune1, syntax.InstRuneAny, syntax.InstRuneAnyNotNL:
-			// BP-DFA matches byte-by-byte. Multi-byte runes require DFA path.
 			if inst.Op == syntax.InstRuneAny || inst.Op == syntax.InstRuneAnyNotNL {
 				return false
 			}
@@ -268,262 +231,75 @@ func (re *Regexp) extractSubmatches(b []byte, start, end, targetPriority int, ma
 	}
 
 	// Hybrid Strategy:
-	// If dfa is nil, we are in Bit-parallel path. For submatches, NFA is the only option.
-	// Otherwise, use the principal DFA Rescan except for greedy cases.
-	if re.dfa == nil || re.isGreedyMatch() {
-		return re.nfaRescan(b, start, end, regs)
+	// Use the principal DFA Rescan with BP-DFA terminal arbitration.
+	// If DFA is nil (BP-DFA only path), we use the BP-DFA for rescan.
+	if re.dfa == nil {
+		bpRescanLoop(re, b, start, end, targetPriority, matchTags, regs)
+		return regs
 	}
 
 	if re.dfa.HasAnchors() {
-		rescanLoop[extendedMatchTrait](re, b, start, end, targetPriority, regs)
+		rescanLoop[extendedMatchTrait](re, b, start, end, targetPriority, matchTags, regs)
 	} else {
-		rescanLoop[fastMatchTrait](re, b, start, end, targetPriority, regs)
+		rescanLoop[fastMatchTrait](re, b, start, end, targetPriority, matchTags, regs)
 	}
 
-	// Principal refinement: apply matchTags consistent with determined priority
-	for i := 0; i < 64; i++ {
-		if (matchTags&(1<<uint(i))) != 0 && i < len(regs) {
-			if regs[i] == -1 || regs[i] > end {
-				regs[i] = end
-			}
-		}
+	// Go standard regexp returns exactly (numSubexp+1)*2 indices.
+	// We truncate any internal tracking registers.
+	expectedLen := (re.numSubexp + 1) * 2
+	if len(regs) > expectedLen {
+		regs = regs[:expectedLen]
 	}
+
 	return regs
 }
 
-func (re *Regexp) nfaRescan(b []byte, start, end int, regs []int) []int {
-	numSub := re.numSubexp
-	if numSub <= 4 {
-		return nfaRescanGeneric[[10]int](re, b, start, end, regs)
-	}
-	if numSub <= 16 {
-		return nfaRescanGeneric[[34]int](re, b, start, end, regs)
-	}
-	if numSub <= 32 {
-		return nfaRescanGeneric[[66]int](re, b, start, end, regs)
-	}
-	return nfaRescanGeneric[[]int](re, b, start, end, regs)
-}
-
-func nfaRescanGeneric[R any](re *Regexp, b []byte, start, end int, regs []int) []int {
-	var vBuf [128]uint32
-	var q1Buf [32]nfaThread[R]
-	var q2Buf [32]nfaThread[R]
-	var wBuf [32]nfaThread[R]
-	var visitGen uint32
-
-	visited := vBuf[:]
-	if len(re.prog.Inst) > len(vBuf) {
-		visited = make([]uint32, len(re.prog.Inst))
-	}
-	curr := q1Buf[:0]
-	next := q2Buf[:0]
-
-	regSize := len(regs)
-	var initialRegs R
-	var zero R
-	if unsafe.Sizeof(zero) == unsafe.Sizeof([]int(nil)) {
-		initialRegs = any(make([]int, regSize)).(R)
-	}
-	s := regsSlice(&initialRegs)
-	for i := range s {
-		s[i] = -1
-	}
-	s[0] = start
-
-	// Initial step
-	visitGen++
-	gen := visitGen
-	work := wBuf[:0]
-	work = append(work, nfaThread[R]{uint32(re.prog.Start), initialRegs})
-	for len(work) > 0 {
-		th := work[len(work)-1]
-		work = work[:len(work)-1]
-		if visited[th.id] == gen {
-			continue
-		}
-		visited[th.id] = gen
-		found := false
-		for i := 0; i < len(curr); i++ {
-			if curr[i].id == th.id {
-				found = true
-				break
-			}
-		}
-		if found {
-			continue
-		}
-		inst := re.prog.Inst[th.id]
-		switch inst.Op {
-		case syntax.InstCapture:
-			newRegs := cloneRegs(th.regs)
-			rs := regsSlice(&newRegs)
-			if int(inst.Arg) < len(rs) {
-				rs[inst.Arg] = start
-			}
-			work = append(work, nfaThread[R]{inst.Out, newRegs})
-		case syntax.InstNop:
-			work = append(work, nfaThread[R]{inst.Out, th.regs})
-		case syntax.InstAlt, syntax.InstAltMatch:
-			work = append(work, nfaThread[R]{inst.Arg, th.regs})
-			work = append(work, nfaThread[R]{inst.Out, th.regs})
-		case syntax.InstEmptyWidth:
-			if syntax.EmptyOp(inst.Arg)&ir.CalculateContext(b, start) == syntax.EmptyOp(inst.Arg) {
-				work = append(work, nfaThread[R]{inst.Out, th.regs})
-			}
-		default:
-			curr = append(curr, th)
-		}
-	}
+func bpRescanLoop(re *Regexp, b []byte, start, end, targetPriority int, matchTags uint64, regs []int) {
+	bp := re.bpDfa
+	state := bp.StartMask
 
 	for i := start; i < end; i++ {
-		next = next[:0]
-		visitGen++
-		gen = visitGen
-		for j := 0; j < len(curr); j++ {
-			th := curr[j]
-			inst := re.prog.Inst[th.id]
-			match := false
-			switch inst.Op {
-			case syntax.InstRune, syntax.InstRune1:
-				fold := (inst.Arg&uint32(syntax.FoldCase) != 0)
-				r := rune(b[i])
-				if inst.Op == syntax.InstRune1 {
-					r0 := inst.Rune[0]
-					if fold {
-						match = (r == r0 || r == unicode.SimpleFold(r0))
-					} else {
-						match = (r == r0)
-					}
-				} else {
-					for k := 0; k < len(inst.Rune); k += 2 {
-						if r >= inst.Rune[k] && r <= inst.Rune[k+1] {
-							match = true
-							break
-						}
-					}
-				}
-			case syntax.InstRuneAny:
-				match = true
-			case syntax.InstRuneAnyNotNL:
-				match = b[i] != '\n'
-			}
-			if match {
-				// Inline addThread for next
-				work = wBuf[:0]
-				work = append(work, nfaThread[R]{inst.Out, th.regs})
-				for len(work) > 0 {
-					wth := work[len(work)-1]
-					work = work[:len(work)-1]
-					if visited[wth.id] == gen {
-						continue
-					}
-					visited[wth.id] = gen
-					found := false
-					for k := 0; k < len(next); k++ {
-						if next[k].id == wth.id {
-							found = true
-							break
-						}
-					}
-					if found {
-						continue
-					}
-					inst2 := re.prog.Inst[wth.id]
-					switch inst2.Op {
-					case syntax.InstCapture:
-						newRegs := cloneRegs(wth.regs)
-						rs := regsSlice(&newRegs)
-						if int(inst2.Arg) < len(rs) {
-							rs[inst2.Arg] = i + 1
-						}
-						work = append(work, nfaThread[R]{inst2.Out, newRegs})
-					case syntax.InstNop:
-						work = append(work, nfaThread[R]{inst2.Out, wth.regs})
-					case syntax.InstAlt, syntax.InstAltMatch:
-						work = append(work, nfaThread[R]{inst2.Arg, wth.regs})
-						work = append(work, nfaThread[R]{inst2.Out, wth.regs})
-					case syntax.InstEmptyWidth:
-						if syntax.EmptyOp(inst2.Arg)&ir.CalculateContext(b, i+1) == syntax.EmptyOp(inst2.Arg) {
-							work = append(work, nfaThread[R]{inst2.Out, wth.regs})
-						}
-					default:
-						next = append(next, wth)
-					}
-				}
-			}
+		state &= bp.ContextMasks[ir.CalculateContext(b, i)]
+		active := state & bp.CharMasks[b[i]]
+		if active == 0 {
+			break
 		}
-		curr, next = next, curr
+		state = bp.SuccessorTable[0][active&0xff] |
+			bp.SuccessorTable[1][(active>>8)&0xff] |
+			bp.SuccessorTable[2][(active>>16)&0xff] |
+			bp.SuccessorTable[3][(active>>24)&0xff] |
+			bp.SuccessorTable[4][(active>>32)&0xff] |
+			bp.SuccessorTable[5][(active>>40)&0xff] |
+			bp.SuccessorTable[6][(active>>48)&0xff] |
+			bp.SuccessorTable[7][(active>>56)&0xff]
 	}
 
-	// Final epsilon closure at end
-	visitGen++
-	gen = visitGen
-	next = next[:0]
-	for i := 0; i < len(curr); i++ {
-		th := curr[i]
-		work = wBuf[:0]
-		work = append(work, th)
-		for len(work) > 0 {
-			wth := work[len(work)-1]
-			work = work[:len(work)-1]
-			if visited[wth.id] == gen {
-				continue
-			}
-			visited[wth.id] = gen
-			found := false
-			for k := 0; k < len(next); k++ {
-				if next[k].id == wth.id {
-					found = true
-					break
+	validMatches := state & bp.MatchMask
+	if validMatches != 0 {
+		winningBit := uint32(bits.TrailingZeros64(validMatches))
+		for i := 1; i < len(regs); i += 2 {
+			if (matchTags & (1 << uint(i))) != 0 {
+				if regs[i] == -1 || regs[i] > end {
+					regs[i] = end
 				}
 			}
-			if found {
-				continue
-			}
-			inst := re.prog.Inst[wth.id]
-			switch inst.Op {
-			case syntax.InstCapture:
-				newRegs := cloneRegs(wth.regs)
-				rs := regsSlice(&newRegs)
-				if int(inst.Arg) < len(rs) {
-					rs[inst.Arg] = end
-				}
-				work = append(work, nfaThread[R]{inst.Out, newRegs})
-			case syntax.InstNop:
-				work = append(work, nfaThread[R]{inst.Out, wth.regs})
-			case syntax.InstAlt, syntax.InstAltMatch:
-				work = append(work, nfaThread[R]{inst.Arg, wth.regs})
-				work = append(work, nfaThread[R]{inst.Out, wth.regs})
-			case syntax.InstEmptyWidth:
-				if syntax.EmptyOp(inst.Arg)&ir.CalculateContext(b, end) == syntax.EmptyOp(inst.Arg) {
-					work = append(work, nfaThread[R]{inst.Out, wth.regs})
-				}
-			default:
-				next = append(next, wth)
+		}
+		inst := re.prog.Inst[winningBit]
+		if inst.Op == syntax.InstCapture {
+			if int(inst.Arg) < len(regs) {
+				regs[inst.Arg] = end
 			}
 		}
 	}
-
-	for i := 0; i < len(next); i++ {
-		if re.prog.Inst[next[i].id].Op == syntax.InstMatch {
-			thRegs := regsSlice(&next[i].regs)
-			copy(regs, thRegs[:len(regs)])
-			regs[1] = end
-			return regs
-		}
-	}
-	return regs
 }
 
-func rescanLoop[T loopTrait](re *Regexp, b []byte, start, end, targetPriority int, regs []int) {
+func rescanLoop[T loopTrait](re *Regexp, b []byte, start, end, targetPriority int, matchTags uint64, regs []int) {
 	var trait T
 	dfa := re.dfa
 	trans, tagUpdateIndices, tagUpdates, matchState := dfa.Transitions(), dfa.TagUpdateIndices(), dfa.TagUpdates(), dfa.MatchState()
 
 	innerTarget := targetPriority % ir.SearchRestartPenalty
 	for _, u := range dfa.StartUpdates() {
-		// Principle: allow tags consistent with best priority
 		if int(u.RelativePriority) <= innerTarget {
 			applyTags(u.Tags, start, regs)
 		}
@@ -565,13 +341,56 @@ func rescanLoop[T loopTrait](re *Regexp, b []byte, start, end, targetPriority in
 			break
 		}
 	}
+
+	// Terminal Arbitration: Use BP-DFA MatchMask to resolve 1-byte ambiguity for greedy loops.
+	greedyTags := dfa.GreedyTags()
+	if re.isGreedyMatch() && re.bpDfa != nil {
+		finalMask := dfa.StateToMask(state)
+		validMatches := finalMask & re.bpDfa.MatchMask
+		if validMatches != 0 {
+			winningBit := uint32(bits.TrailingZeros64(validMatches))
+
+			for i := 1; i < len(regs); i += 2 {
+				if (matchTags & (1 << uint(i))) != 0 {
+					// Finalize END tags. For greedy tags, the BP-DFA identifies the exact 'end'.
+					// For non-greedy tags, we trust the DFA rescan's first-arrival point.
+					if (greedyTags & (1 << uint(i))) != 0 {
+						regs[i] = end
+					} else if regs[i] == -1 || regs[i] > end {
+						regs[i] = end
+					}
+				}
+			}
+
+			inst := re.prog.Inst[winningBit]
+			if inst.Op == syntax.InstCapture {
+				if int(inst.Arg) < len(regs) && (inst.Arg%2 == 1) {
+					regs[inst.Arg] = end
+				}
+			}
+		}
+	} else {
+		for i := 1; i < len(regs); i += 2 {
+			if (matchTags & (1 << uint(i))) != 0 {
+				if regs[i] == -1 || regs[i] > end {
+					regs[i] = end
+				}
+			}
+		}
+	}
 }
 
 func applyTags(t uint64, pos int, regs []int) {
 	for t != 0 {
 		i := bits.TrailingZeros64(t)
 		if i < len(regs) {
-			regs[i] = pos
+			if i%2 == 0 {
+				if regs[i] == -1 {
+					regs[i] = pos
+				}
+			} else {
+				regs[i] = pos
+			}
 		}
 		t &= ^(uint64(1) << i)
 	}
@@ -589,7 +408,6 @@ func bitParallelExecLoop(re *Regexp, b []byte) (int, int, int, uint64) {
 		state := bp.StartMask
 		currContext := ir.CalculateContext(b, i)
 
-		// 1. Initial Match Check (Empty string at start i)
 		if (matchMask & (1 << 63)) != 0 {
 			prio := i*ir.SearchRestartPenalty + 63
 			if prio < bestPriority || (prio == bestPriority && i >= bestEnd) {
@@ -598,14 +416,11 @@ func bitParallelExecLoop(re *Regexp, b []byte) (int, int, int, uint64) {
 		}
 
 		for j := i; ; j++ {
-			// 2. Apply anchors (instant transitions)
 			for k := 0; k < 8; k++ {
 				active := state & bp.ContextMasks[currContext]
 				if active == 0 {
 					break
 				}
-
-				// MATCH check for anchors
 				if (active & matchMask) != 0 {
 					activeMatch := active & matchMask
 					winningBit := bits.TrailingZeros64(activeMatch)
@@ -614,7 +429,6 @@ func bitParallelExecLoop(re *Regexp, b []byte) (int, int, int, uint64) {
 						bestPriority, bestEnd, bestStart, bestMatchTags = prio, j, i, (1 << uint(winningBit))
 					}
 				}
-
 				state = table[0][active&0xff] |
 					table[1][(active>>8)&0xff] |
 					table[2][(active>>16)&0xff] |
@@ -624,18 +438,13 @@ func bitParallelExecLoop(re *Regexp, b []byte) (int, int, int, uint64) {
 					table[6][(active>>48)&0xff] |
 					table[7][(active>>56)&0xff] | (state & ^active)
 			}
-
 			if j == numBytes {
 				break
 			}
-
-			// 3. Character transition
 			active := state & charMasks[b[j]]
 			if active == 0 {
 				break
 			}
-
-			// MATCH check for characters
 			if (active & matchMask) != 0 {
 				activeMatch := active & matchMask
 				winningBit := bits.TrailingZeros64(activeMatch)
@@ -644,7 +453,6 @@ func bitParallelExecLoop(re *Regexp, b []byte) (int, int, int, uint64) {
 					bestPriority, bestEnd, bestStart, bestMatchTags = prio, j+1, i, (1 << uint(winningBit))
 				}
 			}
-
 			state = table[0][active&0xff] |
 				table[1][(active>>8)&0xff] |
 				table[2][(active>>16)&0xff] |
@@ -653,18 +461,14 @@ func bitParallelExecLoop(re *Regexp, b []byte) (int, int, int, uint64) {
 				table[5][(active>>40)&0xff] |
 				table[6][(active>>48)&0xff] |
 				table[7][(active>>56)&0xff]
-
 			currContext = ir.CalculateContext(b, j+1)
 		}
-
 		if bestStart != -1 {
 			return bestStart, bestEnd, bestPriority, bestMatchTags
 		}
 		if re.anchorStart {
 			break
 		}
-
-		// Prefix skip optimization
 		if len(re.prefix) > 0 && i+1 < numBytes {
 			skip := bytes.Index(b[i+1:], re.prefix)
 			if skip < 0 {
@@ -682,7 +486,6 @@ func (re *Regexp) applyContextToState(d *ir.DFA, state ir.StateID, context synta
 	}
 	tagUpdates := d.TagUpdates()
 	anchorTagUpdateIndices := d.AnchorTagUpdateIndices()
-
 	for iter := 0; iter < 6; iter++ {
 		changed := false
 		for bit := 0; bit < 6; bit++ {
@@ -763,27 +566,17 @@ func fastExecLoop(re *Regexp, b []byte) (int, int, int, uint64) {
 	accepting := d.Accepting()
 	numStates := d.NumStates()
 	numBytes := len(b)
-
-	// Regexp fields
 	anchorStart := re.anchorStart
 	prefix := re.prefix
 	prefixState := re.prefixState
-
-	// BCE hints
 	if len(trans) == 0 {
 		return -1, -1, -1, 0
 	}
-	_ = trans[len(trans)-1]
-	if len(accepting) > 0 {
-		_ = accepting[len(accepting)-1]
-	}
-
 	bestStart, bestEnd, bestPriority, bestMatchTags, currentPriority := -1, -1, 1<<30-1, uint64(0), 0
 	state := d.SearchState()
 	if anchorStart {
 		state = d.MatchState()
 	}
-
 	for i := 0; i <= numBytes; {
 		sidx := int(state)
 		if sidx >= 0 && sidx < len(accepting) && accepting[sidx] {
@@ -813,23 +606,17 @@ func fastExecLoop(re *Regexp, b []byte) (int, int, int, uint64) {
 		} else if i == numBytes {
 			break
 		}
-
-		// Restart search or return best match
 		if bestStart != -1 {
 			return bestStart, bestEnd, bestPriority, bestMatchTags
 		}
 		if anchorStart {
 			break
 		}
-
-		// Move to next starting position
 		currentPriority = (currentPriority/ir.SearchRestartPenalty + 1) * ir.SearchRestartPenalty
 		i = currentPriority / ir.SearchRestartPenalty
 		if i > numBytes {
 			break
 		}
-
-		// Warp Point / Prefix skip optimization
 		state = d.SearchState()
 		warpByte := d.WarpPoint(state)
 		if warpByte >= 0 {
@@ -839,7 +626,6 @@ func fastExecLoop(re *Regexp, b []byte) (int, int, int, uint64) {
 			}
 			i += skip
 			currentPriority = (i * ir.SearchRestartPenalty)
-			// Move to target state
 			state = d.WarpPointState(state)
 			i++
 		} else if len(prefix) > 0 {
@@ -866,30 +652,19 @@ func extendedExecLoop(re *Regexp, b []byte) (int, int, int, uint64) {
 	accepting := d.Accepting()
 	numStates := d.NumStates()
 	numBytes := len(b)
-
-	// Regexp fields
 	anchorStart := re.anchorStart
 	prefix := re.prefix
 	prefixState := re.prefixState
-
-	// BCE hints
 	if len(trans) == 0 {
 		return -1, -1, -1, 0
 	}
-	_ = trans[len(trans)-1]
-	if len(accepting) > 0 {
-		_ = accepting[len(accepting)-1]
-	}
-
 	bestStart, bestEnd, bestPriority, bestMatchTags, currentPriority := -1, -1, 1<<30-1, uint64(0), 0
 	state := d.SearchState()
 	if anchorStart {
 		state = d.MatchState()
 	}
 	usedAnchors := d.UsedAnchors()
-
 	for i := 0; i <= numBytes; {
-		// OPTIMIZATION: Only calculate context and apply if used anchors are present.
 		if (usedAnchors&(syntax.EmptyWordBoundary|syntax.EmptyNoWordBoundary)) != 0 ||
 			(i == 0 && (usedAnchors&(syntax.EmptyBeginText|syntax.EmptyBeginLine)) != 0) ||
 			(i == numBytes && (usedAnchors&(syntax.EmptyEndText|syntax.EmptyEndLine)) != 0) ||
@@ -925,23 +700,17 @@ func extendedExecLoop(re *Regexp, b []byte) (int, int, int, uint64) {
 		} else if i == numBytes {
 			break
 		}
-
-		// Restart search or return best match
 		if bestStart != -1 {
 			return bestStart, bestEnd, bestPriority, bestMatchTags
 		}
 		if anchorStart {
 			break
 		}
-
-		// Move to next starting position
 		currentPriority = (currentPriority/ir.SearchRestartPenalty + 1) * ir.SearchRestartPenalty
 		i = currentPriority / ir.SearchRestartPenalty
 		if i > numBytes {
 			break
 		}
-
-		// Warp Point / Prefix skip optimization
 		state = d.SearchState()
 		warpByte := d.WarpPoint(state)
 		if warpByte >= 0 {
@@ -949,21 +718,16 @@ func extendedExecLoop(re *Regexp, b []byte) (int, int, int, uint64) {
 			if skip < 0 {
 				break
 			}
-
-			// Guarded warp verification
 			guard := d.WarpPointGuard(state)
 			if guard != 0 {
 				if ir.CalculateContext(b, i+skip)&guard == 0 {
-					// Guard failed, skip this byte and continue search
 					i += skip + 1
 					currentPriority = (i * ir.SearchRestartPenalty)
 					continue
 				}
 			}
-
 			i += skip
 			currentPriority = (i * ir.SearchRestartPenalty)
-			// Move to target state
 			state = d.WarpPointState(state)
 			i++
 		} else if len(prefix) > 0 {

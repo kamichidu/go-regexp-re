@@ -69,3 +69,11 @@ In a bit-parallel environment, multiple NFA paths can overlap. The engine resolv
 * **Pure Go High Performance**: Achieves performance comparable to low-level C implementations by aligning perfectly with the Go compiler's register allocation.
 * **L1 Cache Optimization**: The data structures required for transitions are kept small enough to fit within the L1 data cache.
 * **Deterministic Execution**: Guarantees a constant instruction count per byte, providing predictable and low-latency matching.
+
+== Role in 2-Pass Submatch Extraction
+
+While the table-based DFA is faster for large patterns, it can lose track of individual NFA path histories during greedy match loops. In the 2-pass strategy, BP-DFA acts as the **Winning Bit Arbiter** at the terminal byte of a match:
+
+1. **Handover**: The table-based DFA transfers its final `StateID` to the BP-DFA as a `uint64` bitmask.
+2. **Arbitration**: The BP-DFA identifies which specific bit (NFA path) corresponds to the highest priority `InstMatch` at the exact end of the match segment.
+3. **Certainty**: This resolves the "1-byte ambiguity" where a DFA state might simultaneously represent a "continue" path and a "match" path, ensuring 100% compatibility with Go's `regexp` semantics.

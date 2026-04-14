@@ -14,12 +14,18 @@ DFAs are traditionally poor at extracting submatches (capturing groups). This is
 === Phase 2: Localized Forward Scan
 * **Objective**: Extract precise submatch information within the confirmed boundary.
 * **Mechanism**:
-  - Identifies the "absolute winning path ID" (NFA state ID) from Phase 1.
-  - Performs a rescan of only the target segment using a DFA or BP-DFA.
-  - **Lazy-Tagging**: Instead of "baking" tags into the DFA construction, it selects the optimal tags from "living paths" at runtime.
+  - **Principal DFA Rescan**: Performs a forward scan using the primary DFA to update capture registers (`regs`).
+  - **BP-DFA Handover (Greedy Match Resolution)**: When the rescan reaches the confirmed `end` position, and a greedy operator (e.g., `a*`) is involved, the engine hands over the current DFA state to the BP-DFA.
+  - **Winning Bit Selection**: The BP-DFA utilizes its bitmask to identify which specific NFA path (bit) reached the `InstMatch` at the exact `end` position. This "Winning Bit" serves as the tie-breaker to resolve the 1-byte ambiguity inherent in DFA-based greedy matches.
+  - **Zero-NFA Mandate**: This hybrid approach completely eliminates the need for a backtracking or thread-managed NFA rescan, ensuring consistent $O(n)$ performance.
 
-== Key Technology: Winning Absolute Priority
-The engine maintains a temporary stack for multiple tag candidates within each state. At the end of the match, it picks only the tags associated with the absolute winner identified in Phase 1 (Leftmost-First). This prevents coordinate "overtakes" or "drifts."
+== Key Technology: Winning Bit Arbitration
+The core challenge in DFA submatch extraction is the "Greedy Overrun." In a pattern like `(a*)b`, the DFA state at the match end might contain both a path that matched `a*` and a path that moved to `b`. 
+
+By converting the final DFA state back into a BP-DFA bitmask (`uint64`), the engine can:
+1. Identify all NFA paths currently in a "Matching" state.
+2. Select the one with the highest priority (lowest bit position) according to Go's leftmost-first semantics.
+3. Finalize the capture registers based on this specific winning path.
 
 == Advantages
 

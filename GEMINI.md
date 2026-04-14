@@ -37,12 +37,9 @@ The engine follows a **DFA-First Hybrid** strategy to guarantee both performance
 - **Phase 1: Boundary Discovery**: High-speed DFA scan or Bit-parallel scan determines the match boundaries `[start, end]`. For unanchored searches, the execution loop performs manual restarts at each position, utilizing `bytes.Index` to skip ahead whenever a constant prefix is available.
 - **Phase 2: Strategy Dispatch**:
     - **Literal Template (O(1))**: For 0-Pass matches, submatches are applied via a pre-calculated relative offset template.
-    - **Principal (DFA Rescan)**: For non-greedy or literal-heavy patterns, a second DFA pass (rescan) is used to extract submatches deterministically.
-    - **Exception (Targeted NFA Rescan)**: For patterns involving greedy operators (e.g., `a*`, `a+`) or when DFA is skipped (Bit-parallel only), an optimized NFA rescans the confirmed `[start, end]` range.
-    - **Stack-Oriented Generic Rescan**: NFA rescan achieves zero-alloc, stack-based execution by utilizing monomorphized generics with local buffers. By injecting tiered fixed-size array types as the register storage `R` into an inlined rescan loop, the engine eliminates both `sync.Pool` overhead and heap fragmentation for common patterns.
-    - **Inlined Hot-Loop Logic**: To prevent heap escape of stack-allocated buffers, the rescan logic MUST be implemented as a flat, inlined loop within the generic function. Local closures and recursion are prohibited in this hot path as they trigger capture-based escape, which can degrade performance by 3x.
-
-- **Priority Sync**: During DFA rescan, the engine MUST synchronize the relative priority with the absolute winner identified in Phase 1 using `<=` matching to capture all valid tag candidates.
+    - **Principal (DFA Rescan)**: For all patterns, a second DFA pass (rescan) is used to extract submatches deterministically.
+    - **Winning Bit Selection (BP-DFA Handover)**: To resolve greedy match ambiguity (e.g., `a*`), the engine hands over the final DFA state to the BP-DFA at the `end` position. The BP-DFA acts as a tie-breaker, selecting the highest priority NFA path (winning bit) to finalize the capture registers.
+- **Zero-NFA Mandate**: The engine MUST NOT fall back to a backtracking or thread-managed NFA for submatch extraction. All cases must be handled via the DFA/BP-DFA hybrid strategy to maintain $O(n)$ performance and eliminate runtime memory allocations.
 
 ### 2.6 Isolated Bit-parallel DFA (BP-DFA)
 For patterns with 64 or fewer NFA nodes, the engine utilizes a specialized Bit-parallel implementation.
@@ -50,7 +47,8 @@ For patterns with 64 or fewer NFA nodes, the engine utilizes a specialized Bit-p
 - **Zero Memory Load Transitions**: Transitions must be performed using `uint64` bitwise operations.
 - **L1 Cache Optimization**: BP-DFA utilizing a **16KB Successor Table** (`[8][256]uint64`) ensures that state transitions stay within the L1D cache. The transition loop MUST use 8-bit chunk lookups to achieve $O(1)$ performance per byte.
 - **Context-Aware Anchor Resolution**: BP-DFA utilizes pre-compiled **`ContextMasks`** to resolve all 6 types of anchors (`^`, `$`, `\b`, etc.) via a single bitwise AND operation, eliminating branching in the hot loop.
-- **Priority Tracking Challenge**: Since Go's `syntax.Prog` optimizes for shared prefixes (e.g., `aa|a` -> `a(a|)`), the BP-DFA cannot naturally distinguish submatch priority using only bitsets. If strict leftmost-first priority is required for overlapping paths, the engine MUST fallback to the table-based DFA.
+- **Winning Bit Arbiter (2-Pass)**: In the 2-pass strategy, BP-DFA acts as the final tie-breaker. It converts the terminal DFA state into a bitmask to identify the highest-priority NFA path at the exact match end, resolving the "1-byte ambiguity" of greedy loops without NFA rescan.
+- **Priority Tracking Challenge**: Since Go's `syntax.Prog` optimizes for shared prefixes (e.g., `aa|a` -> `a(a|)`), the BP-DFA cannot naturally distinguish submatch priority using only bitsets. If strict leftmost-first priority is required for overlapping paths, the engine MUST fallback to the table-based DFA for the rescan path.
 
 ### 2.7 Architectural Shortcut (Compilation Efficiency)
 To minimize compilation overhead, the engine MUST use an **Architectural Shortcut** for simple patterns.
@@ -92,9 +90,8 @@ To ensure scalability to 10,000+ patterns, the DFA construction phase MUST adher
 
 ### 2.15 Zero-Overhead Execution (Manual Monomorphization Mandate)
 To achieve the goal of $O(1)$ performance per byte without hidden overhead, the engine MUST adhere to these execution principles:
-- **Avoid Runtime Generic/Interface Dispatch (Phase 1)**: Go's current implementation of generics often uses `GCShape` sharing with runtime dictionaries, and interfaces introduce `itab` lookups. For the primary match loops (Phase 1), these introduce unacceptable latency. The engine MUST use specialized, non-generic, and concrete-struct-based functions for the "Literal Path", "Fast Path", and "Extended Path".
-- **Monomorphized Generics for Submatch Abstraction (Phase 2)**: For the rescan phase (Phase 2), monomorphized generics are permitted to abstract register storage (e.g., `nfaRescanGeneric[R]`). Since these are specialized for pointer-free array types (e.g., `[34]int`), the Go compiler can eliminate dictionary lookups and facilitate efficient stack-based memory management.
-    - **Avoid Closures in Rescan Hot-Loop**: To ensure stack allocation of fixed-size buffers, the rescan logic MUST avoid using local closures (including recursive local functions) that capture local variables. Capturing even pointers to stack variables can trigger heap escape, leading to significant performance degradation (e.g., 3x slowdown).
+- **Avoid Runtime Generic/Interface Dispatch**: Go's current implementation of generics often uses `GCShape` sharing with runtime dictionaries, and interfaces introduce `itab` lookups. For the primary match loops (Phase 1) and submatch extraction (Phase 2), these introduce unacceptable latency. The engine MUST use specialized, non-generic, and concrete-struct-based functions for the "Literal Path", "Fast Path", and "Extended Path".
+- **Allocation-Free Rescan Strategy (Phase 2)**: For the rescan phase, the engine utilizes a stack-based approach with pre-allocated registers. By avoiding NFA thread management and heap-allocated buffers, it ensures zero GC overhead.
 - **Constant Folding of Strategy**: Branches based on pattern traits (e.g., `hasAnchors`) MUST be resolved at the function dispatch level (via `bindMatchStrategy`), ensuring the loop body itself is free of irrelevant checks.
 - **Anchor Usage Masking**: The engine MUST track `UsedAnchors` in the DFA to skip context calculation (`CalculateContext`) at positions where the specific anchors in the pattern cannot possibly match, further reducing CPU cycles.
 

@@ -200,6 +200,9 @@ type DFA struct {
 	usedAnchors            syntax.EmptyOp
 	numSubexp              int
 	stateIsSearch          []bool
+	stateToMask            []uint64
+	instReachableToMatch   uint64
+	greedyTags             uint64
 	trieRoots              [][]*utf8Node
 	accepting              []bool
 	stateMatchPriority     []int
@@ -209,7 +212,22 @@ type DFA struct {
 	warpPoints             []int16
 	warpPointState         []StateID
 	warpPointGuards        []syntax.EmptyOp
+	reachableToMatch       []uint64
 	nodes                  []*utf8Node
+}
+
+func (d *DFA) ReachableToMatch(s StateID) uint64 {
+	if s < 0 || int(s) >= len(d.reachableToMatch) {
+		return 0
+	}
+	return d.reachableToMatch[s]
+}
+
+func (d *DFA) StateToMask(s StateID) uint64 {
+	if s < 0 || int(s) >= len(d.stateToMask) {
+		return 0
+	}
+	return d.stateToMask[s]
 }
 
 type BitParallelDFA struct {
@@ -330,6 +348,10 @@ func NewDFAWithMemoryLimit(ctx context.Context, prog *syntax.Prog, maxMemory int
 	}
 	return d, nil
 }
+
+func (d *DFA) GreedyTags() uint64 { return d.greedyTags }
+
+func (d *DFA) InstReachableToMatch() uint64 { return d.instReachableToMatch }
 
 func NewBitParallelDFA(prog *syntax.Prog) *BitParallelDFA {
 	if len(prog.Inst) > 62 { // Reserve bit 63
@@ -530,6 +552,59 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 	}
 	d.stride = 256
 
+	// Pre-compute reachability to Match for all instructions
+	var reachableToMatch uint64
+	memo := make(map[int]bool)
+	var findMatch func(int) bool
+	findMatch = func(curr int) bool {
+		if res, ok := memo[curr]; ok {
+			return res
+		}
+		memo[curr] = false // Avoid cycles
+		inst := prog.Inst[curr]
+		if inst.Op == syntax.InstMatch {
+			return true
+		}
+		res := false
+		switch inst.Op {
+		case syntax.InstAlt, syntax.InstAltMatch:
+			res = findMatch(int(inst.Out)) || findMatch(int(inst.Arg))
+		case syntax.InstCapture, syntax.InstNop, syntax.InstEmptyWidth, syntax.InstRune, syntax.InstRune1, syntax.InstRuneAny, syntax.InstRuneAnyNotNL:
+			res = findMatch(int(inst.Out))
+		}
+		memo[curr] = res
+		return res
+	}
+	for i := range prog.Inst {
+		if i < 64 && findMatch(i) {
+			reachableToMatch |= (1 << uint(i))
+		}
+	}
+	d.instReachableToMatch = reachableToMatch
+
+	// Identify greedy tags: captures that are on the break branch of a greedy Alt.
+	var greedyTags uint64
+	for _, inst := range prog.Inst {
+		if (inst.Op == syntax.InstAlt || inst.Op == syntax.InstAltMatch) && inst.Arg > inst.Out {
+			// Break branch is Arg. Check if it leads directly to a Capture.
+			target := int(inst.Arg)
+			for {
+				next := prog.Inst[target]
+				if next.Op == syntax.InstCapture {
+					if next.Arg < 64 {
+						greedyTags |= (1 << next.Arg)
+					}
+					target = int(next.Out)
+				} else if next.Op == syntax.InstNop {
+					target = int(next.Out)
+				} else {
+					break
+				}
+			}
+		}
+	}
+	d.greedyTags = greedyTags
+
 	d.trieRoots = make([][]*utf8Node, len(prog.Inst))
 	var nodes []*utf8Node
 	nodes = append(nodes, nil) // ID 0 is nil
@@ -684,6 +759,14 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 			errBuild = err
 			return InvalidState
 		}
+
+		var mask uint64
+		for _, p := range closure {
+			if p.ID < 64 {
+				mask |= (1 << uint(p.ID))
+			}
+		}
+		d.stateToMask = append(d.stateToMask, mask)
 
 		d.stateIsSearch = append(d.stateIsSearch, isSearch)
 		isAcc, matchP := false, 1<<30-1
