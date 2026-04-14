@@ -6,71 +6,69 @@ import (
 	"unicode/utf8"
 )
 
+// LiteralStrategy defines how the literal should be matched.
+type LiteralStrategy uint8
+
+const (
+	LiteralStrategyExact LiteralStrategy = iota
+	LiteralStrategyPrefix
+	LiteralStrategySuffix
+	LiteralStrategyContains
+)
+
 // LiteralMatcher is a fast matcher for patterns consisting only of literals and anchors (^, $).
-type LiteralMatcher interface {
-	Match(b []byte) bool
-	FindSubmatchIndex(b []byte) []int
+// It is a concrete struct to avoid interface overhead in hot loops.
+type LiteralMatcher struct {
+	Literal     []byte
+	CapTemplate []int // Relative offset template [start0, end0, start1, end1, ...]
+	Strategy    LiteralStrategy
 }
 
-type literalStrategy interface {
-	Exec(input, lit []byte) (bool, int, int)
-}
-
-type exactStrategy struct{}
-
-func (exactStrategy) Exec(input, lit []byte) (bool, int, int) {
-	if bytes.Equal(input, lit) {
-		return true, 0, len(input)
+// Match reports whether the byte slice b matches the literal pattern.
+func (m *LiteralMatcher) Match(b []byte) bool {
+	switch m.Strategy {
+	case LiteralStrategyExact:
+		return bytes.Equal(b, m.Literal)
+	case LiteralStrategyPrefix:
+		return bytes.HasPrefix(b, m.Literal)
+	case LiteralStrategySuffix:
+		return len(b) >= len(m.Literal) && bytes.HasSuffix(b, m.Literal)
+	case LiteralStrategyContains:
+		return bytes.Index(b, m.Literal) >= 0
 	}
-	return false, 0, 0
+	return false
 }
 
-type prefixStrategy struct{}
+// FindSubmatchIndex returns the submatch indices for the literal pattern.
+func (m *LiteralMatcher) FindSubmatchIndex(b []byte) []int {
+	var matched bool
+	var start int
 
-func (prefixStrategy) Exec(input, lit []byte) (bool, int, int) {
-	if bytes.HasPrefix(input, lit) {
-		return true, 0, len(lit)
+	switch m.Strategy {
+	case LiteralStrategyExact:
+		if bytes.Equal(b, m.Literal) {
+			matched, start = true, 0
+		}
+	case LiteralStrategyPrefix:
+		if bytes.HasPrefix(b, m.Literal) {
+			matched, start = true, 0
+		}
+	case LiteralStrategySuffix:
+		if len(b) >= len(m.Literal) && bytes.HasSuffix(b, m.Literal) {
+			matched, start = true, len(b)-len(m.Literal)
+		}
+	case LiteralStrategyContains:
+		if i := bytes.Index(b, m.Literal); i >= 0 {
+			matched, start = true, i
+		}
 	}
-	return false, 0, 0
-}
 
-type suffixStrategy struct{}
-
-func (suffixStrategy) Exec(input, lit []byte) (bool, int, int) {
-	if len(input) >= len(lit) && bytes.HasSuffix(input, lit) {
-		return true, len(input) - len(lit), len(input)
-	}
-	return false, 0, 0
-}
-
-type containsStrategy struct{}
-
-func (containsStrategy) Exec(input, lit []byte) (bool, int, int) {
-	i := bytes.Index(input, lit)
-	if i >= 0 {
-		return true, i, i + len(lit)
-	}
-	return false, 0, 0
-}
-
-type genericLiteralMatcher[S literalStrategy] struct {
-	literal     []byte
-	capTemplate []int // Relative offset template [start0, end0, start1, end1, ...]
-	strategy    S
-}
-
-func (m *genericLiteralMatcher[S]) Match(b []byte) bool {
-	matched, _, _ := m.strategy.Exec(b, m.literal)
-	return matched
-}
-
-func (m *genericLiteralMatcher[S]) FindSubmatchIndex(b []byte) []int {
-	matched, start, _ := m.strategy.Exec(b, m.literal)
 	if !matched {
 		return nil
 	}
-	res := make([]int, len(m.capTemplate))
-	for i, offset := range m.capTemplate {
+
+	res := make([]int, len(m.CapTemplate))
+	for i, offset := range m.CapTemplate {
 		if offset < 0 {
 			res[i] = -1
 		} else {
@@ -80,9 +78,8 @@ func (m *genericLiteralMatcher[S]) FindSubmatchIndex(b []byte) []int {
 	return res
 }
 
-// AnalyzeLiteralPattern returns a LiteralMatcher if the Regexp can be specialized as a literal match.
-// totalCaps is the total number of capturing groups (including Group 0) expected by the caller.
-func AnalyzeLiteralPattern(re *syntax.Regexp, totalCaps int) LiteralMatcher {
+// AnalyzeLiteralPattern returns a *LiteralMatcher if the Regexp can be specialized as a literal match.
+func AnalyzeLiteralPattern(re *syntax.Regexp, totalCaps int) *LiteralMatcher {
 	var beginText, endText bool
 	var literal []byte
 	var capTemplate []int
@@ -92,25 +89,28 @@ func AnalyzeLiteralPattern(re *syntax.Regexp, totalCaps int) LiteralMatcher {
 		capTemplate[i] = -1
 	}
 
-	// Analyze if the pattern is a simple combination of literals and anchors
 	if !extractLiteral(re, &beginText, &endText, &literal, capTemplate, 0) {
 		return nil
 	}
 
-	// Set Group 0 for the full match
 	capTemplate[0] = 0
 	capTemplate[1] = len(literal)
 
+	m := &LiteralMatcher{
+		Literal:     literal,
+		CapTemplate: capTemplate,
+	}
+
 	if beginText && endText {
-		return &genericLiteralMatcher[exactStrategy]{literal, capTemplate, exactStrategy{}}
+		m.Strategy = LiteralStrategyExact
+	} else if beginText {
+		m.Strategy = LiteralStrategyPrefix
+	} else if endText {
+		m.Strategy = LiteralStrategySuffix
+	} else {
+		m.Strategy = LiteralStrategyContains
 	}
-	if beginText {
-		return &genericLiteralMatcher[prefixStrategy]{literal, capTemplate, prefixStrategy{}}
-	}
-	if endText {
-		return &genericLiteralMatcher[suffixStrategy]{literal, capTemplate, suffixStrategy{}}
-	}
-	return &genericLiteralMatcher[containsStrategy]{literal, capTemplate, containsStrategy{}}
+	return m
 }
 
 func extractLiteral(re *syntax.Regexp, beginText, endText *bool, literal *[]byte, capTemplate []int, offset int) bool {
@@ -119,7 +119,7 @@ func extractLiteral(re *syntax.Regexp, beginText, endText *bool, literal *[]byte
 		return true
 	case syntax.OpBeginText:
 		if offset != 0 {
-			return false // ^ anchor is only allowed at the beginning
+			return false
 		}
 		*beginText = true
 		return true
@@ -132,6 +132,17 @@ func extractLiteral(re *syntax.Regexp, beginText, endText *bool, literal *[]byte
 		}
 		*literal = append(*literal, string(re.Rune)...)
 		return true
+	case syntax.OpCharClass:
+		if re.Flags&syntax.FoldCase != 0 {
+			return false
+		}
+		if len(re.Rune) == 2 && re.Rune[0] == re.Rune[1] {
+			var buf [utf8.UTFMax]byte
+			n := utf8.EncodeRune(buf[:], re.Rune[0])
+			*literal = append(*literal, buf[:n]...)
+			return true
+		}
+		return false
 	case syntax.OpCapture:
 		capTemplate[re.Cap*2] = offset
 		if !extractLiteral(re.Sub[0], beginText, endText, literal, capTemplate, offset) {
@@ -146,17 +157,6 @@ func extractLiteral(re *syntax.Regexp, beginText, endText *bool, literal *[]byte
 			}
 		}
 		return true
-	case syntax.OpCharClass:
-		if re.Flags&syntax.FoldCase != 0 {
-			return false
-		}
-		if len(re.Rune) == 2 && re.Rune[0] == re.Rune[1] {
-			var buf [utf8.UTFMax]byte
-			n := utf8.EncodeRune(buf[:], re.Rune[0])
-			*literal = append(*literal, buf[:n]...)
-			return true
-		}
-		return false
 	default:
 		return false
 	}

@@ -25,7 +25,7 @@ Every implementation must adhere to these pillars to ensure maximum performance:
 
 ### 2.4 Execution Switching Strategy
 To maximize throughput, the engine MUST select the most efficient execution loop based on pattern characteristics:
-- **0-Pass (Literal Bypass)**: Selected for pure constant strings and anchored literals (e.g., `^abc$`, `^abc`, `abc$`). Bypasses all regex engines using SIMD-accelerated standard library search (e.g., `bytes.Index`, `bytes.HasPrefix`). It utilizes a **Capture Template** to provide submatch indices with zero state-machine overhead.
+- **0-Pass (Literal Bypass)**: Selected for pure constant strings and anchored literals (e.g., `^abc$`, `^abc`, `abc$`). Bypasses all regex engines using SIMD-accelerated standard library search (e.g., `bytes.Index`, `bytes.HasPrefix`). It utilizes a **unified, interface-free `LiteralMatcher` component** with a **Capture Template** to provide submatch indices with zero state-machine and zero dynamic-dispatch overhead.
 - **Bit-parallel Path (Glushkov BP-DFA)**: The **"Express Pass"** for small, simple patterns. Utilizes ultra-fast `uint64` bitwise operations to eliminate memory loads.
 - **Fast Path (Pure DFA)**: Automatically selected for larger patterns. It utilizes a minimalist table-based execution loop with **manual restarts and SIMD-accelerated prefix skipping**.
 - **Anchor-Aware Guarded SIMD Warp**: Selected for patterns with anchors. Utilizes a separate `anchorTransitions` table and **guarded warp points** to allow SIMD skipping even in the presence of anchors (e.g., `^`, `$`, `\b`).
@@ -89,7 +89,7 @@ To ensure scalability to 10,000+ patterns, the DFA construction phase MUST adher
 
 ### 2.15 Zero-Overhead Execution (Manual Monomorphization Mandate)
 To achieve the goal of $O(1)$ performance per byte without hidden overhead, the engine MUST adhere to these execution principles:
-- **Avoid Runtime Generic Dispatch**: Go's current implementation of generics often uses `GCShape` sharing with runtime dictionaries. For the hot execution loop, this introduces unacceptable latency. The engine MUST use specialized, non-generic functions for the "Fast Path" and "Extended Path".
+- **Avoid Runtime Generic/Interface Dispatch**: Go's current implementation of generics often uses `GCShape` sharing with runtime dictionaries, and interfaces introduce `itab` lookups. For the hot execution loops, these introduce unacceptable latency. The engine MUST use specialized, non-generic, and concrete-struct-based functions for the "Literal Path", "Fast Path", and "Extended Path".
 - **Constant Folding of Strategy**: Branches based on pattern traits (e.g., `hasAnchors`) MUST be resolved at the function dispatch level (via `bindMatchStrategy`), ensuring the loop body itself is free of irrelevant checks.
 - **Anchor Usage Masking**: The engine MUST track `UsedAnchors` in the DFA to skip context calculation (`CalculateContext`) at positions where the specific anchors in the pattern cannot possibly match, further reducing CPU cycles.
 

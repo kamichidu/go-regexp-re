@@ -33,7 +33,7 @@ type Regexp struct {
 	prog           *syntax.Prog
 	dfa            *ir.DFA
 	bpDfa          *ir.BitParallelDFA
-	literalMatcher ir.LiteralMatcher
+	literalMatcher *ir.LiteralMatcher
 	subexpNames    []string
 	strategy       matchStrategy
 }
