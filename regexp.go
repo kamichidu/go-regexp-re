@@ -20,7 +20,6 @@ const (
 	strategyBitParallel
 	strategyFast
 	strategyExtended
-	strategyLiteralBypass
 )
 
 type Regexp struct {
@@ -126,11 +125,7 @@ func CompileContextWithOption(ctx context.Context, expr string, opt CompileOptio
 	}
 
 	res := &Regexp{expr: expr, numSubexp: numSubexp, prefix: []byte(prefixStr), prefixState: prefixState, complete: complete, anchorStart: anchorStart, anchorEnd: anchorEnd, prog: prog, dfa: dfa, bpDfa: bpDfa, subexpNames: subexpNames}
-	if complete && numSubexp == 0 {
-		res.strategy = strategyLiteralBypass
-	} else {
-		res.bindMatchStrategy()
-	}
+	res.bindMatchStrategy()
 	return res, nil
 }
 
@@ -158,31 +153,6 @@ func isSimpleForBP(prog *syntax.Prog) bool {
 	return true
 }
 
-func (re *Regexp) literalBypass(b []byte) (int, int, int) {
-	if re.anchorStart && re.anchorEnd {
-		if bytes.Equal(b, re.prefix) {
-			return 0, len(b), 0
-		}
-		return -1, -1, -1
-	}
-	if re.anchorStart {
-		if bytes.HasPrefix(b, re.prefix) {
-			return 0, len(re.prefix), 0
-		}
-		return -1, -1, -1
-	}
-	if re.anchorEnd {
-		if bytes.HasSuffix(b, re.prefix) {
-			return len(b) - len(re.prefix), len(b), 0
-		}
-		return -1, -1, -1
-	}
-	if i := bytes.Index(b, re.prefix); i >= 0 {
-		return i, i + len(re.prefix), 0
-	}
-	return -1, -1, -1
-}
-
 func (re *Regexp) bindMatchStrategy() {
 	if re.literalMatcher != nil {
 		re.strategy = strategyLiteral
@@ -207,8 +177,6 @@ func (re *Regexp) isGreedyMatch() bool {
 func (re *Regexp) Match(b []byte) bool {
 	var start int
 	switch re.strategy {
-	case strategyLiteralBypass:
-		start, _, _ = re.literalBypass(b)
 	case strategyLiteral:
 		indices := re.literalMatcher.FindSubmatchIndex(b)
 		if indices != nil {
@@ -239,8 +207,6 @@ func (re *Regexp) FindSubmatchIndex(b []byte) []int {
 	var start, end, targetPriority int
 	var matchTags uint64
 	switch re.strategy {
-	case strategyLiteralBypass:
-		start, end, targetPriority = re.literalBypass(b)
 	case strategyLiteral:
 		indices := re.literalMatcher.FindSubmatchIndex(b)
 		if indices != nil {

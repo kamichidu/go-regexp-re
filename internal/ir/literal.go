@@ -3,6 +3,7 @@ package ir
 import (
 	"bytes"
 	"regexp/syntax"
+	"unicode/utf8"
 )
 
 // LiteralMatcher is a fast matcher for patterns consisting only of literals and anchors (^, $).
@@ -146,7 +147,15 @@ func extractLiteral(re *syntax.Regexp, beginText, endText *bool, literal *[]byte
 		}
 		return true
 	case syntax.OpCharClass:
-		// Single character classes could be treated as literals, but skipped for now
+		if re.Flags&syntax.FoldCase != 0 {
+			return false
+		}
+		if len(re.Rune) == 2 && re.Rune[0] == re.Rune[1] {
+			var buf [utf8.UTFMax]byte
+			n := utf8.EncodeRune(buf[:], re.Rune[0])
+			*literal = append(*literal, buf[:n]...)
+			return true
+		}
 		return false
 	default:
 		return false
