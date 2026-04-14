@@ -89,7 +89,8 @@ Key innovations include:
 - **0-Pass (Literal Bypass)**: $O(1)$ submatch extraction for fixed strings.
 - **Bit-parallel DFA**: Branchless state transitions for small patterns.
 - **Guarded SIMD Warp**: Speculative skipping with anchor-aware post-verification.
-- **DFA-First Hybrid**: Deterministic 2-pass strategy for precise submatch extraction.
+* **DFA-First Hybrid**: A deterministic 2-pass strategy that eliminates the need for NFA-based backtracking, ensuring precise submatch extraction with $O(n)$ performance.
+
 
 == Testing & Benchmarking
 

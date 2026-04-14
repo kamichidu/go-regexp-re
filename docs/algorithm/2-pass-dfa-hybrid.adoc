@@ -14,18 +14,19 @@ DFAs are traditionally poor at extracting submatches (capturing groups). This is
 === Phase 2: Localized Forward Scan
 * **Objective**: Extract precise submatch information within the confirmed boundary.
 * **Mechanism**:
-  - **Principal DFA Rescan**: Performs a forward scan using the primary DFA to update capture registers (`regs`).
-  - **BP-DFA Handover (Greedy Match Resolution)**: When the rescan reaches the confirmed `end` position, and a greedy operator (e.g., `a*`) is involved, the engine hands over the current DFA state to the BP-DFA.
-  - **Winning Bit Selection**: The BP-DFA utilizes its bitmask to identify which specific NFA path (bit) reached the `InstMatch` at the exact `end` position. This "Winning Bit" serves as the tie-breaker to resolve the 1-byte ambiguity inherent in DFA-based greedy matches.
-  - **Zero-NFA Mandate**: This hybrid approach completely eliminates the need for a backtracking or thread-managed NFA rescan, ensuring consistent $O(n)$ performance.
+  - **Principal DFA Rescan**: Performs a forward scan using the primary DFA. During the scan, capture registers (`regs`) are updated according to the priority-aware `applyTags` logic.
+  - **BP-DFA Handover (Greedy Arbitration)**: When the scan reaches the `end` position, and the pattern involves greedy operators, the engine hands over the DFA state to the BP-DFA.
+  - **Winning Bit Selection**: The BP-DFA converts the final DFA state into a bitmask to identify the "absolute winning NFA path" (the bit that reached `InstMatch` at exactly the `end` position).
+  - **Greedy Tag Refinement**: Using pre-calculated `greedyTags`, the engine ensures that only tags belonging to greedy operators are overridden by the BP-DFA's terminal arbitration. This resolves the 1-byte ambiguity inherent in DFA greedy loops without affecting non-greedy captures.
+  - **Zero-NFA Mandate**: This hybrid approach completely eliminates the need for a backtracking or thread-managed NFA rescan, maintaining pure $O(n)$ time complexity and zero runtime heap allocations.
 
 == Key Technology: Winning Bit Arbitration
-The core challenge in DFA submatch extraction is the "Greedy Overrun." In a pattern like `(a*)b`, the DFA state at the match end might contain both a path that matched `a*` and a path that moved to `b`. 
+The core challenge in DFA submatch extraction is "Greedy Overrun." In a pattern like `(a*)b`, the DFA state at the match end might simultaneously contain a path that matched `a*` and a path that moved to `b`.
 
-By converting the final DFA state back into a BP-DFA bitmask (`uint64`), the engine can:
-1. Identify all NFA paths currently in a "Matching" state.
-2. Select the one with the highest priority (lowest bit position) according to Go's leftmost-first semantics.
-3. Finalize the capture registers based on this specific winning path.
+By bridging the DFA state with a BP-DFA bitmask (`uint64`), the engine can:
+1. **Materialize the Set**: Convert the abstract DFA state ID back into its constituent NFA states (bits).
+2. **Identify the Victor**: Select the highest priority bit (leftmost-first) that is in a matching state at the exact `end` coordinate.
+3. **Correct the Boundary**: Precisely finalize capture indices based on this specific winning path, ensuring 100% compatibility with Go's `regexp` package.
 
 == Advantages
 
