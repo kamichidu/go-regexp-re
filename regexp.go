@@ -61,6 +61,8 @@ func CompileContextWithOptions(ctx context.Context, expr string, opt CompileOpti
 	subexpNames := make([]string, numSubexp+1)
 	extractCapNames(s, subexpNames)
 
+	literalMatcher := ir.AnalyzeLiteralPattern(s, numSubexp+1)
+
 	complete := false
 	prefixStr := ""
 	if s.Op == syntax.OpConcat && len(s.Sub) > 0 && s.Sub[0].Op == syntax.OpLiteral {
@@ -116,7 +118,7 @@ func CompileContextWithOptions(ctx context.Context, expr string, opt CompileOpti
 		}
 	}
 
-	res := &Regexp{expr: expr, numSubexp: numSubexp, prefix: []byte(prefixStr), prefixState: prefixState, complete: complete, anchorStart: anchorStart, anchorEnd: anchorEnd, prog: prog, dfa: dfa, bpDfa: bpDfa, subexpNames: subexpNames}
+	res := &Regexp{expr: expr, numSubexp: numSubexp, prefix: []byte(prefixStr), prefixState: prefixState, complete: complete, anchorStart: anchorStart, anchorEnd: anchorEnd, prog: prog, dfa: dfa, bpDfa: bpDfa, literalMatcher: literalMatcher, subexpNames: subexpNames}
 	res.bindMatchStrategy()
 	return res, nil
 }
@@ -146,12 +148,14 @@ func isSimpleForBP(prog *syntax.Prog) bool {
 func (re *Regexp) bindMatchStrategy() {
 	if re.literalMatcher != nil {
 		re.strategy = strategyLiteral
+	} else if re.dfa != nil {
+		if re.dfa.HasAnchors() {
+			re.strategy = strategyExtended
+		} else {
+			re.strategy = strategyFast
+		}
 	} else if re.bpDfa != nil {
 		re.strategy = strategyBitParallel
-	} else if re.dfa.HasAnchors() {
-		re.strategy = strategyExtended
-	} else {
-		re.strategy = strategyFast
 	}
 }
 

@@ -302,14 +302,14 @@ func TestSpecializationPath(t *testing.T) {
 		var got string
 		if re.literalMatcher != nil {
 			got = "literal"
-		} else if re.bpDfa != nil {
-			got = "bit-parallel"
 		} else if re.dfa != nil {
 			if re.dfa.HasAnchors() {
 				got = "dfa-anchor"
 			} else {
 				got = "dfa"
 			}
+		} else if re.bpDfa != nil {
+			got = "bit-parallel"
 		} else {
 			got = "unknown"
 		}
