@@ -236,6 +236,7 @@ type BitParallelDFA struct {
 	ContextMasks   [64]uint64
 	SuccessorTable [8][256]uint64
 	MatchMask      uint64
+	MatchMasks     [64]uint64
 	StartMask      uint64
 }
 
@@ -360,7 +361,8 @@ func NewBitParallelDFA(prog *syntax.Prog) *BitParallelDFA {
 	bp := &BitParallelDFA{}
 
 	// epsilonClosure returns a bitmask of states reachable from i via epsilons.
-	epsilonClosure := func(start int) uint64 {
+	epsilonClosureWithContext := func(start int, ctx syntax.EmptyOp) uint64 {
+		var active uint64
 		var visited uint64
 		var dfs func(int)
 		dfs = func(curr int) {
@@ -375,25 +377,20 @@ func NewBitParallelDFA(prog *syntax.Prog) *BitParallelDFA {
 				dfs(int(inst.Arg))
 			case syntax.InstCapture, syntax.InstNop:
 				dfs(int(inst.Out))
+			case syntax.InstEmptyWidth:
+				if (syntax.EmptyOp(inst.Arg) & ctx) == syntax.EmptyOp(inst.Arg) {
+					dfs(int(inst.Out))
+				}
+			default:
+				active |= (1 << uint(curr))
 			}
 		}
 		dfs(start)
-		return visited
-	}
-
-	matchID := -1
-	for i, inst := range prog.Inst {
-		if inst.Op == syntax.InstMatch {
-			matchID = i
-			break
-		}
+		return active
 	}
 
 	// 1. Initial State
-	bp.StartMask = epsilonClosure(prog.Start)
-	if matchID >= 0 && (bp.StartMask&(1<<uint(matchID))) != 0 {
-		bp.MatchMask |= (1 << 63)
-	}
+	// Note: StartMask is not used directly anymore as it depends on context at pos 0.
 
 	// 2. Instruction Properties
 	for i, inst := range prog.Inst {
@@ -404,20 +401,14 @@ func NewBitParallelDFA(prog *syntax.Prog) *BitParallelDFA {
 					bp.CharMasks[b] |= (1 << uint(i))
 				}
 			}
-			// If this instruction's Out leads to Match, it means MATCH happens after matching THIS rune.
-			if matchID >= 0 && (epsilonClosure(int(inst.Out))&(1<<uint(matchID))) != 0 {
-				bp.MatchMask |= (1 << uint(i))
-			}
 		case syntax.InstEmptyWidth:
 			for bit := 0; bit < 6; bit++ {
 				if (inst.Arg & (1 << uint(bit))) != 0 {
 					bp.AnchorMasks[bit] |= (1 << uint(i))
 				}
 			}
-			// If this instruction's Out leads to Match, it means MATCH happens after matching THIS anchor.
-			if matchID >= 0 && (epsilonClosure(int(inst.Out))&(1<<uint(matchID))) != 0 {
-				bp.MatchMask |= (1 << uint(i))
-			}
+		case syntax.InstMatch:
+			bp.MatchMask |= (1 << uint(i))
 		}
 	}
 
@@ -426,7 +417,28 @@ func NewBitParallelDFA(prog *syntax.Prog) *BitParallelDFA {
 	for i, inst := range prog.Inst {
 		switch inst.Op {
 		case syntax.InstRune, syntax.InstRune1, syntax.InstRuneAny, syntax.InstRuneAnyNotNL, syntax.InstEmptyWidth:
-			successors[i] = epsilonClosure(int(inst.Out))
+			// Successor closure is context-independent for now, filtered at runtime.
+			var active uint64
+			var visited uint64
+			var dfs func(int)
+			dfs = func(curr int) {
+				if (visited & (1 << uint(curr))) != 0 {
+					return
+				}
+				visited |= (1 << uint(curr))
+				inst := prog.Inst[curr]
+				switch inst.Op {
+				case syntax.InstAlt, syntax.InstAltMatch:
+					dfs(int(inst.Out))
+					dfs(int(inst.Arg))
+				case syntax.InstCapture, syntax.InstNop:
+					dfs(int(inst.Out))
+				default:
+					active |= (1 << uint(curr))
+				}
+			}
+			dfs(int(inst.Out))
+			successors[i] = active
 		}
 	}
 
@@ -445,14 +457,33 @@ func NewBitParallelDFA(prog *syntax.Prog) *BitParallelDFA {
 		}
 	}
 
+	// 4. Context Masks
+	allAnchors := uint64(0)
+	for i := 0; i < 6; i++ {
+		allAnchors |= bp.AnchorMasks[i]
+	}
+	nonAnchors := ^allAnchors
+
 	for c := 0; c < 64; c++ {
-		var m uint64
+		m := nonAnchors
 		for bit := 0; bit < 6; bit++ {
 			if (c & (1 << uint(bit))) != 0 {
 				m |= bp.AnchorMasks[bit]
 			}
 		}
 		bp.ContextMasks[c] = m
+	}
+
+	// 5. Precalculate MatchMasks for each context.
+	for c := 0; c < 64; c++ {
+		ctx := syntax.EmptyOp(c)
+		var m uint64
+		for i := 0; i < len(prog.Inst); i++ {
+			if (epsilonClosureWithContext(i, ctx) & bp.MatchMask) != 0 {
+				m |= (1 << uint(i))
+			}
+		}
+		bp.MatchMasks[c] = m
 	}
 
 	return bp
