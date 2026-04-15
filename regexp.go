@@ -75,7 +75,6 @@ func CompileContextWithOptions(ctx context.Context, expr string, opt CompileOpti
 		complete = true
 	}
 
-	// anchorStart is true only if the pattern is strictly anchored to the beginning of text (\A or ^ in non-multiline).
 	anchorStart := false
 	if s.Op == syntax.OpConcat && len(s.Sub) > 0 {
 		if s.Sub[0].Op == syntax.OpBeginText {
@@ -85,7 +84,6 @@ func CompileContextWithOptions(ctx context.Context, expr string, opt CompileOpti
 		anchorStart = true
 	}
 
-	// anchorEnd is true only if the pattern is strictly anchored to the end of text (\z or $ in non-multiline).
 	anchorEnd := false
 	if s.Op == syntax.OpConcat && len(s.Sub) > 0 {
 		if s.Sub[len(s.Sub)-1].Op == syntax.OpEndText {
@@ -169,6 +167,15 @@ func (re *Regexp) bindMatchStrategy() {
 	} else if re.bpDfa != nil {
 		re.strategy = strategyBitParallel
 	}
+}
+
+func (re *Regexp) isGreedyMatch() bool {
+	for _, inst := range re.prog.Inst {
+		if (inst.Op == syntax.InstAlt || inst.Op == syntax.InstAltMatch) && inst.Arg > inst.Out {
+			return true
+		}
+	}
+	return false
 }
 
 func (re *Regexp) Match(b []byte) bool {
@@ -263,18 +270,24 @@ func bpRescanLoop(re *Regexp, b []byte, start, end, targetPriority int, matchTag
 		return
 	}
 
-	masks := make([]uint64, end-start+1)
+	matchLen := end - start
+	var masksBuf [512]uint64
+	masks := masksBuf[:]
+	if matchLen+1 > len(masks) {
+		masks = make([]uint64, matchLen+1)
+	} else {
+		masks = masks[:matchLen+1]
+	}
 
-	// Initial state for rescan must match the context at start.
 	ctx := ir.CalculateContext(b, start)
 	state := re.epsilonClosureWithContext(re.prog.Start, ctx)
 	masks[0] = state
 
+	searchMask := state
 	for i := start; i < end; i++ {
 		ctx := ir.CalculateContext(b, i)
 		active := state & bp.ContextMasks[ctx]
 		matched := active & bp.CharMasks[b[i]]
-
 		state = bp.SuccessorTable[0][matched&0xff] |
 			bp.SuccessorTable[1][(matched>>8)&0xff] |
 			bp.SuccessorTable[2][(matched>>16)&0xff] |
@@ -283,7 +296,9 @@ func bpRescanLoop(re *Regexp, b []byte, start, end, targetPriority int, matchTag
 			bp.SuccessorTable[5][(matched>>40)&0xff] |
 			bp.SuccessorTable[6][(matched>>48)&0xff] |
 			bp.SuccessorTable[7][(matched>>56)&0xff]
-
+		if !re.anchorStart {
+			state |= searchMask
+		}
 		masks[i-start+1] = state
 	}
 
@@ -323,7 +338,15 @@ func rescanLoop[T loopTrait](re *Regexp, b []byte, start, end, targetPriority in
 	dfa := re.dfa
 	trans, matchState := dfa.Transitions(), dfa.MatchState()
 
-	history := make([]ir.StateID, end-start+1)
+	matchLen := end - start
+	var historyBuf [1024]ir.StateID // 4KiB
+	history := historyBuf[:]
+	if matchLen+1 > len(history) {
+		history = make([]ir.StateID, matchLen+1)
+	} else {
+		history = history[:matchLen+1]
+	}
+
 	state := matchState
 	if !re.anchorStart {
 		state = dfa.SearchState()
@@ -344,7 +367,13 @@ func rescanLoop[T loopTrait](re *Regexp, b []byte, start, end, targetPriority in
 		history[i-start+1] = state
 	}
 
-	masks := make([]uint64, len(history))
+	var masksBuf [512]uint64
+	masks := masksBuf[:]
+	if len(history) > len(masks) {
+		masks = make([]uint64, len(history))
+	} else {
+		masks = masks[:len(history)]
+	}
 	for i, sid := range history {
 		masks[i] = dfa.StateToMask(sid)
 	}
@@ -368,7 +397,6 @@ func (re *Regexp) backwardTraceback(b []byte, start, end int, masks []uint64, re
 	if end == start {
 		ctx := ir.CalculateContext(b, start)
 		state := masks[0] & bp.ContextMasks[ctx]
-		// Arbitration for empty match.
 		for k := 0; k < 64; k++ {
 			if (state & (1 << uint(k))) != 0 {
 				if re.reachesBitWithContext(uint32(k), matchID, ctx) {
@@ -381,11 +409,17 @@ func (re *Regexp) backwardTraceback(b []byte, start, end int, masks []uint64, re
 		return
 	}
 
-	path := make([]uint32, end-start)
+	matchLen := end - start
+	var pathBuf [1024]uint32 // 4KiB
+	path := pathBuf[:]
+	if matchLen > len(path) {
+		path = make([]uint32, matchLen)
+	} else {
+		path = path[:matchLen]
+	}
 
 	// 1. Identify winners at the END position.
 	finalContext := ir.CalculateContext(b, end)
-
 	lastPos := end - 1
 	mask := masks[lastPos-start]
 	ctx := ir.CalculateContext(b, lastPos)
@@ -404,10 +438,10 @@ func (re *Regexp) backwardTraceback(b []byte, start, end int, masks []uint64, re
 		return
 	}
 	currBit := uint32(bits.TrailingZeros64(winners))
-	path[end-start-1] = currBit
+	path[matchLen-1] = currBit
 
 	// 2. Trace backward to find predecessors.
-	for i := end - start - 2; i >= 0; i-- {
+	for i := matchLen - 2; i >= 0; i-- {
 		pos := start + i
 		mask := masks[i]
 		byteVal := b[pos]
@@ -416,8 +450,6 @@ func (re *Regexp) backwardTraceback(b []byte, start, end int, masks []uint64, re
 		found := false
 		for k := 0; k < 64; k++ {
 			if (mask & (1 << uint(k))) != 0 {
-				// k reaches target via matching b[pos] and then epsilons matching path[i+1] context.
-				// Wait, the context for epsilons AFTER matching b[pos] is ir.CalculateContext(b, pos+1).
 				afterCtx := ir.CalculateContext(b, pos+1)
 				if re.reachesViaByteWithContext(uint32(k), target, byteVal, afterCtx) {
 					currBit = uint32(k)
