@@ -234,6 +234,34 @@ func (re *Regexp) FindSubmatchIndex(b []byte) []int {
 	return re.extractSubmatches(b, start, end, targetPriority, matchTags)
 }
 
+// matchContext manages pre-allocated buffers for submatch extraction.
+type matchContext struct {
+	historyBuf [1024]ir.StateID
+	masksBuf   [512]uint64
+	pathBuf    [1024]uint32
+	history    []ir.StateID
+	masks      []uint64
+	path       []uint32
+}
+
+func (mc *matchContext) prepare(matchLen int) {
+	if matchLen+1 > len(mc.historyBuf) {
+		mc.history = make([]ir.StateID, matchLen+1)
+	} else {
+		mc.history = mc.historyBuf[:matchLen+1]
+	}
+	if matchLen+1 > len(mc.masksBuf) {
+		mc.masks = make([]uint64, matchLen+1)
+	} else {
+		mc.masks = mc.masksBuf[:matchLen+1]
+	}
+	if matchLen > len(mc.pathBuf) {
+		mc.path = make([]uint32, matchLen)
+	} else {
+		mc.path = mc.pathBuf[:matchLen]
+	}
+}
+
 func (re *Regexp) extractSubmatches(b []byte, start, end, targetPriority int, matchTags uint64) []int {
 	regs := make([]int, (re.numSubexp+1)*2)
 	for i := range regs {
@@ -248,36 +276,28 @@ func (re *Regexp) extractSubmatches(b []byte, start, end, targetPriority int, ma
 		return regs
 	}
 
+	var mc matchContext
+	mc.prepare(end - start)
+
 	if re.bpDfa != nil && len(re.prog.Inst) <= 62 {
-		bpRescanLoop(re, b, start, end, targetPriority, matchTags, regs)
+		re.bpRescanLoop(&mc, b, start, end, regs)
 		return regs
 	}
 
 	if re.dfa != nil {
 		if re.dfa.HasAnchors() {
-			rescanLoop[extendedMatchTrait](re, b, start, end, targetPriority, matchTags, regs)
+			rescanLoop(extendedMatchTrait{}, &mc, re, b, start, end, regs)
 		} else {
-			rescanLoop[fastMatchTrait](re, b, start, end, targetPriority, matchTags, regs)
+			rescanLoop(fastMatchTrait{}, &mc, re, b, start, end, regs)
 		}
 	}
 
 	return regs
 }
 
-func bpRescanLoop(re *Regexp, b []byte, start, end, targetPriority int, matchTags uint64, regs []int) {
+func (re *Regexp) bpRescanLoop(mc *matchContext, b []byte, start, end int, regs []int) {
 	bp := re.bpDfa
-	if bp == nil {
-		return
-	}
-
-	matchLen := end - start
-	var masksBuf [512]uint64
-	masks := masksBuf[:]
-	if matchLen+1 > len(masks) {
-		masks = make([]uint64, matchLen+1)
-	} else {
-		masks = masks[:matchLen+1]
-	}
+	masks := mc.masks
 
 	ctx := ir.CalculateContext(b, start)
 	state := re.epsilonClosureWithContext(re.prog.Start, ctx)
@@ -302,54 +322,13 @@ func bpRescanLoop(re *Regexp, b []byte, start, end, targetPriority int, matchTag
 		masks[i-start+1] = state
 	}
 
-	re.backwardTraceback(b, start, end, masks, regs)
+	re.backwardTraceback(mc, b, start, end, regs)
 }
 
-func (re *Regexp) epsilonClosureWithContext(start int, ctx syntax.EmptyOp) uint64 {
-	var active uint64
-	var visited uint64
-	var stackBuf [64]int
-	stack := stackBuf[:0]
-	stack = append(stack, start)
-
-	for len(stack) > 0 {
-		curr := stack[len(stack)-1]
-		stack = stack[:len(stack)-1]
-
-		if (visited & (1 << uint(curr))) != 0 {
-			continue
-		}
-		visited |= (1 << uint(curr))
-		inst := re.prog.Inst[curr]
-		switch inst.Op {
-		case syntax.InstAlt, syntax.InstAltMatch:
-			stack = append(stack, int(inst.Arg), int(inst.Out))
-		case syntax.InstCapture, syntax.InstNop:
-			stack = append(stack, int(inst.Out))
-		case syntax.InstEmptyWidth:
-			if (syntax.EmptyOp(inst.Arg) & ctx) == syntax.EmptyOp(inst.Arg) {
-				stack = append(stack, int(inst.Out))
-			}
-		default:
-			active |= (1 << uint(curr))
-		}
-	}
-	return active
-}
-
-func rescanLoop[T loopTrait](re *Regexp, b []byte, start, end, targetPriority int, matchTags uint64, regs []int) {
-	var trait T
+func rescanLoop(trait loopTrait, mc *matchContext, re *Regexp, b []byte, start, end int, regs []int) {
 	dfa := re.dfa
 	trans, matchState := dfa.Transitions(), dfa.MatchState()
-
-	matchLen := end - start
-	var historyBuf [1024]ir.StateID // 4KiB
-	history := historyBuf[:]
-	if matchLen+1 > len(history) {
-		history = make([]ir.StateID, matchLen+1)
-	} else {
-		history = history[:matchLen+1]
-	}
+	history := mc.history
 
 	state := matchState
 	if !re.anchorStart {
@@ -371,24 +350,19 @@ func rescanLoop[T loopTrait](re *Regexp, b []byte, start, end, targetPriority in
 		history[i-start+1] = state
 	}
 
-	var masksBuf [512]uint64
-	masks := masksBuf[:]
-	if len(history) > len(masks) {
-		masks = make([]uint64, len(history))
-	} else {
-		masks = masks[:len(history)]
+	masks := mc.masks
+	for i := 0; i < len(history); i++ {
+		masks[i] = dfa.StateToMask(history[i])
 	}
-	for i, sid := range history {
-		masks[i] = dfa.StateToMask(sid)
-	}
-	re.backwardTraceback(b, start, end, masks, regs)
+	re.backwardTraceback(mc, b, start, end, regs)
 }
 
-func (re *Regexp) backwardTraceback(b []byte, start, end int, masks []uint64, regs []int) {
+func (re *Regexp) backwardTraceback(mc *matchContext, b []byte, start, end int, regs []int) {
 	bp := re.bpDfa
 	if bp == nil {
 		return
 	}
+	masks, path := mc.masks, mc.path
 
 	matchID := uint32(0)
 	for i, inst := range re.prog.Inst {
@@ -414,14 +388,8 @@ func (re *Regexp) backwardTraceback(b []byte, start, end int, masks []uint64, re
 	}
 
 	matchLen := end - start
-	var pathBuf [1024]uint32 // 4KiB
-	path := pathBuf[:]
-	if matchLen > len(path) {
-		path = make([]uint32, matchLen)
-	} else {
-		path = path[:matchLen]
-	}
 
+	// 1. Identify winners at the END position.
 	finalContext := ir.CalculateContext(b, end)
 	lastPos := end - 1
 	mask := masks[lastPos-start]
@@ -443,6 +411,7 @@ func (re *Regexp) backwardTraceback(b []byte, start, end int, masks []uint64, re
 	currBit := uint32(bits.TrailingZeros64(winners))
 	path[matchLen-1] = currBit
 
+	// 2. Trace backward.
 	for i := matchLen - 2; i >= 0; i-- {
 		pos := start + i
 		mask := masks[i]
@@ -466,6 +435,7 @@ func (re *Regexp) backwardTraceback(b []byte, start, end int, masks []uint64, re
 		}
 	}
 
+	// 3. Forward recap.
 	curr := uint32(re.prog.Start)
 	for i := 0; i < len(path); i++ {
 		re.applyPathTags(curr, path[i], start+i, regs, b)
@@ -530,7 +500,6 @@ func (re *Regexp) applyPathTags(start, target uint32, pos int, regs []int, b []b
 		}
 		return false
 	}
-	// Handle target tag application.
 	inst := re.prog.Inst[target]
 	if inst.Op == syntax.InstCapture {
 		if int(inst.Arg) < len(regs) {
@@ -606,6 +575,38 @@ func (re *Regexp) reachesBit(start, target uint32) bool {
 		}
 	}
 	return false
+}
+
+func (re *Regexp) epsilonClosureWithContext(start int, ctx syntax.EmptyOp) uint64 {
+	var active uint64
+	var visited uint64
+	var stackBuf [64]int
+	stack := stackBuf[:0]
+	stack = append(stack, start)
+
+	for len(stack) > 0 {
+		curr := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+
+		if (visited & (1 << uint(curr))) != 0 {
+			continue
+		}
+		visited |= (1 << uint(curr))
+		inst := re.prog.Inst[curr]
+		switch inst.Op {
+		case syntax.InstAlt, syntax.InstAltMatch:
+			stack = append(stack, int(inst.Arg), int(inst.Out))
+		case syntax.InstCapture, syntax.InstNop:
+			stack = append(stack, int(inst.Out))
+		case syntax.InstEmptyWidth:
+			if (syntax.EmptyOp(inst.Arg) & ctx) == syntax.EmptyOp(inst.Arg) {
+				stack = append(stack, int(inst.Out))
+			}
+		default:
+			active |= (1 << uint(curr))
+		}
+	}
+	return active
 }
 
 func applyTags(t uint64, pos int, regs []int) {
