@@ -12,7 +12,7 @@ type UTF8Node struct {
 }
 
 func (n *UTF8Node) Match(b byte, foldCase bool) bool {
-	// Note: foldCase is handled during trie construction, 
+	// Note: foldCase is handled during trie construction,
 	// so we just need to check the byte ranges here.
 	for _, r := range n.Ranges {
 		if b >= r.Lo && b <= r.Hi {
