@@ -359,29 +359,13 @@ func (re *Regexp) backwardTraceback(mc *matchContext, b []byte, start, end int, 
 	}
 
 	if end == start {
-		ctx := ir.CalculateContext(b, start)
-		paths, _ := dfa.GetNFAContext(history[0], nil)
-		var bestP ir.NFAPath
-		minP := int32(1<<30 - 1)
-		found := false
-		for _, p := range paths {
-			if re.reachesBitWithContext(mc, p.ID, matchID, ctx) {
-				if p.Priority < minP {
-					minP = p.Priority
-					bestP = p
-					found = true
-				}
-			}
-		}
-		if found {
-			re.applyPathTagsNP(mc, uint32(re.prog.Start), bestP.ID, start, regs, b)
-			re.applyPathTagsNP(mc, bestP.ID, matchID, end, regs, b)
-		}
+		re.applyEpsilonTags(mc, uint32(re.prog.Start), matchID, start, regs, b)
 		return
 	}
 
-	// 1. Identify best winner NP at end.
-	endPaths, _ := dfa.GetNFAContext(history[matchLen], nil)
+	// 1. Trace backward to identify NFAPath for each byte.
+	mc.nfaPathHistory = mc.nfaPathHistory[:matchLen]
+	endPaths, _ := dfa.GetNFAContext(history[end], nil)
 	finalCtx := ir.CalculateContext(b, end)
 	var chosen ir.NFAPath
 	minP := int32(1<<30 - 1)
@@ -399,20 +383,18 @@ func (re *Regexp) backwardTraceback(mc *matchContext, b []byte, start, end int, 
 		return
 	}
 
-	// 2. Trace backward to find Rune instructions.
 	for i := matchLen - 1; i >= 0; i-- {
 		pos := start + i
 		prevPaths, _ := dfa.GetNFAContext(history[i], nil)
 		ctx := ir.CalculateContext(b, pos)
-
-		var bestRuneNP ir.NFAPath
+		var bestPrev ir.NFAPath
 		minP = int32(1<<30 - 1)
 		found = false
 		for _, p := range prevPaths {
 			if re.canTransitionNP(mc, p, chosen, b, pos, ctx) {
 				if p.Priority < minP {
 					minP = p.Priority
-					bestRuneNP = p
+					bestPrev = p
 					found = true
 				}
 			}
@@ -420,21 +402,154 @@ func (re *Regexp) backwardTraceback(mc *matchContext, b []byte, start, end int, 
 		if !found {
 			return
 		}
-		mc.nfaPathHistory[i] = bestRuneNP
-		chosen = bestRuneNP
+		mc.nfaPathHistory[i] = bestPrev
+		chosen = bestPrev
 	}
 
-
-	// 3. Recap tags.
+	// 2. Trace forward to apply tags.
+	// Recap epsilon path: Start -> nfaPathHistory[0]
 	curr := uint32(re.prog.Start)
 	for i := 0; i < matchLen; i++ {
 		runeNP := mc.nfaPathHistory[i]
-		re.applyPathTagsNP(mc, curr, runeNP.ID, start+i, regs, b)
-		
+		re.applyEpsilonTags(mc, curr, runeNP.ID, start+i, regs, b)
+
 		inst := re.prog.Inst[runeNP.ID]
 		curr = inst.Out
 	}
-	re.applyPathTagsNP(mc, curr, matchID, end, regs, b)
+	// Final epsilon path: lastRune.Out -> Match
+	re.applyEpsilonTags(mc, curr, matchID, end, regs, b)
+}
+
+func (re *Regexp) applyEpsilonTags(mc *matchContext, startID, targetID uint32, pos int, regs []int, b []byte) {
+	if startID == targetID {
+		return
+	}
+
+	ctx := ir.CalculateContext(b, pos)
+	curr := startID
+	visited := make(map[uint32]bool)
+
+	for curr != targetID {
+		if visited[curr] {
+			return
+		}
+		visited[curr] = true
+
+		inst := re.prog.Inst[curr]
+		switch inst.Op {
+		case syntax.InstAlt, syntax.InstAltMatch:
+			// Follow Out branch if it can reach targetID, otherwise follow Arg
+			if re.reachesBitWithContext(mc, inst.Out, targetID, ctx) {
+				curr = inst.Out
+				continue
+			}
+			if re.reachesBitWithContext(mc, inst.Arg, targetID, ctx) {
+				curr = inst.Arg
+				continue
+			}
+			return
+		case syntax.InstCapture:
+			if re.reachesBitWithContext(mc, inst.Out, targetID, ctx) {
+				if int(inst.Arg) < len(regs) {
+					regs[inst.Arg] = pos
+				}
+				curr = inst.Out
+				continue
+			}
+			return
+		case syntax.InstNop:
+			if re.reachesBitWithContext(mc, inst.Out, targetID, ctx) {
+				curr = inst.Out
+				continue
+			}
+			return
+		case syntax.InstEmptyWidth:
+			if (syntax.EmptyOp(inst.Arg) & ctx) == syntax.EmptyOp(inst.Arg) {
+				if re.reachesBitWithContext(mc, inst.Out, targetID, ctx) {
+					curr = inst.Out
+					continue
+				}
+			}
+			return
+		default:
+			return
+		}
+	}
+}
+
+func (re *Regexp) epsilonClosureWithContext(start int, ctx syntax.EmptyOp) uint64 {
+	var active uint64
+	var visited uint64
+	var stackBuf [128]int
+	stack := stackBuf[:0]
+	stack = append(stack, start)
+
+	for len(stack) > 0 {
+		curr := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+
+		if curr < 0 || curr >= 64 {
+			continue
+		}
+		if (visited & (1 << uint(curr))) != 0 {
+			continue
+		}
+		visited |= (1 << uint(curr))
+		inst := re.prog.Inst[curr]
+		switch inst.Op {
+		case syntax.InstAlt, syntax.InstAltMatch:
+			stack = append(stack, int(inst.Arg), int(inst.Out))
+		case syntax.InstCapture, syntax.InstNop:
+			stack = append(stack, int(inst.Out))
+		case syntax.InstEmptyWidth:
+			if (syntax.EmptyOp(inst.Arg) & ctx) == syntax.EmptyOp(inst.Arg) {
+				stack = append(stack, int(inst.Out))
+			}
+		default:
+			active |= (1 << uint(curr))
+		}
+	}
+	return active
+}
+
+func (re *Regexp) reachesBitWithContext(mc *matchContext, start, target uint32, ctx syntax.EmptyOp) bool {
+	if start == target {
+		return true
+	}
+	var stackBuf [128]uint32
+	stack := stackBuf[:0]
+	stack = append(stack, start)
+	stride := mc.stride
+	visited := mc.visitedBuf
+	for i := 0; i < stride; i++ {
+		visited[i] = 0
+	}
+
+	for len(stack) > 0 {
+		curr := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+
+		if curr == target {
+			return true
+		}
+		if (visited[int(curr/64)] & (1 << (curr % 64))) != 0 {
+			continue
+		}
+		visited[int(curr/64)] |= (1 << (curr % 64))
+
+		inst := re.prog.Inst[curr]
+		switch inst.Op {
+		case syntax.InstAlt, syntax.InstAltMatch:
+			stack = append(stack, inst.Arg, inst.Out)
+		case syntax.InstCapture, syntax.InstNop:
+			stack = append(stack, inst.Out)
+		case syntax.InstEmptyWidth:
+			if (syntax.EmptyOp(inst.Arg) & ctx) == syntax.EmptyOp(inst.Arg) {
+				stack = append(stack, inst.Out)
+			}
+		}
+	}
+	return false
 }
 
 func (re *Regexp) canTransitionNP(mc *matchContext, from, to ir.NFAPath, b []byte, pos int, ctx syntax.EmptyOp) bool {
@@ -478,7 +593,6 @@ func (re *Regexp) canTransitionNP(mc *matchContext, from, to ir.NFAPath, b []byt
 		if out == to.ID && to.NodeID == 0 {
 			return true
 		}
-		// エプシロン遷移で to に到達できるか
 		if to.NodeID == 0 && re.reachesBitWithContext(mc, out, to.ID, ir.CalculateContext(b, pos+1)) {
 			return true
 		}
@@ -489,205 +603,6 @@ func (re *Regexp) canTransitionNP(mc *matchContext, from, to ir.NFAPath, b []byt
 		}
 	}
 	return false
-}
-
-func (re *Regexp) applyPathTagsNP(mc *matchContext, startID, targetID uint32, pos int, regs []int, b []byte) bool {
-	if startID == targetID {
-		return true
-	}
-
-	ctx := ir.CalculateContext(b, pos)
-	
-	type link struct {
-		prev uint32
-		inst syntax.Inst
-	}
-	parent := make(map[uint32]link)
-	visited := make(map[uint32]bool)
-	
-	// To perform a priority-aware DFS iteratively:
-	// We need to ensure that for any Alt, we explore the Out branch ENTIRELY
-	// before we explore the Arg branch. A simple stack doesn't quite do this
-	// because it mixes nodes from different levels.
-	// However, a stack where we push [Arg, Out] and mark nodes as "processed" works.
-	
-	var stack []uint32
-	stack = append(stack, startID)
-	
-	found := false
-	for len(stack) > 0 {
-		curr := stack[len(stack)-1]
-		stack = stack[:len(stack)-1]
-		
-		if curr == targetID {
-			found = true
-			break
-		}
-		
-		if visited[curr] {
-			continue
-		}
-		visited[curr] = true
-		
-		inst := re.prog.Inst[curr]
-		switch inst.Op {
-		case syntax.InstAlt, syntax.InstAltMatch:
-			// Push Arg THEN Out so that Out is processed first.
-			// But wait, if we push both, the Arg branch might be explored 
-			// before the Out branch finishes if the Out branch pushes more nodes.
-			// This is fine for a true DFS.
-			if !visited[inst.Arg] {
-				parent[inst.Arg] = link{curr, inst}
-				stack = append(stack, inst.Arg)
-			}
-			if !visited[inst.Out] {
-				parent[inst.Out] = link{curr, inst}
-				stack = append(stack, inst.Out)
-			}
-		case syntax.InstCapture, syntax.InstNop:
-			if !visited[inst.Out] {
-				parent[inst.Out] = link{curr, inst}
-				stack = append(stack, inst.Out)
-			}
-		case syntax.InstEmptyWidth:
-			if (syntax.EmptyOp(inst.Arg) & ctx) == syntax.EmptyOp(inst.Arg) {
-				if !visited[inst.Out] {
-					parent[inst.Out] = link{curr, inst}
-					stack = append(stack, inst.Out)
-				}
-			}
-		}
-	}
-	
-	if found {
-		curr := targetID
-		var path []link
-		for curr != startID {
-			l := parent[curr]
-			path = append(path, l)
-			curr = l.prev
-		}
-		for i := len(path) - 1; i >= 0; i-- {
-			l := path[i]
-			if l.inst.Op == syntax.InstCapture {
-				if int(l.inst.Arg) < len(regs) {
-					regs[l.inst.Arg] = pos
-				}
-			}
-		}
-	}
-	return true
-}
-
-func (re *Regexp) reachesBitWithContext(mc *matchContext, start, target uint32, ctx syntax.EmptyOp) bool {
-	if start == target {
-		return true
-	}
-	var stackBuf [128]uint32
-	stack := stackBuf[:0]
-	stack = append(stack, start)
-	stride := mc.stride
-	visited := mc.visitedBuf
-	for i := 0; i < stride; i++ {
-		visited[i] = 0
-	}
-
-	for len(stack) > 0 {
-		curr := stack[len(stack)-1]
-		stack = stack[:len(stack)-1]
-
-		if curr == target {
-			return true
-		}
-		if (visited[int(curr/64)] & (1 << (curr % 64))) != 0 {
-			continue
-		}
-		visited[int(curr/64)] |= (1 << (curr % 64))
-
-		inst := re.prog.Inst[curr]
-		switch inst.Op {
-		case syntax.InstAlt, syntax.InstAltMatch:
-			stack = append(stack, inst.Arg, inst.Out)
-		case syntax.InstCapture, syntax.InstNop:
-			stack = append(stack, inst.Out)
-		case syntax.InstEmptyWidth:
-			if (syntax.EmptyOp(inst.Arg) & ctx) == syntax.EmptyOp(inst.Arg) {
-				stack = append(stack, inst.Out)
-			}
-		}
-	}
-	return false
-}
-
-func (re *Regexp) reachesBit(mc *matchContext, start, target uint32) bool {
-	if start == target {
-		return true
-	}
-	var stackBuf [128]uint32
-	stack := stackBuf[:0]
-	stack = append(stack, start)
-	stride := mc.stride
-	visited := mc.visitedBuf
-	for i := 0; i < stride; i++ {
-		visited[i] = 0
-	}
-
-	for len(stack) > 0 {
-		curr := stack[len(stack)-1]
-		stack = stack[:len(stack)-1]
-
-		if curr == target {
-			return true
-		}
-		if (visited[int(curr/64)] & (1 << (curr % 64))) != 0 {
-			continue
-		}
-		visited[int(curr/64)] |= (1 << (curr % 64))
-
-		inst := re.prog.Inst[curr]
-		switch inst.Op {
-		case syntax.InstAlt, syntax.InstAltMatch:
-			stack = append(stack, inst.Arg, inst.Out)
-		case syntax.InstCapture, syntax.InstNop, syntax.InstEmptyWidth:
-			stack = append(stack, inst.Out)
-		}
-	}
-	return false
-}
-
-func (re *Regexp) epsilonClosureWithContext(start int, ctx syntax.EmptyOp) uint64 {
-	var active uint64
-	var visited uint64
-	var stackBuf [128]int
-	stack := stackBuf[:0]
-	stack = append(stack, start)
-
-	for len(stack) > 0 {
-		curr := stack[len(stack)-1]
-		stack = stack[:len(stack)-1]
-
-		if curr < 0 || curr >= 64 {
-			continue
-		}
-		if (visited & (1 << uint(curr))) != 0 {
-			continue
-		}
-		visited |= (1 << uint(curr))
-		inst := re.prog.Inst[curr]
-		switch inst.Op {
-		case syntax.InstAlt, syntax.InstAltMatch:
-			stack = append(stack, int(inst.Arg), int(inst.Out))
-		case syntax.InstCapture, syntax.InstNop:
-			stack = append(stack, int(inst.Out))
-		case syntax.InstEmptyWidth:
-			if (syntax.EmptyOp(inst.Arg) & ctx) == syntax.EmptyOp(inst.Arg) {
-				stack = append(stack, int(inst.Out))
-			}
-		default:
-			active |= (1 << uint(curr))
-		}
-	}
-	return active
 }
 
 func applyTags(t uint64, pos int, regs []int) {
@@ -706,7 +621,7 @@ func applyTags(t uint64, pos int, regs []int) {
 	}
 }
 
-func (re *Regexp) applyContextToState(d *ir.DFA, state ir.StateID, context syntax.EmptyOp, pos int, currentPrio *int, targetPrio int, regs []int) ir.StateID {
+func (re *Regexp) applyContextToState(d *ir.DFA, state ir.StateID, context syntax.EmptyOp, pos int, currentPrio *int, targetPrio int) ir.StateID {
 	if state == ir.InvalidState || context == 0 {
 		return state
 	}
@@ -723,24 +638,8 @@ func (re *Regexp) applyContextToState(d *ir.DFA, state ir.StateID, context synta
 					if nextID != state {
 						if rawNext < 0 {
 							update := tagUpdates[anchorTagUpdateIndices[idx]]
-							nextPrio := 0
 							if currentPrio != nil {
-								nextPrio = *currentPrio + int(update.BasePriority)
-							}
-							if regs != nil {
-								for _, tu := range update.PreUpdates {
-									if nextPrio+int(tu.RelativePriority) <= targetPrio {
-										applyTags(tu.Tags, pos, regs)
-									}
-								}
-								for _, tu := range update.PostUpdates {
-									if nextPrio+int(tu.RelativePriority) <= targetPrio {
-										applyTags(tu.Tags, pos, regs)
-									}
-								}
-							}
-							if currentPrio != nil {
-								*currentPrio = nextPrio
+								*currentPrio += int(update.BasePriority)
 							}
 						}
 						state = nextID
@@ -934,7 +833,7 @@ func extendedExecLoop(re *Regexp, b []byte) (int, int, int, uint64) {
 			(i == numBytes && (usedAnchors&(syntax.EmptyEndText|syntax.EmptyEndLine)) != 0) ||
 			((usedAnchors&syntax.EmptyBeginLine) != 0 && i > 0 && b[i-1] == '\n') ||
 			((usedAnchors&syntax.EmptyEndLine) != 0 && i < numBytes && b[i] == '\n') {
-			state = re.applyContextToState(d, state, ir.CalculateContext(b, i), i, &currentPriority, 1<<30-1, nil)
+			state = re.applyContextToState(d, state, ir.CalculateContext(b, i), i, &currentPriority, 1<<30-1)
 		}
 		sidx := int(state)
 		if sidx >= 0 && sidx < len(accepting) && accepting[sidx] {
@@ -1081,61 +980,55 @@ func submatchExecLoop(trait loopTrait, re *Regexp, b []byte) (int, int, matchCon
 
 	bestStart, bestEnd, bestPriority := -1, -1, 1<<30-1
 	var mc matchContext
+	mc.prepare(numBytes, d.MaskStride())
+
+	state := d.SearchState()
+	if anchorStart {
+		state = d.MatchState()
+	}
+	currentPriority := 0
 
 	for i := 0; i <= numBytes; {
-		currentPriority := i * ir.SearchRestartPenalty
-		state := d.SearchState()
-		if anchorStart {
-			state = d.MatchState()
+		mc.history[i] = state
+		sidx := int(state)
+
+		if hasAnchors && ((usedAnchors&(syntax.EmptyWordBoundary|syntax.EmptyNoWordBoundary)) != 0 ||
+			(i == 0 && (usedAnchors&(syntax.EmptyBeginText|syntax.EmptyBeginLine)) != 0) ||
+			(i == numBytes && (usedAnchors&(syntax.EmptyEndText|syntax.EmptyEndLine)) != 0) ||
+			((usedAnchors&syntax.EmptyBeginLine) != 0 && i > 0 && b[i-1] == '\n') ||
+			((usedAnchors&syntax.EmptyEndLine) != 0 && i < numBytes && b[i] == '\n')) {
+			// Note: j was used instead of i in previous version, fixed here
+			state = re.applyContextToState(d, state, ir.CalculateContext(b, i), i, &currentPriority, bestPriority)
+			mc.history[i] = state
+			sidx = int(state)
 		}
 
-		// Temporary buffer for history recording
-		type step struct {
-			state ir.StateID
+		if sidx >= 0 && sidx < len(accepting) && accepting[sidx] {
+			p := currentPriority + d.MatchPriority(state)
+			if p <= bestPriority {
+				bestPriority, bestEnd = p, i
+				bestStart = p / ir.SearchRestartPenalty
+				if d.IsBestMatch(state) {
+					return bestStart, bestEnd, mc
+				}
+			}
 		}
-		var tempHistory []ir.StateID
-		tempHistory = append(tempHistory, state)
 
-		for j := i; j <= numBytes; {
-			if hasAnchors && ((usedAnchors&(syntax.EmptyWordBoundary|syntax.EmptyNoWordBoundary)) != 0 ||
-				(j == 0 && (usedAnchors&(syntax.EmptyBeginText|syntax.EmptyBeginLine)) != 0) ||
-				(j == numBytes && (usedAnchors&(syntax.EmptyEndText|syntax.EmptyEndLine)) != 0) ||
-				((usedAnchors&syntax.EmptyBeginLine) != 0 && j > 0 && b[j-1] == '\n') ||
-				((usedAnchors&syntax.EmptyEndLine) != 0 && j < numBytes && b[j] == '\n')) {
-				state = re.applyContextToState(d, state, ir.CalculateContext(b, j), j, &currentPriority, bestPriority, nil)
-				tempHistory[len(tempHistory)-1] = state
-			}
-
-			sidx := int(state)
-			if sidx >= 0 && sidx < len(accepting) && accepting[sidx] {
-				p := currentPriority + d.MatchPriority(state)
-				if p <= bestPriority {
-					bestPriority, bestEnd, bestStart = p, j, i
-					// Save history to mc for traceback
-					mc.prepare(j-i, d.MaskStride())
-					copy(mc.history, tempHistory)
-					if d.IsBestMatch(state) {
-						return bestStart, bestEnd, mc
+		if i < numBytes {
+			if sidx >= 0 && sidx < numStates {
+				off := (sidx << 8) | int(b[i])
+				rawNext := trans[off]
+				if rawNext != ir.InvalidState {
+					state = rawNext & ir.StateIDMask
+					if rawNext < 0 {
+						update := tagUpdates[tagUpdateIndices[off]]
+						currentPriority += int(update.BasePriority)
 					}
+					i++
+					continue
 				}
 			}
-
-			if j < numBytes {
-				if sidx >= 0 && sidx < numStates {
-					off := (sidx << 8) | int(b[j])
-					rawNext := trans[off]
-					if rawNext != ir.InvalidState {
-						state = rawNext & ir.StateIDMask
-						if rawNext < 0 {
-							update := tagUpdates[tagUpdateIndices[off]]
-							currentPriority += int(update.BasePriority)
-						}
-						j++
-						tempHistory = append(tempHistory, state)
-						continue
-					}
-				}
-			}
+		} else if i == numBytes {
 			break
 		}
 
@@ -1146,22 +1039,31 @@ func submatchExecLoop(trait loopTrait, re *Regexp, b []byte) (int, int, matchCon
 			break
 		}
 
-		i++
-		if i < numBytes {
-			state = d.SearchState()
-			warpByte := d.WarpPoint(state)
-			if warpByte >= 0 {
-				skip := bytes.Index(b[i:], []byte{byte(warpByte)})
-				if skip < 0 {
-					break
-				}
+		// Restart
+		currentPriority = (currentPriority/ir.SearchRestartPenalty + 1) * ir.SearchRestartPenalty
+		i = currentPriority / ir.SearchRestartPenalty
+		if i > numBytes {
+			break
+		}
+		state = d.SearchState()
+
+		// Skip ahead
+		warpByte := d.WarpPoint(state)
+		if warpByte >= 0 {
+			skip := bytes.Index(b[i:], []byte{byte(warpByte)})
+			if skip >= 0 {
 				i += skip
-			} else if len(prefix) > 0 {
-				skip := bytes.Index(b[i:], prefix)
-				if skip < 0 {
-					break
-				}
+				currentPriority = i * ir.SearchRestartPenalty
+			} else {
+				break
+			}
+		} else if len(prefix) > 0 {
+			skip := bytes.Index(b[i:], prefix)
+			if skip >= 0 {
 				i += skip
+				currentPriority = i * ir.SearchRestartPenalty
+			} else {
+				break
 			}
 		}
 	}
