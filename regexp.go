@@ -75,7 +75,6 @@ func CompileContextWithOptions(ctx context.Context, expr string, opt CompileOpti
 		complete = true
 	}
 
-	// anchorStart is true only if the pattern is strictly anchored to the beginning of text (\A).
 	anchorStart := false
 	if s.Op == syntax.OpConcat && len(s.Sub) > 0 {
 		if s.Sub[0].Op == syntax.OpBeginText {
@@ -309,28 +308,32 @@ func bpRescanLoop(re *Regexp, b []byte, start, end, targetPriority int, matchTag
 func (re *Regexp) epsilonClosureWithContext(start int, ctx syntax.EmptyOp) uint64 {
 	var active uint64
 	var visited uint64
-	var dfs func(int)
-	dfs = func(curr int) {
+	var stackBuf [64]int
+	stack := stackBuf[:0]
+	stack = append(stack, start)
+
+	for len(stack) > 0 {
+		curr := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+
 		if (visited & (1 << uint(curr))) != 0 {
-			return
+			continue
 		}
 		visited |= (1 << uint(curr))
 		inst := re.prog.Inst[curr]
 		switch inst.Op {
 		case syntax.InstAlt, syntax.InstAltMatch:
-			dfs(int(inst.Out))
-			dfs(int(inst.Arg))
+			stack = append(stack, int(inst.Arg), int(inst.Out))
 		case syntax.InstCapture, syntax.InstNop:
-			dfs(int(inst.Out))
+			stack = append(stack, int(inst.Out))
 		case syntax.InstEmptyWidth:
 			if (syntax.EmptyOp(inst.Arg) & ctx) == syntax.EmptyOp(inst.Arg) {
-				dfs(int(inst.Out))
+				stack = append(stack, int(inst.Out))
 			}
 		default:
 			active |= (1 << uint(curr))
 		}
 	}
-	dfs(start)
 	return active
 }
 
@@ -419,7 +422,6 @@ func (re *Regexp) backwardTraceback(b []byte, start, end int, masks []uint64, re
 		path = path[:matchLen]
 	}
 
-	// 1. Identify winners at the END position.
 	finalContext := ir.CalculateContext(b, end)
 	lastPos := end - 1
 	mask := masks[lastPos-start]
@@ -441,7 +443,6 @@ func (re *Regexp) backwardTraceback(b []byte, start, end int, masks []uint64, re
 	currBit := uint32(bits.TrailingZeros64(winners))
 	path[matchLen-1] = currBit
 
-	// 2. Trace backward to find predecessors.
 	for i := matchLen - 2; i >= 0; i-- {
 		pos := start + i
 		mask := masks[i]
@@ -465,7 +466,6 @@ func (re *Regexp) backwardTraceback(b []byte, start, end int, masks []uint64, re
 		}
 	}
 
-	// 3. Forward walk along the FIXED prioritized path.
 	curr := uint32(re.prog.Start)
 	for i := 0; i < len(path); i++ {
 		re.applyPathTags(curr, path[i], start+i, regs, b)
@@ -488,81 +488,124 @@ func (re *Regexp) reachesViaByteWithContext(pc, target uint32, byteVal byte, ctx
 func (re *Regexp) applyPathTags(start, target uint32, pos int, regs []int, b []byte) bool {
 	visited := uint64(0)
 	ctx := ir.CalculateContext(b, pos)
-	var dfs func(uint32) bool
-	dfs = func(pc uint32) bool {
-		if pc == target {
-			inst := re.prog.Inst[pc]
-			if inst.Op == syntax.InstCapture {
-				if int(inst.Arg) < len(regs) {
-					regs[inst.Arg] = pos
-				}
-			}
-			return true
-		}
-		if (visited & (1 << pc)) != 0 {
+	curr := start
+
+	for curr != target {
+		if (visited & (1 << curr)) != 0 {
 			return false
 		}
-		visited |= (1 << pc)
-		inst := re.prog.Inst[pc]
+		visited |= (1 << curr)
+		inst := re.prog.Inst[curr]
+
 		switch inst.Op {
 		case syntax.InstCapture:
 			if re.reachesBitWithContext(inst.Out, target, ctx) {
 				if int(inst.Arg) < len(regs) {
 					regs[inst.Arg] = pos
 				}
-				return dfs(inst.Out)
+				curr = inst.Out
+				continue
 			}
 		case syntax.InstNop:
 			if re.reachesBitWithContext(inst.Out, target, ctx) {
-				return dfs(inst.Out)
+				curr = inst.Out
+				continue
 			}
 		case syntax.InstEmptyWidth:
 			if (syntax.EmptyOp(inst.Arg) & ctx) == syntax.EmptyOp(inst.Arg) {
 				if re.reachesBitWithContext(inst.Out, target, ctx) {
-					return dfs(inst.Out)
+					curr = inst.Out
+					continue
 				}
 			}
 		case syntax.InstAlt, syntax.InstAltMatch:
 			if re.reachesBitWithContext(inst.Out, target, ctx) {
-				return dfs(inst.Out)
+				curr = inst.Out
+				continue
 			}
 			if re.reachesBitWithContext(inst.Arg, target, ctx) {
-				return dfs(inst.Arg)
+				curr = inst.Arg
+				continue
 			}
 		}
 		return false
 	}
-	return dfs(start)
+	// Handle target tag application.
+	inst := re.prog.Inst[target]
+	if inst.Op == syntax.InstCapture {
+		if int(inst.Arg) < len(regs) {
+			regs[inst.Arg] = pos
+		}
+	}
+	return true
 }
 
 func (re *Regexp) reachesBitWithContext(start, target uint32, ctx syntax.EmptyOp) bool {
 	if start == target {
 		return true
 	}
+	var stackBuf [64]uint32
+	stack := stackBuf[:0]
+	stack = append(stack, start)
 	visited := uint64(0)
-	var dfs func(uint32) bool
-	dfs = func(pc uint32) bool {
-		if pc == target {
+
+	for len(stack) > 0 {
+		curr := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+
+		if curr == target {
 			return true
 		}
-		if (visited & (1 << pc)) != 0 {
-			return false
+		if (visited & (1 << curr)) != 0 {
+			continue
 		}
-		visited |= (1 << pc)
-		inst := re.prog.Inst[pc]
+		visited |= (1 << curr)
+
+		inst := re.prog.Inst[curr]
 		switch inst.Op {
 		case syntax.InstAlt, syntax.InstAltMatch:
-			return dfs(inst.Out) || dfs(inst.Arg)
+			stack = append(stack, inst.Arg, inst.Out)
 		case syntax.InstCapture, syntax.InstNop:
-			return dfs(inst.Out)
+			stack = append(stack, inst.Out)
 		case syntax.InstEmptyWidth:
 			if (syntax.EmptyOp(inst.Arg) & ctx) == syntax.EmptyOp(inst.Arg) {
-				return dfs(inst.Out)
+				stack = append(stack, inst.Out)
 			}
 		}
-		return false
 	}
-	return dfs(start)
+	return false
+}
+
+func (re *Regexp) reachesBit(start, target uint32) bool {
+	if start == target {
+		return true
+	}
+	var stackBuf [64]uint32
+	stack := stackBuf[:0]
+	stack = append(stack, start)
+	visited := uint64(0)
+
+	for len(stack) > 0 {
+		curr := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+
+		if curr == target {
+			return true
+		}
+		if (visited & (1 << curr)) != 0 {
+			continue
+		}
+		visited |= (1 << curr)
+
+		inst := re.prog.Inst[curr]
+		switch inst.Op {
+		case syntax.InstAlt, syntax.InstAltMatch:
+			stack = append(stack, inst.Arg, inst.Out)
+		case syntax.InstCapture, syntax.InstNop, syntax.InstEmptyWidth:
+			stack = append(stack, inst.Out)
+		}
+	}
+	return false
 }
 
 func applyTags(t uint64, pos int, regs []int) {
