@@ -4,31 +4,42 @@ import (
 	"unicode"
 )
 
-// utf8Node represents a node in a Trie of byte ranges that match a set of runes.
-type utf8Node struct {
+// UTF8Node represents a node in a Trie of byte ranges that match a set of runes.
+type UTF8Node struct {
 	ID     int
-	ranges []byteRange
-	next   []*utf8Node // if nil, this is a leaf (match complete)
+	Ranges []ByteRange
+	Next   []*UTF8Node // if nil, this is a leaf (match complete)
 }
 
-type byteRange struct {
-	lo, hi byte
+func (n *UTF8Node) Match(b byte, foldCase bool) bool {
+	// Note: foldCase is handled during trie construction, 
+	// so we just need to check the byte ranges here.
+	for _, r := range n.Ranges {
+		if b >= r.Lo && b <= r.Hi {
+			return true
+		}
+	}
+	return false
 }
 
-// utf8NodeCache handles canonicalization of utf8Nodes during compilation.
+type ByteRange struct {
+	Lo, Hi byte
+}
+
+// utf8NodeCache handles canonicalization of UTF8Nodes during compilation.
 type utf8NodeCache struct {
-	nodes          map[string]*utf8Node
+	nodes          map[string]*UTF8Node
 	totalUTF8Nodes int
 }
 
 func newUTF8NodeCache() *utf8NodeCache {
 	return &utf8NodeCache{
-		nodes:          make(map[string]*utf8Node),
+		nodes:          make(map[string]*UTF8Node),
 		totalUTF8Nodes: 1,
 	}
 }
 
-func (c *utf8NodeCache) newNode(ranges []byteRange, next []*utf8Node) *utf8Node {
+func (c *utf8NodeCache) newNode(ranges []ByteRange, next []*UTF8Node) *UTF8Node {
 	// Simple serialization for cache key
 	key := serializeNode(ranges, next)
 	if n, ok := c.nodes[key]; ok {
@@ -37,19 +48,19 @@ func (c *utf8NodeCache) newNode(ranges []byteRange, next []*utf8Node) *utf8Node 
 
 	id := c.totalUTF8Nodes
 	c.totalUTF8Nodes++
-	n := &utf8Node{
+	n := &UTF8Node{
 		ID:     id,
-		ranges: ranges,
-		next:   next,
+		Ranges: ranges,
+		Next:   next,
 	}
 	c.nodes[key] = n
 	return n
 }
 
-func serializeNode(ranges []byteRange, next []*utf8Node) string {
+func serializeNode(ranges []ByteRange, next []*UTF8Node) string {
 	var b []byte
 	for _, r := range ranges {
-		b = append(b, r.lo, r.hi)
+		b = append(b, r.Lo, r.Hi)
 	}
 	b = append(b, ':')
 	for _, n := range next {
@@ -67,8 +78,8 @@ func serializeNode(ranges []byteRange, next []*utf8Node) string {
 
 // runeRangesToUTF8Trie converts a set of rune ranges [lo1, hi1, lo2, hi2, ...]
 // into a Trie of byte-range sequences.
-func (c *utf8NodeCache) runeRangesToUTF8Trie(runes []rune, foldCase bool) []*utf8Node {
-	var roots []*utf8Node
+func (c *utf8NodeCache) runeRangesToUTF8Trie(runes []rune, foldCase bool) []*UTF8Node {
+	var roots []*UTF8Node
 	if foldCase {
 		// Expand each rune range to include its case-folded equivalents.
 		seen := make(map[rune]bool)
@@ -118,31 +129,31 @@ func (c *utf8NodeCache) runeRangesToUTF8Trie(runes []rune, foldCase bool) []*utf
 	return roots
 }
 
-func (c *utf8NodeCache) decomposeRuneRange(lo, hi rune) []*utf8Node {
-	var nodes []*utf8Node
+func (c *utf8NodeCache) decomposeRuneRange(lo, hi rune) []*UTF8Node {
+	var nodes []*UTF8Node
 	for _, seq := range encodeRange(lo, hi) {
 		nodes = append(nodes, c.sequenceToTrie(seq))
 	}
 	return nodes
 }
 
-func (c *utf8NodeCache) sequenceToTrie(seq []byteRange) *utf8Node {
+func (c *utf8NodeCache) sequenceToTrie(seq []ByteRange) *UTF8Node {
 	if len(seq) == 0 {
 		return nil
 	}
-	return c.newNode([]byteRange{seq[0]}, c.sequenceToTrieChildren(seq[1:]))
+	return c.newNode([]ByteRange{seq[0]}, c.sequenceToTrieChildren(seq[1:]))
 }
 
-func (c *utf8NodeCache) sequenceToTrieChildren(seq []byteRange) []*utf8Node {
+func (c *utf8NodeCache) sequenceToTrieChildren(seq []ByteRange) []*UTF8Node {
 	if len(seq) == 0 {
 		return nil
 	}
-	return []*utf8Node{c.sequenceToTrie(seq)}
+	return []*UTF8Node{c.sequenceToTrie(seq)}
 }
 
 // encodeRange converts a rune range [lo, hi] into a set of byte-range sequences.
-func encodeRange(lo, hi rune) [][]byteRange {
-	var sequences [][]byteRange
+func encodeRange(lo, hi rune) [][]ByteRange {
+	var sequences [][]ByteRange
 	for i := 1; i <= 4; i++ {
 		mlo, mhi := rangeForLen(i)
 		if lo <= mhi && hi >= mlo {
@@ -166,12 +177,12 @@ func rangeForLen(n int) (rune, rune) {
 	return 0, 0
 }
 
-func split(lo, hi rune, n int) [][]byteRange {
+func split(lo, hi rune, n int) [][]ByteRange {
 	if n == 1 {
-		return [][]byteRange{{{byte(lo), byte(hi)}}}
+		return [][]ByteRange{{{byte(lo), byte(hi)}}}
 	}
 
-	var res [][]byteRange
+	var res [][]ByteRange
 	m := rune(1 << (6 * uint(n-1)))
 	for lo <= hi {
 		next := (lo + m) &^ (m - 1)
@@ -186,13 +197,13 @@ func split(lo, hi rune, n int) [][]byteRange {
 	return res
 }
 
-func combine(lo, hi rune, n int) []byteRange {
-	res := make([]byteRange, n)
+func combine(lo, hi rune, n int) []ByteRange {
+	res := make([]ByteRange, n)
 	for i := n - 1; i >= 0; i-- {
 		if i == 0 {
 			res[i] = firstByteRange(lo, hi, n)
 		} else {
-			res[i] = byteRange{byte(0x80 | (lo & 0x3F)), byte(0x80 | (hi & 0x3F))}
+			res[i] = ByteRange{byte(0x80 | (lo & 0x3F)), byte(0x80 | (hi & 0x3F))}
 			lo >>= 6
 			hi >>= 6
 		}
@@ -200,7 +211,7 @@ func combine(lo, hi rune, n int) []byteRange {
 	return res
 }
 
-func firstByteRange(lo, hi rune, n int) byteRange {
+func firstByteRange(lo, hi rune, n int) ByteRange {
 	var mask, prefix rune
 	switch n {
 	case 2:
@@ -210,7 +221,7 @@ func firstByteRange(lo, hi rune, n int) byteRange {
 	case 4:
 		mask, prefix = 0x07, 0xF0
 	}
-	return byteRange{byte(prefix | (lo & mask)), byte(prefix | (hi & mask))}
+	return ByteRange{byte(prefix | (lo & mask)), byte(prefix | (hi & mask))}
 }
 
 func min(a, b rune) rune {
@@ -227,14 +238,14 @@ func max(a, b rune) rune {
 	return b
 }
 
-func (c *utf8NodeCache) byteRangesToTrie(ranges []byteRange) []*utf8Node {
-	return []*utf8Node{
+func (c *utf8NodeCache) byteRangesToTrie(ranges []ByteRange) []*UTF8Node {
+	return []*UTF8Node{
 		c.newNode(ranges, nil),
 	}
 }
 
 // anyRuneTrie returns a Trie that matches any valid UTF-8 rune OR any invalid UTF-8 byte.
-func (c *utf8NodeCache) anyRuneTrie(includeNL bool) []*utf8Node {
+func (c *utf8NodeCache) anyRuneTrie(includeNL bool) []*UTF8Node {
 	var runes []rune
 	if includeNL {
 		runes = []rune{0, 0x10FFFF}
@@ -246,8 +257,8 @@ func (c *utf8NodeCache) anyRuneTrie(includeNL bool) []*utf8Node {
 	// Add disjoint raw byte fallback for invalid UTF-8 bytes.
 	// Valid UTF-8 starts are: 00-7F, C2-DF, E0-EF, F0-F4.
 	// We exclude 80-BF (continuations) to avoid matching parts of a valid sequence as single runes.
-	var br []byteRange
-	br = []byteRange{
+	var br []ByteRange
+	br = []ByteRange{
 		{0xC0, 0xC1},
 		{0xF5, 0xFF},
 	}
