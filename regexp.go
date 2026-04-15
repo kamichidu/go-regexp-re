@@ -209,11 +209,14 @@ func (re *Regexp) NumSubexp() int                { return re.numSubexp }
 func (re *Regexp) LiteralPrefix() (string, bool) { return string(re.prefix), re.complete }
 
 func (re *Regexp) FindSubmatchIndex(b []byte) []int {
+	var start, end int
+	var mc matchContext
+
 	switch re.strategy {
 	case strategyLiteral:
 		return re.literalMatcher.FindSubmatchIndex(b)
 	case strategyBitParallel:
-		start, end, _, _ := bitParallelExecLoop(re, b)
+		start, end, _, _ = bitParallelExecLoop(re, b)
 		if start < 0 {
 			return nil
 		}
@@ -225,19 +228,32 @@ func (re *Regexp) FindSubmatchIndex(b []byte) []int {
 		if re.numSubexp == 0 {
 			return regs
 		}
-		var mc matchContext
 		mc.prepare(end-start, 1)
 		re.bpRescanLoop(&mc, b, start, end, regs)
 		return regs
 	case strategyExtended:
-		_, _, regs := submatchExecLoop(extendedMatchTrait{}, re, b)
-		return regs
+		start, end, mc = submatchExecLoop(extendedMatchTrait{}, re, b)
 	case strategyFast:
-		_, _, regs := submatchExecLoop(fastMatchTrait{}, re, b)
-		return regs
+		start, end, mc = submatchExecLoop(fastMatchTrait{}, re, b)
 	default:
+		start = -1
+	}
+
+	if start < 0 {
 		return nil
 	}
+
+	regs := make([]int, (re.numSubexp+1)*2)
+	for i := range regs {
+		regs[i] = -1
+	}
+	regs[0], regs[1] = start, end
+	if re.numSubexp == 0 {
+		return regs
+	}
+
+	re.backwardTraceback(&mc, b, start, end, regs)
+	return regs
 }
 
 // matchContext manages pre-allocated buffers for submatch extraction.
@@ -345,59 +361,80 @@ func (re *Regexp) backwardTraceback(mc *matchContext, b []byte, start, end int, 
 	if end == start {
 		ctx := ir.CalculateContext(b, start)
 		paths, _ := dfa.GetNFAContext(history[0], nil)
+		var bestP ir.NFAPath
+		minP := int32(1<<30 - 1)
+		found := false
 		for _, p := range paths {
 			if re.reachesBitWithContext(mc, p.ID, matchID, ctx) {
-				re.applyPathTagsNP(mc, ir.NFAPath{NFAState: ir.NFAState{ID: uint32(re.prog.Start), NodeID: 0}}, p, start, regs, b)
-				re.applyPathTagsNP(mc, p, ir.NFAPath{NFAState: ir.NFAState{ID: matchID, NodeID: 0}}, end, regs, b)
-				return
+				if p.Priority < minP {
+					minP = p.Priority
+					bestP = p
+					found = true
+				}
 			}
+		}
+		if found {
+			re.applyPathTagsNP(mc, uint32(re.prog.Start), bestP.ID, start, regs, b)
+			re.applyPathTagsNP(mc, bestP.ID, matchID, end, regs, b)
 		}
 		return
 	}
 
-	// 1. Identify winner NP at end.
+	// 1. Identify best winner NP at end.
 	endPaths, _ := dfa.GetNFAContext(history[matchLen], nil)
 	finalCtx := ir.CalculateContext(b, end)
 	var chosen ir.NFAPath
+	minP := int32(1<<30 - 1)
 	found := false
 	for _, p := range endPaths {
 		if p.ID == matchID || re.reachesBitWithContext(mc, p.ID, matchID, finalCtx) {
-			chosen = p
-			found = true
-			break
+			if p.Priority < minP {
+				minP = p.Priority
+				chosen = p
+				found = true
+			}
 		}
 	}
 	if !found {
 		return
 	}
 
-	// 2. Trace backward using NFAPath.
+	// 2. Trace backward to find Rune instructions.
 	for i := matchLen - 1; i >= 0; i-- {
-		mc.nfaPathHistory[i] = chosen
 		pos := start + i
 		prevPaths, _ := dfa.GetNFAContext(history[i], nil)
 		ctx := ir.CalculateContext(b, pos)
 
-		found := false
+		var bestRuneNP ir.NFAPath
+		minP = int32(1<<30 - 1)
+		found = false
 		for _, p := range prevPaths {
 			if re.canTransitionNP(mc, p, chosen, b, pos, ctx) {
-				chosen = p
-				found = true
-				break
+				if p.Priority < minP {
+					minP = p.Priority
+					bestRuneNP = p
+					found = true
+				}
 			}
 		}
 		if !found {
 			return
 		}
+		mc.nfaPathHistory[i] = bestRuneNP
+		chosen = bestRuneNP
 	}
 
-	// 3. Recap tags using NP history.
-	currNP := ir.NFAPath{NFAState: ir.NFAState{ID: uint32(re.prog.Start), NodeID: 0}}
+
+	// 3. Recap tags.
+	curr := uint32(re.prog.Start)
 	for i := 0; i < matchLen; i++ {
-		re.applyPathTagsNP(mc, currNP, mc.nfaPathHistory[i], start+i, regs, b)
-		currNP = mc.nfaPathHistory[i]
+		runeNP := mc.nfaPathHistory[i]
+		re.applyPathTagsNP(mc, curr, runeNP.ID, start+i, regs, b)
+		
+		inst := re.prog.Inst[runeNP.ID]
+		curr = inst.Out
 	}
-	re.applyPathTagsNP(mc, currNP, ir.NFAPath{NFAState: ir.NFAState{ID: matchID, NodeID: 0}}, end, regs, b)
+	re.applyPathTagsNP(mc, curr, matchID, end, regs, b)
 }
 
 func (re *Regexp) canTransitionNP(mc *matchContext, from, to ir.NFAPath, b []byte, pos int, ctx syntax.EmptyOp) bool {
@@ -454,61 +491,90 @@ func (re *Regexp) canTransitionNP(mc *matchContext, from, to ir.NFAPath, b []byt
 	return false
 }
 
-func (re *Regexp) applyPathTagsNP(mc *matchContext, start, target ir.NFAPath, pos int, regs []int, b []byte) bool {
-	if start.ID == target.ID && start.NodeID == target.NodeID {
-		return true
-	}
-	if start.NodeID != 0 || target.NodeID != 0 {
+func (re *Regexp) applyPathTagsNP(mc *matchContext, startID, targetID uint32, pos int, regs []int, b []byte) bool {
+	if startID == targetID {
 		return true
 	}
 
 	ctx := ir.CalculateContext(b, pos)
+	
+	type link struct {
+		prev uint32
+		inst syntax.Inst
+	}
+	parent := make(map[uint32]link)
+	visited := make(map[uint32]bool)
+	
+	// To perform a priority-aware DFS iteratively:
+	// We need to ensure that for any Alt, we explore the Out branch ENTIRELY
+	// before we explore the Arg branch. A simple stack doesn't quite do this
+	// because it mixes nodes from different levels.
+	// However, a stack where we push [Arg, Out] and mark nodes as "processed" works.
+	
 	var stack []uint32
-	stack = append(stack, start.ID)
-	parent := make(map[uint32]uint32)
+	stack = append(stack, startID)
+	
 	found := false
-
 	for len(stack) > 0 {
 		curr := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
-		if curr == target.ID {
+		
+		if curr == targetID {
 			found = true
 			break
 		}
+		
+		if visited[curr] {
+			continue
+		}
+		visited[curr] = true
+		
 		inst := re.prog.Inst[curr]
-		var next []uint32
 		switch inst.Op {
 		case syntax.InstAlt, syntax.InstAltMatch:
-			next = []uint32{inst.Arg, inst.Out}
+			// Push Arg THEN Out so that Out is processed first.
+			// But wait, if we push both, the Arg branch might be explored 
+			// before the Out branch finishes if the Out branch pushes more nodes.
+			// This is fine for a true DFS.
+			if !visited[inst.Arg] {
+				parent[inst.Arg] = link{curr, inst}
+				stack = append(stack, inst.Arg)
+			}
+			if !visited[inst.Out] {
+				parent[inst.Out] = link{curr, inst}
+				stack = append(stack, inst.Out)
+			}
 		case syntax.InstCapture, syntax.InstNop:
-			next = []uint32{inst.Out}
+			if !visited[inst.Out] {
+				parent[inst.Out] = link{curr, inst}
+				stack = append(stack, inst.Out)
+			}
 		case syntax.InstEmptyWidth:
 			if (syntax.EmptyOp(inst.Arg) & ctx) == syntax.EmptyOp(inst.Arg) {
-				next = []uint32{inst.Out}
-			}
-		}
-		for _, n := range next {
-			if _, ok := parent[n]; !ok {
-				parent[n] = curr
-				stack = append(stack, n)
+				if !visited[inst.Out] {
+					parent[inst.Out] = link{curr, inst}
+					stack = append(stack, inst.Out)
+				}
 			}
 		}
 	}
+	
 	if found {
-		curr := target.ID
-		for curr != start.ID {
-			p := parent[curr]
-			inst := re.prog.Inst[p]
-			if inst.Op == syntax.InstCapture {
-				if int(inst.Arg) < len(regs) {
-					println("  Tag:", inst.Arg, "at", pos)
-					regs[inst.Arg] = pos
+		curr := targetID
+		var path []link
+		for curr != startID {
+			l := parent[curr]
+			path = append(path, l)
+			curr = l.prev
+		}
+		for i := len(path) - 1; i >= 0; i-- {
+			l := path[i]
+			if l.inst.Op == syntax.InstCapture {
+				if int(l.inst.Arg) < len(regs) {
+					regs[l.inst.Arg] = pos
 				}
 			}
-			curr = p
 		}
-	} else {
-		println("  NO PATH from", start.ID, "to", target.ID)
 	}
 	return true
 }
@@ -1000,7 +1066,7 @@ func MustCompile(expr string) *Regexp {
 }
 func (re *Regexp) String() string { return re.expr }
 
-func submatchExecLoop(trait loopTrait, re *Regexp, b []byte) (int, int, []int) {
+func submatchExecLoop(trait loopTrait, re *Regexp, b []byte) (int, int, matchContext) {
 	d := re.dfa
 	trans := d.Transitions()
 	tagUpdateIndices := d.TagUpdateIndices()
@@ -1014,12 +1080,7 @@ func submatchExecLoop(trait loopTrait, re *Regexp, b []byte) (int, int, []int) {
 	usedAnchors := d.UsedAnchors()
 
 	bestStart, bestEnd, bestPriority := -1, -1, 1<<30-1
-	bestRegs := make([]int, (re.numSubexp+1)*2)
-	for i := range bestRegs {
-		bestRegs[i] = -1
-	}
-
-	tempRegs := make([]int, (re.numSubexp+1)*2)
+	var mc matchContext
 
 	for i := 0; i <= numBytes; {
 		currentPriority := i * ir.SearchRestartPenalty
@@ -1028,16 +1089,12 @@ func submatchExecLoop(trait loopTrait, re *Regexp, b []byte) (int, int, []int) {
 			state = d.MatchState()
 		}
 
-		for k := range tempRegs {
-			tempRegs[k] = -1
+		// Temporary buffer for history recording
+		type step struct {
+			state ir.StateID
 		}
-
-		// Apply start updates
-		for _, u := range dfaStartUpdates(re) {
-			if currentPriority+int(u.RelativePriority) <= bestPriority {
-				applyTags(u.Tags, i, tempRegs)
-			}
-		}
+		var tempHistory []ir.StateID
+		tempHistory = append(tempHistory, state)
 
 		for j := i; j <= numBytes; {
 			if hasAnchors && ((usedAnchors&(syntax.EmptyWordBoundary|syntax.EmptyNoWordBoundary)) != 0 ||
@@ -1045,7 +1102,8 @@ func submatchExecLoop(trait loopTrait, re *Regexp, b []byte) (int, int, []int) {
 				(j == numBytes && (usedAnchors&(syntax.EmptyEndText|syntax.EmptyEndLine)) != 0) ||
 				((usedAnchors&syntax.EmptyBeginLine) != 0 && j > 0 && b[j-1] == '\n') ||
 				((usedAnchors&syntax.EmptyEndLine) != 0 && j < numBytes && b[j] == '\n')) {
-				state = re.applyContextToState(d, state, ir.CalculateContext(b, j), j, &currentPriority, bestPriority, tempRegs)
+				state = re.applyContextToState(d, state, ir.CalculateContext(b, j), j, &currentPriority, bestPriority, nil)
+				tempHistory[len(tempHistory)-1] = state
 			}
 
 			sidx := int(state)
@@ -1053,11 +1111,11 @@ func submatchExecLoop(trait loopTrait, re *Regexp, b []byte) (int, int, []int) {
 				p := currentPriority + d.MatchPriority(state)
 				if p <= bestPriority {
 					bestPriority, bestEnd, bestStart = p, j, i
-					copy(bestRegs, tempRegs)
-					applyTags(d.MatchTags(state), j, bestRegs)
-					bestRegs[0], bestRegs[1] = i, j
+					// Save history to mc for traceback
+					mc.prepare(j-i, d.MaskStride())
+					copy(mc.history, tempHistory)
 					if d.IsBestMatch(state) {
-						return bestStart, bestEnd, bestRegs
+						return bestStart, bestEnd, mc
 					}
 				}
 			}
@@ -1071,18 +1129,9 @@ func submatchExecLoop(trait loopTrait, re *Regexp, b []byte) (int, int, []int) {
 						if rawNext < 0 {
 							update := tagUpdates[tagUpdateIndices[off]]
 							currentPriority += int(update.BasePriority)
-							for _, tu := range update.PreUpdates {
-								if currentPriority+int(tu.RelativePriority) <= bestPriority {
-									applyTags(tu.Tags, j, tempRegs)
-								}
-							}
-							for _, tu := range update.PostUpdates {
-								if currentPriority+int(tu.RelativePriority) <= bestPriority {
-									applyTags(tu.Tags, j+1, tempRegs)
-								}
-							}
 						}
 						j++
+						tempHistory = append(tempHistory, state)
 						continue
 					}
 				}
@@ -1091,7 +1140,7 @@ func submatchExecLoop(trait loopTrait, re *Regexp, b []byte) (int, int, []int) {
 		}
 
 		if bestStart != -1 {
-			return bestStart, bestEnd, bestRegs
+			return bestStart, bestEnd, mc
 		}
 		if anchorStart {
 			break
@@ -1116,9 +1165,8 @@ func submatchExecLoop(trait loopTrait, re *Regexp, b []byte) (int, int, []int) {
 			}
 		}
 	}
-	return bestStart, bestEnd, nil
+	return bestStart, bestEnd, mc
 }
-
 func dfaStartUpdates(re *Regexp) []ir.PathTagUpdate {
 	if re.dfa == nil {
 		return nil
