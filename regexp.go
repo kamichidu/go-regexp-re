@@ -75,6 +75,7 @@ func CompileContextWithOptions(ctx context.Context, expr string, opt CompileOpti
 		complete = true
 	}
 
+	// anchorStart is true only if the pattern is strictly anchored to the beginning of text (\A).
 	anchorStart := false
 	if s.Op == syntax.OpConcat && len(s.Sub) > 0 {
 		if s.Sub[0].Op == syntax.OpBeginText {
@@ -648,7 +649,7 @@ func bitParallelExecLoop(re *Regexp, b []byte) (int, int, int, uint64) {
 
 			if (active & bp.MatchMasks[currContext]) != 0 {
 				prio := i * ir.SearchRestartPenalty
-				if prio < bestPriority || (prio == bestPriority && j > bestEnd) {
+				if prio < bestPriority || (prio == bestPriority && j >= bestEnd) {
 					bestPriority, bestEnd, bestStart, bestMatchTags = prio, j, i, bp.MatchMask
 				}
 			}
