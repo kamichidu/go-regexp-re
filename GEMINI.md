@@ -31,22 +31,19 @@ To maximize throughput, the engine MUST select the most efficient execution loop
 - **Anchor-Aware Guarded SIMD Warp**: Selected for patterns with anchors. Utilizes a separate `anchorTransitions` table and **guarded warp points** to allow SIMD skipping even in the presence of anchors (e.g., `^`, `$`, `\b`).
 - **Explicit Hot-Loop Monomorphization**: To ensure zero-overhead, the engine MUST avoid Go generics (`GCShape` sharing) for the primary execution loops. Instead, it employs manually monomorphized functions (e.g., `fastExecLoop`, `extendedExecLoop`) to ensure the Go compiler can completely eliminate unreachable branches (like `if hasAnchors`) and avoid runtime dictionary lookups.
 
-### 2.5 Submatch Extraction Architecture (DFA-Guided 2-Pass Traceback)
-The engine follows a **DFA-Guided 2-Pass Traceback** strategy to guarantee both performance and 100% Go-compatible precision.
+### 2.5 Submatch Extraction Architecture (DASH-BT: DFA-Guided Bit-Parallel Traceback)
+The engine follows a **DASH-BT** strategy to guarantee both performance and 100% Go-compatible precision.
 
-- **Phase 1: Discovery & Recording**: A single high-speed scan determines the match boundaries `[start, end]` and simultaneously records the DFA state history as a sequence of `ir.StateID`. For submatch-heavy cases, this eliminates the overhead of a second "rescan" pass.
-- **Phase 2: Strategy Dispatch**:
-    - **Literal Template (O(1))**: For 0-Pass matches, submatches are applied via a pre-calculated relative offset template.
-    - **Deterministic Traceback (O(n))**: For all patterns, the engine utilizes the recorded `history` to reconstruct the unique prioritized NFA path.
-        - **Backward Pass**: Starting from the winning NFA node at `end`, the engine traces backward to `start` using `ir.NFAPath` (Instruction ID + UTF-8 Node ID) to identify the exact path taken for every byte, including multi-byte character intermediates.
-        - **Forward Recap**: The identified path is traversed forward to apply capturing group tags exactly at character boundaries, ensuring identical results to Go's standard library.
-- **Zero-NFA Mandate**: The engine MUST NOT fall back to a backtracking or thread-managed NFA (PikeVM) for submatch extraction. All cases must be handled via the deterministic 2-pass strategy to maintain $O(n)$ performance and eliminate runtime memory allocations.
+- **Phase 1: Discovery & History Recording**: A single high-speed scan determines the match boundaries `[start, end]` and simultaneously records the DFA state history as a sequence of 4-byte `ir.StateID`s. For common match lengths (<1024 bytes), this history is stored in stack-resident buffers (`[1024]int32`), eliminating heap allocations.
+- **Phase 2: Bit-Parallel Path Reconstruction (Backward Pass)**: The engine identifies the winning NFA path by tracing backwards from `end` to `start`. It uses bitwise intersection between pre-calculated **Predecessor Masks** and the DFA state's **NFA Membership Bitset** to resolve transitions in $O(1)$ per byte.
+- **Phase 3: Epsilon Recap (Tag Application)**: A final forward pass along the confirmed path applies `Capture` tags by following the highest-priority epsilon transitions between byte-consuming nodes.
+- **Zero-NFA Mandate**: The engine MUST NOT fall back to a backtracking or thread-managed NFA (PikeVM). All cases must be handled via the DASH-BT strategy to maintain $O(n)$ performance and eliminate runtime memory allocations.
 
-### 2.6 NFAPath & Multi-stride Bitsets
-To support patterns of any size and complexity, the engine utilizes a scalable NFA state representation.
-- **NFAPath (Instruction + Trie State)**: Every DFA state is associated with a set of `ir.NFAPath` objects, each representing an `InstID` and its current `NodeID` in the UTF-8 trie. This physical separation allows the DFA to operate on raw bytes while the Traceback remains aware of rune boundaries.
-- **Multi-stride Bitsets (MaskStride)**: DFA states store NFA node presence using a contiguous `[]uint64` with a `maskStride` proportional to the number of NFA instructions. This removes the 64-node limitation, allowing submatch extraction for patterns with thousands of nodes.
-- **Allocation-Free Traceback**: The traceback algorithm is strictly iterative and utilizes pre-allocated buffers within a **`matchContext`** (including stack-allocated 4KiB arrays), ensuring zero heap allocations for common match lengths.
+### 2.6 Bit-Parallel Traceback & Scalable Bitsets
+To remove the traditional 64-node limitation and minimize memory bandwidth, the engine utilizes a scalable bit-parallel architecture.
+- **NFA Membership Bitsets**: Each DFA state maintains a bitset representing the set of active NFA nodes. For patterns larger than 64 nodes, this is stored as a multi-word `[]uint64` (Stride).
+- **Pre-calculated Predecessor Masks**: During compilation, the engine pre-calculates bitsets representing which NFA nodes can transition to a target node given a specific byte. This allows the Traceback to identify the unique predecessor in a single bitwise `AND` operation.
+- **Allocation-Free matchContext**: All buffers (history, path, masks) are managed via a `matchContext` utilizing stack-allocated arrays for common match sizes, ensuring zero heap allocations for the majority of search operations.
 
 ### 2.7 Architectural Shortcut (Compilation Efficiency)
 To minimize compilation overhead, the engine MUST use an **Architectural Shortcut** for simple patterns.
