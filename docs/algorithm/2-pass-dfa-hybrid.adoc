@@ -1,52 +1,43 @@
-= DFA-First Hybrid (4-Phase Strategy)
+= DFA-Guided 2-Pass Traceback
 :sectnums:
 
 == Concept
 
-DFAs are traditionally poor at extracting submatches (capturing groups). This is because when multiple NFA paths merge into a single DFA state, the history of which path "won" is lost. To extract submatches identical to the Go standard library while maintaining $O(n)$ performance and avoiding NFA simulators, this project employs a refined "4-Phase Strategy" based on deterministic traceback.
+DFAs are traditionally poor at extracting submatches (capturing groups) because the history of which specific NFA path was taken is lost during state merging. To achieve 100% Go standard library compatibility while maintaining $O(n)$ performance and avoiding NFA thread management (PikeVM), this project employs a **DFA-Guided 2-Pass Traceback** strategy.
 
-== The Four Phases
+This strategy treats the DFA state history as a "safe corridor" through the NFA's potential state space, allowing for a deterministic reconstruction of the unique winning path.
 
-=== Phase 1: Match Discovery (Forward Scan)
-* **Objective**: Find the `[start, end]` boundaries of a match as quickly as possible.
-* **Mechanism**: Uses a high-speed DFA or BP-DFA loop.
-* **History Recording**: During this phase, the engine records the history of active states at each byte position.
-    - For BP-DFA: A sequence of `uint64` bitmasks.
-    - For Table-DFA: A sequence of `ir.StateID`.
+== The Three Phases
 
-=== Phase 2: Terminal Arbitration
-* **Objective**: Identify the single winning NFA path at the match end.
+=== Phase 1: Consolidated Discovery & Recording
+* **Objective**: Find the `[start, end]` match boundaries and record the execution history in a single pass.
+* **Mechanism**: Uses a specialized `submatchExecLoop` that performs standard DFA scanning while recording the `ir.StateID` at every byte position into a pre-allocated history buffer.
+* **Performance**: By consolidating discovery and recording, the engine minimizes memory bandwidth usage and avoids redundant rescanning of the input.
+
+=== Phase 2: Deterministic Path Reconstruction (Backward Pass)
+* **Objective**: Identify the unique sequence of NFA instructions taken for every byte of the match.
 * **Mechanism**:
-    - At the `end` position, the engine inspects the current context (anchors like `^`, `$`, `\b`).
-    - It uses a pre-calculated `MatchMasks[context]` to identify all NFA bits that reached a `Match` instruction at this exact position.
-    - It selects the highest-priority bit (leftmost-first) as the `winningBit`.
+    - **Winning Node Identification**: At the `end` position, the engine inspects the DFA state (which is a set of NFA nodes) and selects the node that reached a `Match` instruction with the highest priority (leftmost-first).
+    - **Backward Trace**: Moving from `end` back to `start`, the engine consults the historical DFA states to find the predecessor node.
+    - **UTF-8 Awareness**: For multi-byte characters, the engine tracks `ir.NFAPath` (Instruction ID + UTF-8 Trie State). This ensures that the traceback correctly identifies character boundaries and intermediate byte-level transitions.
 
-=== Phase 3: Backward Traceback
-* **Objective**: Reconstruct the unique prioritized path from `end` back to `start`.
+=== Phase 3: Forward Recap (Tag Application)
+* **Objective**: Apply capturing group tags along the confirmed path.
 * **Mechanism**:
-    - Starting from the `winningBit` at position `end`, the engine moves backward to `start`.
-    - For each byte position `i`, it consults the recorded `history[i]` to find a predecessor bit `k` such that:
-        1. Bit `k` is present in the historical state at position `i`.
-        2. Bit `k` matches the byte at `b[i]`.
-        3. Bit `k` can reach the current path bit via epsilon transitions.
-    - If multiple predecessors exist, the highest-priority one is chosen to resolve ambiguities in greedy loops (e.g., `a*(a)`).
+    - The engine walks forward along the deterministic path reconstructed in Phase 2.
+    - **Character Boundaries**: Capture tags are applied only at character boundaries (when the UTF-8 Trie State returns to 0).
+    - **Priority Tie-breaking**: If multiple epsilon-transition paths exist between two character-consuming nodes, the engine uses a priority-aware DFS to follow the leftmost path, matching Go's `regexp` behavior exactly.
 
-=== Phase 4: Forward Recap (Tag Application)
-* **Objective**: Apply capture tags along the now-deterministic path.
-* **Mechanism**:
-    - The engine walks forward from the regex `Start` instruction to the `winningBit` along the path identified in Phase 3.
-    - Since the path is unique and confirmed, all `InstCapture` instructions encountered are applied to the result registers (`regs`) without risk of incorrect over-shadowing or priority conflicts.
+== Key Technology: NFAPath & MaskStride
 
-== Key Technology: Context-Aware MatchMasks
-A match is not just about runes; it also depends on the context at the match end (e.g., `abc$` requires `$` to match the context after `c`).
+=== NFAPath (ID + NodeID)
+Standard NFA states are identified by an Instruction ID. To handle UTF-8 without decoding overhead, this engine expands `Rune` instructions into a byte-level trie. An `NFAPath` combines the `InstID` with a `NodeID` (the current position in the trie), allowing the DFA to operate on bytes while maintaining full awareness of rune progress.
 
-The engine pre-calculates a `MatchMasks` array for all 64 possible anchor contexts. This allows the Terminal Arbitration phase to be:
-1. **Deterministic**: One bitwise AND operation resolves all anchor constraints.
-2. **Standard-Compliant**: Perfectly follows Go's rules for where a match can legally end.
+=== Multi-stride Bitsets (MaskStride)
+To remove the traditional 64-node limitation of bit-parallel engines, the DFA stores NFA node membership in a contiguous array of `uint64` with a "stride" proportional to the pattern size. This allows submatch extraction for patterns with thousands of instructions.
 
 == Advantages
 
-* **$O(n)$ Guarantees**: Time complexity is strictly linear with respect to the input length.
-* **Allocation-Free**: History buffers and register sets are pre-allocated or pooled, ensuring zero heap allocations during the extraction phase.
-* **Architectural Integrity**: Eliminates the need for general-purpose NFA simulators (PikeVM), keeping the engine's core deterministic and DFA-based.
-* **Full Standard Compatibility**: Successfully handles complex edge cases like greedy/non-greedy overlaps and multiline anchors.
+* **$O(n)$ Complexity**: Both recording and traceback are strictly linear with respect to match length.
+* **Zero-Allocation**: All buffers (history, path, masks) are managed via a `matchContext` utilizing stack-allocated arrays for common match sizes.
+* **Bit-Perfect Compatibility**: Successfully handles complex cases like greedy loops, non-greedy overlaps, and nested empty matches by mirroring Go's priority rules.

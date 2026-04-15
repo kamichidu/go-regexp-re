@@ -31,32 +31,27 @@ To maximize throughput, the engine MUST select the most efficient execution loop
 - **Anchor-Aware Guarded SIMD Warp**: Selected for patterns with anchors. Utilizes a separate `anchorTransitions` table and **guarded warp points** to allow SIMD skipping even in the presence of anchors (e.g., `^`, `$`, `\b`).
 - **Explicit Hot-Loop Monomorphization**: To ensure zero-overhead, the engine MUST avoid Go generics (`GCShape` sharing) for the primary execution loops. Instead, it employs manually monomorphized functions (e.g., `fastExecLoop`, `extendedExecLoop`) to ensure the Go compiler can completely eliminate unreachable branches (like `if hasAnchors`) and avoid runtime dictionary lookups.
 
-### 2.5 Submatch Extraction Architecture (DFA-First Hybrid)
-The engine follows a **DFA-First Hybrid** strategy to guarantee both performance and Go-compatible precision.
+### 2.5 Submatch Extraction Architecture (DFA-Guided 2-Pass Traceback)
+The engine follows a **DFA-Guided 2-Pass Traceback** strategy to guarantee both performance and 100% Go-compatible precision.
 
-- **Phase 1: Boundary Discovery**: High-speed DFA scan or Bit-parallel scan determines the match boundaries `[start, end]`. For unanchored searches, the execution loop performs manual restarts at each position, utilizing `bytes.Index` to skip ahead whenever a constant prefix is available.
+- **Phase 1: Discovery & Recording**: A single high-speed scan determines the match boundaries `[start, end]` and simultaneously records the DFA state history as a sequence of `ir.StateID`. For submatch-heavy cases, this eliminates the overhead of a second "rescan" pass.
 - **Phase 2: Strategy Dispatch**:
     - **Literal Template (O(1))**: For 0-Pass matches, submatches are applied via a pre-calculated relative offset template.
-    - **Principal (DFA Rescan)**: For all patterns, a second DFA pass (rescan) is used to extract submatches deterministically.
-    - **Winning Bit Selection (BP-DFA Handover)**: To resolve greedy match ambiguity (e.g., `a*`), the engine hands over the final DFA state to the BP-DFA at the `end` position. The BP-DFA acts as a tie-breaker, selecting the highest priority NFA path (winning bit) to finalize the capture registers.
-- **Zero-NFA Mandate**: The engine MUST NOT fall back to a backtracking or thread-managed NFA for submatch extraction. All cases must be handled via the DFA/BP-DFA hybrid strategy to maintain $O(n)$ performance and eliminate runtime memory allocations.
+    - **Deterministic Traceback (O(n))**: For all patterns, the engine utilizes the recorded `history` to reconstruct the unique prioritized NFA path.
+        - **Backward Pass**: Starting from the winning NFA node at `end`, the engine traces backward to `start` using `ir.NFAPath` (Instruction ID + UTF-8 Node ID) to identify the exact path taken for every byte, including multi-byte character intermediates.
+        - **Forward Recap**: The identified path is traversed forward to apply capturing group tags exactly at character boundaries, ensuring identical results to Go's standard library.
+- **Zero-NFA Mandate**: The engine MUST NOT fall back to a backtracking or thread-managed NFA (PikeVM) for submatch extraction. All cases must be handled via the deterministic 2-pass strategy to maintain $O(n)$ performance and eliminate runtime memory allocations.
 
-### 2.6 Isolated Bit-parallel DFA (BP-DFA)
-For patterns with 64 or fewer NFA nodes, the engine utilizes a specialized Bit-parallel implementation.
-- **Physical Separation**: BP-DFA data (bitmasks, epsilons) MUST be stored in a dedicated `BitParallelDFA` structure, physically isolated from the primary table-based `DFA`.
-- **Zero Memory Load Transitions**: Transitions must be performed using `uint64` bitwise operations.
-- **L1 Cache Optimization**: BP-DFA utilizing a **16KB Successor Table** (`[8][256]uint64`) ensures that state transitions stay within the L1D cache. The transition loop MUST use 8-bit chunk lookups to achieve $O(1)$ performance per byte.
-- **Context-Aware Anchor Resolution**: BP-DFA utilizes pre-compiled **`ContextMasks`** to resolve all 6 types of anchors (`^`, `$`, `\b`, etc.) via a single bitwise AND operation, eliminating branching in the hot loop.
-- **Winning Bit Arbiter (2-Pass)**: In the 2-pass strategy, BP-DFA acts as the final tie-breaker. It converts the terminal DFA state into a bitmask to identify the highest-priority NFA path at the exact match end, resolving the "1-byte ambiguity" of greedy loops without NFA rescan.
-- **Priority Tracking Challenge**: Since Go's `syntax.Prog` optimizes for shared prefixes (e.g., `aa|a` -> `a(a|)`), the BP-DFA cannot naturally distinguish submatch priority using only bitsets. If strict leftmost-first priority is required for overlapping paths, the engine MUST fallback to the table-based DFA for the rescan path.
+### 2.6 NFAPath & Multi-stride Bitsets
+To support patterns of any size and complexity, the engine utilizes a scalable NFA state representation.
+- **NFAPath (Instruction + Trie State)**: Every DFA state is associated with a set of `ir.NFAPath` objects, each representing an `InstID` and its current `NodeID` in the UTF-8 trie. This physical separation allows the DFA to operate on raw bytes while the Traceback remains aware of rune boundaries.
+- **Multi-stride Bitsets (MaskStride)**: DFA states store NFA node presence using a contiguous `[]uint64` with a `maskStride` proportional to the number of NFA instructions. This removes the 64-node limitation, allowing submatch extraction for patterns with thousands of nodes.
+- **Allocation-Free Traceback**: The traceback algorithm is strictly iterative and utilizes pre-allocated buffers within a **`matchContext`** (including stack-allocated 4KiB arrays), ensuring zero heap allocations for common match lengths.
 
 ### 2.7 Architectural Shortcut (Compilation Efficiency)
 To minimize compilation overhead, the engine MUST use an **Architectural Shortcut** for simple patterns.
 - **Skip Heavy DFA**: If a pattern is simple (NFA nodes $\le 62$, no non-greedy), the engine MUST skip the heavy DFA transition table construction and only build the `BitParallelDFA`.
-- **Priority Safety Guard**: The shortcut is restricted to patterns where alternative priorities do not clash.
-    - **Heuristic**: Allow simple greedy loops (back-edge Alts) but **exclude forward-pointing alternations** (`a|b`) and **non-greedy branches** to guarantee 100% Go submatch compatibility.
-    - **ASCII Restriction**: BP-DFA is currently optimized for ASCII-only runes (0-127). Patterns requiring multi-byte UTF-8 support (e.g., non-ASCII runes or `.`) MUST fallback to the table-based DFA, which provides mature byte-level expansion via its UTF-8 trie.
-    - For complex alternations or multi-byte matching, always prefer the DFA path to guarantee 100% Go compatibility.
+- **ASCII Restriction**: BP-DFA is currently optimized for ASCII-only runes (0-127). Patterns requiring multi-byte UTF-8 support (e.g., non-ASCII runes or `.`) MUST fallback to the table-based DFA, which provides mature byte-level expansion via its UTF-8 trie.
 
 ### 2.8 Prefix-Skip Optimization (SIMD Acceleration)
 - **Mandatory Prefix Extraction**: During compilation, the longest constant prefix is extracted.
