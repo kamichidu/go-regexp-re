@@ -139,7 +139,7 @@ func isSimpleForBP(prog *syntax.Prog) bool {
 	}
 	for _, inst := range prog.Inst {
 		switch inst.Op {
-		case syntax.InstAlt, syntax.InstAltMatch:
+		case syntax.InstAlt, syntax.InstAltMatch, syntax.InstEmptyWidth:
 			return false
 		case syntax.InstRune, syntax.InstRune1, syntax.InstRuneAny, syntax.InstRuneAnyNotNL:
 			if inst.Op == syntax.InstRuneAny || inst.Op == syntax.InstRuneAnyNotNL {
@@ -317,7 +317,7 @@ func (re *Regexp) bpRescanLoop(mc *matchContext, b []byte, start, end int, regs 
 	masks := mc.masks
 
 	ctx := ir.CalculateContext(b, start)
-	state := re.epsilonClosureWithContext(re.prog.Start, ctx)
+	state := bp.StartMasks[ctx]
 	masks[0] = state
 
 	searchMask := state
@@ -477,41 +477,6 @@ func (re *Regexp) applyEpsilonTags(mc *matchContext, startID, targetID uint32, p
 	}
 }
 
-func (re *Regexp) epsilonClosureWithContext(start int, ctx syntax.EmptyOp) uint64 {
-	var active uint64
-	var visited uint64
-	var stackBuf [128]int
-	stack := stackBuf[:0]
-	stack = append(stack, start)
-
-	for len(stack) > 0 {
-		curr := stack[len(stack)-1]
-		stack = stack[:len(stack)-1]
-
-		if curr < 0 || curr >= 64 {
-			continue
-		}
-		if (visited & (1 << uint(curr))) != 0 {
-			continue
-		}
-		visited |= (1 << uint(curr))
-		inst := re.prog.Inst[curr]
-		switch inst.Op {
-		case syntax.InstAlt, syntax.InstAltMatch:
-			stack = append(stack, int(inst.Arg), int(inst.Out))
-		case syntax.InstCapture, syntax.InstNop:
-			stack = append(stack, int(inst.Out))
-		case syntax.InstEmptyWidth:
-			if (syntax.EmptyOp(inst.Arg) & ctx) == syntax.EmptyOp(inst.Arg) {
-				stack = append(stack, int(inst.Out))
-			}
-		default:
-			active |= (1 << uint(curr))
-		}
-	}
-	return active
-}
-
 func (re *Regexp) reachesBitWithContext(mc *matchContext, start, target uint32, ctx syntax.EmptyOp) bool {
 	if start == target {
 		return true
@@ -665,7 +630,7 @@ func bitParallelExecLoop(re *Regexp, b []byte) (int, int, int, uint64) {
 
 	for i := 0; i <= numBytes; i++ {
 		ctx := ir.CalculateContext(b, i)
-		state := re.epsilonClosureWithContext(re.prog.Start, ctx)
+		state := bp.StartMasks[ctx]
 
 		for j := i; ; j++ {
 			currContext := ir.CalculateContext(b, j)

@@ -255,7 +255,7 @@ type BitParallelDFA struct {
 	SuccessorTable [8][256]uint64
 	MatchMask      uint64
 	MatchMasks     [64]uint64
-	StartMask      uint64
+	StartMasks     [64]uint64
 }
 
 func (bp *BitParallelDFA) HasAnchors() bool {
@@ -493,16 +493,17 @@ func NewBitParallelDFA(prog *syntax.Prog) *BitParallelDFA {
 		bp.ContextMasks[c] = m
 	}
 
-	// 5. Precalculate MatchMasks for each context.
+	// 5. Precalculate MatchMasks and StartMasks for each context.
 	for c := 0; c < 64; c++ {
 		ctx := syntax.EmptyOp(c)
-		var m uint64
+		var matchMask uint64
 		for i := 0; i < len(prog.Inst); i++ {
 			if (epsilonClosureWithContext(i, ctx) & bp.MatchMask) != 0 {
-				m |= (1 << uint(i))
+				matchMask |= (1 << uint(i))
 			}
 		}
-		bp.MatchMasks[c] = m
+		bp.MatchMasks[c] = matchMask
+		bp.StartMasks[c] = epsilonClosureWithContext(prog.Start, ctx)
 	}
 
 	return bp

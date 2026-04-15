@@ -50,8 +50,14 @@ To support patterns of any size and complexity, the engine utilizes a scalable N
 
 ### 2.7 Architectural Shortcut (Compilation Efficiency)
 To minimize compilation overhead, the engine MUST use an **Architectural Shortcut** for simple patterns.
-- **Skip Heavy DFA**: If a pattern is simple (NFA nodes $\le 62$, no non-greedy), the engine MUST skip the heavy DFA transition table construction and only build the `BitParallelDFA`.
+- **Skip Heavy DFA**: If a pattern is simple (NFA nodes $\le 62$, no non-greedy, **and no anchors**), the engine MUST skip the heavy DFA transition table construction and only build the `BitParallelDFA`. Patterns with anchors MUST use the table-based DFA to leverage SIMD-accelerated prefix skipping (SIMD Warp).
 - **ASCII Restriction**: BP-DFA is currently optimized for ASCII-only runes (0-127). Patterns requiring multi-byte UTF-8 support (e.g., non-ASCII runes or `.`) MUST fallback to the table-based DFA, which provides mature byte-level expansion via its UTF-8 trie.
+
+### 2.17 Bit-parallel Optimization (BP-DFA Zero-Traverse Mandate)
+To maintain maximum throughput for small patterns, the BP-DFA MUST avoid all runtime NFA traversals:
+- **Precalculated StartMasks**: The engine MUST precalculate `StartMasks [64]uint64` during compilation, representing the epsilon closure of the start state for all 64 possible empty-width contexts.
+- **Precalculated MatchMasks**: Match detection MUST be performed using context-dependent `MatchMasks [64]uint64`, allowing $O(1)$ match verification per byte.
+- **Zero-Alloc Hot Loop**: The `bitParallelExecLoop` MUST NOT perform any function calls or heap allocations, operating entirely on stack-allocated state vectors and precalculated tables.
 
 ### 2.8 Prefix-Skip Optimization (SIMD Acceleration)
 - **Mandatory Prefix Extraction**: During compilation, the longest constant prefix is extracted.

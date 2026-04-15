@@ -32,50 +32,42 @@ The transition is performed by shifting the state vector and applying a characte
 
 [source]
 ----
-1. Shift & Insert: (state << 1 | 1)
+1. Initialize State: state = bp.StartMasks[initialContext]
+   The starting state is precalculated for each of the 64 possible empty-width contexts (e.g., ^, \b).
+
+2. Shift & Insert: (state << 1 | 1)
    Moves all active paths forward and seeds a new match at the start state.
+   (Note: For unanchored search, the start mask is re-applied or state is seeded).
 
-   Before: [0][0][0][1][0][1]
-   After:  [0][0][1][0][1][1] (LSB is always set to 1 to allow starting new matches)
-
-2. Masking: & masks[input[i]]
+3. Masking: & masks[input[i]]
    Filters the active paths based on the current input byte.
 
-   Shifted: [0][0][1][0][1][1]
-   Mask 'a': [0][0][1][1][0][1] (States that can transition on 'a')
-   ---------------------------
-   Result:  [0][0][1][0][0][1] (Only bits 0 and 3 survived)
-
-3. Context Filtering: & bp.ContextMasks[currContext]
+4. Context Filtering: & bp.ContextMasks[currContext]
    Filters paths based on anchor conditions (e.g., ^, $, \b).
 
-   Result:  [0][0][1][0][0][1]
-   Context: [0][0][0][1][1][1] (Only bits 0, 1, 2 are valid for current boundary)
-   ---------------------------
-   Final:   [0][0][0][0][0][1] (Only path with highest priority survived context check)
+5. Match Detection: (state & bp.MatchMasks[currContext]) != 0
+   Uses precalculated context-dependent match masks to detect if any path reached a match state.
 ----
 
 == Key Technologies
 
-=== 1. Context-Aware Anchor Resolution
-Rather than using branching or virtual bytes, the BP-DFA uses pre-compiled `ContextMasks [8][256]uint64`. This aggregates the character classes and boundary conditions into a single bitwise AND.
-This ensures that anchors like `\b`, `^`, and `$` are resolved with the same $O(1)$ cost as matching a literal character.
+=== 1. Zero-Traverse Anchor Resolution
+Rather than using runtime NFA traversals or virtual bytes, the BP-DFA uses pre-compiled `StartMasks [64]uint64` and `ContextMasks [64]uint64`. 
+* **StartMasks**: Capture the epsilon closure of the starting position, considering all 64 possible boundary conditions at the first byte.
+* **ContextMasks**: Aggregates the character classes and boundary conditions into a single bitwise AND, resolving anchors like `\b`, `^`, and `$` with $O(1)$ cost.
 
 === 2. Winning Absolute Priority
 In a bit-parallel environment, multiple NFA paths can overlap. The engine resolves submatch priorities at the bit-level, ensuring that the "absolute winning path" is determined deterministically without the overhead of tracking individual path histories at runtime.
 
+== Strategy Selection & SIMD Warp
+
+While BP-DFA is extremely fast for small patterns, it does not support SIMD-accelerated skipping (SIMD Warp) because the bitset must be updated for every byte. 
+
+* **Anchor-Heavy Patterns**: Patterns with anchors like `\bGET\b` are now **delegated to the table-based DFA** (Strategy 4) even if they are small enough for BP-DFA. This allows the engine to use `bytes.Index` to skip non-matching segments at GB/s speeds, which is significantly faster than bit-parallel scanning for sparse matches.
+* **Shortcut Heuristic**: The "Architectural Shortcut" only selects BP-DFA for patterns that are simple AND anchor-free.
+
 == Advantages
 
 * **Pure Go High Performance**: Achieves performance comparable to low-level C implementations by aligning perfectly with the Go compiler's register allocation.
-* **L1 Cache Optimization**: The data structures required for transitions are kept small enough to fit within the L1 data cache.
+* **L1 Cache Optimization**: Successor tables and masks fit within the L1 data cache (approx. 16KB).
 * **Deterministic Execution**: Guarantees a constant instruction count per byte, providing predictable and low-latency matching.
-
-== Role in 2-Pass Submatch Extraction
-
-While the table-based DFA is superior for high-throughput scanning, its abstraction of NFA states into single "DFA States" can lead to ambiguity during submatch extraction—particularly with greedy operators. In the 2-pass strategy, BP-DFA acts as the **Terminal Arbiter**:
-
-1. **State Handover**: At the exact `end` coordinate of a match, the table-based DFA hands over its current `StateID` to the BP-DFA.
-2. **Path Decomposition**: The BP-DFA converts this ID into a `uint64` bitmask, effectively "un-grouping" the merged NFA paths.
-3. **Winning Bit Identification**: It identifies which specific bit (NFA state) reached the `InstMatch` with the highest priority.
-4. **Coordinate Correction**: This ensures that greedy captures are pulled back to the precise byte boundary intended by the standard library, resolving the "1-byte overrun" inherent in raw DFA rescanning.
-

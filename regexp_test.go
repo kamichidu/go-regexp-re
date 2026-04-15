@@ -289,7 +289,7 @@ func TestSpecializationPath(t *testing.T) {
 		{"(a|b)*", "dfa"},
 		{patternDFA, "dfa"},
 		{"^a|b$", "dfa-anchor"}, // Alternation: takes DFA
-		{"\\bword\\b", "bit-parallel"},
+		{"\\bword\\b", "dfa-anchor"},
 	}
 
 	for _, tt := range tests {
