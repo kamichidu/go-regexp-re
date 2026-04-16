@@ -216,7 +216,12 @@ type DFA struct {
 	reachableToMatch       []uint64
 	nodes                  []*UTF8Node
 	storage                NFAPathStorage
+	predecessorMasks       []uint64 // byte (256) -> targetNFA (NumInst) -> sourceNFA bitset (maskStride)
+	instPriorities         []int32  // NFA Inst ID -> Absolute Priority
 }
+
+func (d *DFA) PredecessorMasks() []uint64 { return d.predecessorMasks }
+func (d *DFA) InstPriorities() []int32    { return d.instPriorities }
 
 func (d *DFA) GetNFAContext(s StateID, buf []NFAPath) ([]NFAPath, error) {
 	if d.storage == nil {
@@ -605,30 +610,36 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 	d.stride = 256
 
 	// Pre-compute reachability to Match for all instructions
-	var reachableToMatch uint64
-	memo := make(map[int]bool)
-	var findMatch func(int) bool
-	findMatch = func(curr int) bool {
-		if res, ok := memo[curr]; ok {
-			return res
+	reachableToMatchSet := make(map[int]bool)
+	changed := true
+	for changed {
+		changed = false
+		for i, inst := range prog.Inst {
+			if reachableToMatchSet[i] {
+				continue
+			}
+			if inst.Op == syntax.InstMatch {
+				reachableToMatchSet[i] = true
+				changed = true
+				continue
+			}
+
+			can := false
+			switch inst.Op {
+			case syntax.InstAlt, syntax.InstAltMatch:
+				can = reachableToMatchSet[int(inst.Out)] || reachableToMatchSet[int(inst.Arg)]
+			case syntax.InstCapture, syntax.InstNop, syntax.InstEmptyWidth, syntax.InstRune, syntax.InstRune1, syntax.InstRuneAny, syntax.InstRuneAnyNotNL:
+				can = reachableToMatchSet[int(inst.Out)]
+			}
+			if can {
+				reachableToMatchSet[i] = true
+				changed = true
+			}
 		}
-		memo[curr] = false // Avoid cycles
-		inst := prog.Inst[curr]
-		if inst.Op == syntax.InstMatch {
-			return true
-		}
-		res := false
-		switch inst.Op {
-		case syntax.InstAlt, syntax.InstAltMatch:
-			res = findMatch(int(inst.Out)) || findMatch(int(inst.Arg))
-		case syntax.InstCapture, syntax.InstNop, syntax.InstEmptyWidth, syntax.InstRune, syntax.InstRune1, syntax.InstRuneAny, syntax.InstRuneAnyNotNL:
-			res = findMatch(int(inst.Out))
-		}
-		memo[curr] = res
-		return res
 	}
+	var reachableToMatch uint64
 	for i := range prog.Inst {
-		if i < 64 && findMatch(i) {
+		if i < 64 && reachableToMatchSet[i] {
 			reachableToMatch |= (1 << uint(i))
 		}
 	}
@@ -822,11 +833,7 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 		d.stateIsSearch = append(d.stateIsSearch, isSearch)
 		isAcc, matchP := false, 1<<30-1
 		var matchTags uint64
-		minPathP := 1<<30 - 1
 		for _, s := range closure {
-			if int(s.Priority) < minPathP {
-				minPathP = int(s.Priority)
-			}
 			if prog.Inst[s.ID].Op == syntax.InstMatch && s.NodeID == 0 {
 				isAcc = true
 				if int(s.Priority) < matchP {
@@ -835,10 +842,29 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 				}
 			}
 		}
+
+		isBest := false
+		if isAcc {
+			isBest = true
+			for _, s := range closure {
+				if int(s.Priority) < matchP {
+					// This NFA state hasn't matched yet but has better priority.
+					// Can it reach Match?
+					if s.ID < 64 && (d.instReachableToMatch&(1<<uint(s.ID))) != 0 {
+						isBest = false
+						break
+					} else if s.ID >= 64 {
+						isBest = false
+						break
+					}
+				}
+			}
+		}
+
 		d.accepting = append(d.accepting, isAcc)
 		d.stateMatchPriority = append(d.stateMatchPriority, matchP)
 		d.stateMatchTags = append(d.stateMatchTags, matchTags)
-		d.stateIsBestMatch = append(d.stateIsBestMatch, isAcc && (matchP == minPathP))
+		d.stateIsBestMatch = append(d.stateIsBestMatch, isBest)
 		for i := 0; i < 256; i++ {
 			d.transitions = append(d.transitions, InvalidState)
 			d.tagUpdateIndices = append(d.tagUpdateIndices, 0)
@@ -1020,7 +1046,7 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 		}
 	}
 	d.minimize()
-	d.computePhase2Metadata()
+	d.computePhase2Metadata(prog)
 
 	// HELP GC: Clear local maps before returning
 	nfaToDfa = nil
@@ -1195,15 +1221,76 @@ func (d *DFA) minimize() {
 	d.transitions, d.anchorTransitions, d.tagUpdateIndices, d.anchorTagUpdateIndices, d.accepting, d.stateMatchPriority, d.stateMatchTags, d.stateIsBestMatch, d.stateIsSearch, d.stateToMask, d.storage, d.numStates, d.searchState, d.matchState = newTransitions, newAnchorTransitions, newUpdateIndices, newAnchorUpdateIndices, newAccepting, newPrio, newMatchTags, newBest, newIsSearch, newMasks, newStorage, int(numGroups), StateID(stateToGroup[d.searchState]), StateID(stateToGroup[d.matchState])
 }
 
-func (d *DFA) computePhase2Metadata() {
+func (d *DFA) computePhase2Metadata(prog *syntax.Prog) {
 	d.isAlwaysTrue, d.warpPoints, d.warpPointState, d.warpPointGuards = make([]bool, d.numStates), make([]int16, d.numStates), make([]StateID, d.numStates), make([]syntax.EmptyOp, d.numStates)
 	for i := range d.warpPoints {
 		d.warpPoints[i] = -1
 		d.warpPointState[i] = InvalidState
 	}
+
+	numInst := len(prog.Inst)
+	stride := d.maskStride
+	d.predecessorMasks = make([]uint64, 256*numInst*stride)
+
+	// Pre-calculate epsilon reachability (forward)
+	epsilonReachable := make([]uint64, numInst*stride)
+	for i := 0; i < numInst; i++ {
+		stack := []uint32{uint32(i)}
+		visited := make(map[uint32]bool)
+		for len(stack) > 0 {
+			curr := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			if visited[curr] {
+				continue
+			}
+			visited[curr] = true
+			epsilonReachable[i*stride+(int(curr)/64)] |= (1 << (curr % 64))
+
+			inst := prog.Inst[curr]
+			switch inst.Op {
+			case syntax.InstAlt, syntax.InstAltMatch:
+				stack = append(stack, inst.Out, inst.Arg)
+			case syntax.InstCapture, syntax.InstNop, syntax.InstEmptyWidth:
+				stack = append(stack, inst.Out)
+			}
+		}
+	}
+
+	for i := range prog.Inst {
+		inst := prog.Inst[i]
+		switch inst.Op {
+		case syntax.InstRune, syntax.InstRune1, syntax.InstRuneAny, syntax.InstRuneAnyNotNL:
+			roots := d.trieRoots[i]
+			for b := 0; b < 256; b++ {
+				matched := false
+				for _, root := range roots {
+					if root.Match(byte(b), inst.Op == syntax.InstRune && (inst.Arg&uint32(syntax.FoldCase) != 0)) {
+						matched = true
+						break
+					}
+				}
+				if matched {
+					// Instruction i consumes byte b and reaches inst.Out.
+					// ANY instruction j that can reach i via epsilon path is a predecessor of inst.Out (and its epsilon-successors).
+					// Actually, simpler: if i consumes b and goes to inst.Out,
+					// then for every epsilon-successor 's' of inst.Out, i is a byte-predecessor of 's'.
+					targetBase := int(inst.Out)
+					for s := 0; s < numInst; s++ {
+						if (epsilonReachable[targetBase*stride+(s/64)] & (1 << uint(s%64))) != 0 {
+							// s is reachable from inst.Out via epsilon path.
+							// Therefore i is a byte-predecessor of s for byte b.
+							d.predecessorMasks[b*(numInst*stride)+s*stride+(i/64)] |= (1 << uint(i%64))
+						}
+					}
+				}
+			}
+		}
+	}
+
 	d.findWarpPoints()
 	d.findSCCs()
 }
+
 func (d *DFA) findWarpPoints() {
 	for i := 0; i < d.numStates; i++ {
 		currState := StateID(i)
@@ -1370,9 +1457,10 @@ func epsilonClosureWithPathTags(paths []NFAPath, prog *syntax.Prog, context synt
 	type key struct {
 		ID     uint32
 		NodeID uint32
-		Tags   uint64
 	}
 	best := make(map[key]int32)
+	bestTags := make(map[key]uint64)
+
 	type pathWithNewTags struct {
 		p    NFAPath
 		tags uint64
@@ -1386,11 +1474,18 @@ func epsilonClosureWithPathTags(paths []NFAPath, prog *syntax.Prog, context synt
 	for len(stack) > 0 {
 		ph := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
-		p, k := ph.p, key{ph.p.ID, ph.p.NodeID, ph.p.Tags}
-		if prio, ok := best[k]; ok && p.Priority >= prio {
-			continue
+		p, k := ph.p, key{ph.p.ID, ph.p.NodeID}
+
+		if prio, ok := best[k]; ok {
+			if p.Priority > prio {
+				continue
+			}
+			if p.Priority == prio && (p.Tags == bestTags[k]) {
+				continue
+			}
 		}
 		best[k] = p.Priority
+		bestTags[k] = p.Tags
 
 		if ph.tags != 0 {
 			update := pathTags[p.Priority]
@@ -1403,11 +1498,11 @@ func epsilonClosureWithPathTags(paths []NFAPath, prog *syntax.Prog, context synt
 
 		if p.NodeID == 0 {
 			inst := prog.Inst[p.ID]
-			if inst.Op == syntax.InstMatch {
-				continue
-			}
+			// IMPORTANT: Don't skip InstMatch here! We need it in the 'best' map.
 			switch inst.Op {
 			case syntax.InstAlt, syntax.InstAltMatch:
+				// Explore Out before Arg. Arg is penalized to respect Prog's priority.
+				// For non-greedy, Out is often the branch that skips the loop (higher priority).
 				stack = append(stack, pathWithNewTags{NFAPath{NFAState: NFAState{ID: inst.Arg, NodeID: 0}, Priority: p.Priority + 1, Tags: p.Tags}, ph.tags})
 				stack = append(stack, pathWithNewTags{NFAPath{NFAState: NFAState{ID: inst.Out, NodeID: 0}, Priority: p.Priority, Tags: p.Tags}, ph.tags})
 			case syntax.InstCapture:
@@ -1427,14 +1522,15 @@ func epsilonClosureWithPathTags(paths []NFAPath, prog *syntax.Prog, context synt
 	}
 	var result []NFAPath
 	for k, prio := range best {
+		tags := bestTags[k]
 		if k.NodeID != 0 {
-			result = append(result, NFAPath{NFAState: NFAState{ID: k.ID, NodeID: k.NodeID}, Priority: prio, Tags: k.Tags})
+			result = append(result, NFAPath{NFAState: NFAState{ID: k.ID, NodeID: k.NodeID}, Priority: prio, Tags: tags})
 			continue
 		}
 		inst := prog.Inst[k.ID]
 		switch inst.Op {
 		case syntax.InstRune, syntax.InstRune1, syntax.InstRuneAny, syntax.InstRuneAnyNotNL, syntax.InstMatch, syntax.InstEmptyWidth:
-			result = append(result, NFAPath{NFAState: NFAState{ID: k.ID, NodeID: k.NodeID}, Priority: prio, Tags: k.Tags})
+			result = append(result, NFAPath{NFAState: NFAState{ID: k.ID, NodeID: k.NodeID}, Priority: prio, Tags: tags})
 		}
 	}
 	sort.Slice(result, func(i, j int) bool {

@@ -300,17 +300,16 @@ func TestSpecializationPath(t *testing.T) {
 		}
 
 		var got string
-		if re.literalMatcher != nil {
+		switch re.strategy {
+		case strategyLiteral:
 			got = "literal"
-		} else if re.dfa != nil {
-			if re.dfa.HasAnchors() {
-				got = "dfa-anchor"
-			} else {
-				got = "dfa"
-			}
-		} else if re.bpDfa != nil {
+		case strategyBitParallel:
 			got = "bit-parallel"
-		} else {
+		case strategyFast:
+			got = "dfa"
+		case strategyExtended:
+			got = "dfa-anchor"
+		default:
 			got = "unknown"
 		}
 
