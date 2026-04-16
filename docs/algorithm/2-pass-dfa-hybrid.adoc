@@ -3,44 +3,52 @@
 
 == Concept
 
-DFAs are traditionally poor at extracting submatches because the history of which specific NFA path was taken is lost during state merging. To achieve 100% Go standard library compatibility while maintaining extreme throughput, this project employs a **2-pass Sparse Tagged-DFA (TDFA)** strategy.
+DFAs are traditionally poor at extracting submatches because the history of which specific NFA path was taken is lost during state merging. To achieve 100% Go standard library compatibility while maintaining extreme throughput, this project employs a **2-pass Sparse Tagged-DFA (TDFA)** strategy combined with **Strict Priority Burning**.
 
-This strategy separates the concerns of "where is the match" (Pass 1) and "what is inside the match" (Pass 2) to maximize CPU cache efficiency and eliminate dynamic searching during submatch extraction.
+This strategy separates the concerns of "where is the match" (Pass 1) and "what is inside the match" (Pass 2) to maximize CPU cache efficiency and eliminate all runtime NFA simulation.
 
-== The Three Phases
+== The Core Mandate: NFA is Strictly Prohibited
 
-=== Phase 1: High-Speed Discovery & Recording (Forward Pass)
+A core pillar of this engine is that **NFA simulation is never allowed at runtime**. Every decision regarding submatch selection must be "burned into" the DFA transition tables during the compilation phase.
+
+=== Tag-Aware Subsetting (State Multiplexing)
+During DFA construction, states are not only defined by their NFA state sets but also by the **history of tags encountered**. If two NFA paths reach the same state with the same priority but different tag updates, the DFA builder splits them into distinct DFA states. 
+
+This ensures that the DFA state itself carries the necessary information to disambiguate paths.
+
+=== Priority Transition Mapping (Burned Logic)
+Each DFA transition records a precise mapping: `(input_priority) -> (next_priority, tags)`.
+* **Input Priority**: The normalized priority level of the path when entering the state.
+* **Next Priority**: The normalized priority level when leaving the state via a specific byte.
+* **Tags**: The exact set of capturing group registers to update during this transition.
+
+By pre-calculating these mappings, the engine converts a dynamic NFA-level searching problem into a static table-lookup operation.
+
+== Execution Phases
+
+=== Phase 1: High-Speed Discovery & Recording
 * **Objective**: Find the `[start, end]` match boundaries and record the execution history.
-* **Mechanism**: Uses a "naked" DFA scan that only performs state transitions based on input bytes.
-* **Cache Alignment**: The transition table is optimized for 64-byte cache line alignment, with each entry being a 4-byte `ir.StateID`.
-* **Zero Overhead**: This pass ignores all capturing group boundaries, ensuring that the primary search speed matches a pure DFA engine.
+* **Mechanism**: Uses a "naked" DFA scan. The `ir.StateID` history is recorded in a lightweight buffer.
+* **Performance**: primary search speed matches a pure DFA engine.
 
-=== Phase 2: Sparse Tagged Recap (Forward/Backward Walk)
-* **Objective**: Apply capturing group tags (registers) along the confirmed winning path.
+=== Phase 2: Deterministic Forward Recap
+* **Objective**: Extract capturing group registers along the winning path.
 * **Mechanism**:
-    - The engine walks through the recorded `ir.StateID` history within the match boundaries.
-    - **Sparse Action Table**: It consults a secondary `tagActionTable`. Unlike the main transition table, this table only contains entries for DFA states that are "tag-sensitive" (i.e., those that contain NFA paths crossing a capture boundary).
-    - **Command Execution**: For each edge `(State, Byte)`, a pre-calculated `ActionID` identifies a set of commands (e.g., `regs[0] = current_pos`).
-* **Performance**: This pass replaces dynamic NFA closure searching with static table lookups, minimizing branch mispredictions.
+    1.  Initialize priority `p` from the winning NFA state at `history[start]`.
+    2.  For each step `i` from `start` to `end`:
+        - Look up the `TransitionUpdate` for `(history[i], input[i])`.
+        - Select the update matching the current priority `p`.
+        - Apply the burned-in tags and update `p` to the burned-in `next_priority`.
+* **Zero Searching**: This pass is strictly $O(n)$ and performs **no dynamic searching**. It only follows the pre-calculated deterministic path.
 
-=== Phase 3: Final Result Construction
-* **Objective**: Format the updated registers into the standard Go `[]int` result.
-* **Priority Handling**: Because the `ActionID` is selected during DFA construction based on the highest-priority NFA path, the final submatch indices are guaranteed to match Go's leftmost-first semantics.
+== Safety & Compatibility
 
-== Key Technology: Capture-Aware Sparse Tagging
-
-=== Tag-Sensitive States
-During compilation, the engine identifies which DFA states involve transitions that update capturing registers. states that are "tag-neutral" (e.g., matching a long literal prefix or a simple character class) are marked to be skipped during Phase 2, further reducing CPU cycles.
-
-=== Physically Separated Tables
-By keeping the `transitions` and `tagActionTable` in separate memory regions, the forward scan (Pass 1) never loads tagging data into the L1 cache. This preserves cache bandwidth for the primary search task.
-
-=== Zero-Allocation recap
-All tag update commands are executed using stack-resident register arrays. No heap allocations occur during the recap phase, ensuring stable performance even under high concurrency.
+=== Static Compatibility Check
+To ensure 100% compatibility, the compiler performs a **Static Compatibility Check**. Patterns that would require non-deterministic runtime logic (like empty-string loops) are rejected at compile time.
 
 == Advantages
 
-* **$O(n)$ Complexity**: Both discovery and recap are strictly linear.
-* **CPU Friendly**: Replaces NFA simulation with simple table-driven register assignments.
-* **100% Compatibility**: Mirrors Go's `syntax.Prog` priority rules exactly by baking them into the `ActionID` selection.
-* **Memory Efficient**: Sparse tables ensure that tagging overhead is only paid for parts of the regex that actually involve capturing.
+* **Strict $O(n)$ Complexity**: Both passes are linear.
+* **NFA-Free Architecture**: No runtime NFA traversals, ever.
+* **Priority-Burned Precision**: 100% compatibility with Go's standard matching rules.
+* **Cache Optimized**: High-speed discovery is never polluted with tagging logic.

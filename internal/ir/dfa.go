@@ -35,11 +35,6 @@ type NFAPath struct {
 
 const NFAPathSize = int(unsafe.Sizeof(NFAPath{}))
 
-type PathTagUpdate struct {
-	RelativePriority int32
-	Tags             uint64
-}
-
 type TransitionUpdate struct {
 	BasePriority int32
 	PreUpdates   []PathTagUpdate
@@ -371,6 +366,9 @@ func NewDFA(prog *syntax.Prog) (*DFA, error) {
 }
 func NewDFAWithMemoryLimit(ctx context.Context, prog *syntax.Prog, maxMemory int) (*DFA, error) {
 	d := &DFA{numSubexp: prog.NumCap / 2}
+	if err := d.checkCompatibility(prog); err != nil {
+		return nil, err
+	}
 	if err := d.build(ctx, prog, maxMemory); err != nil {
 		return nil, err
 	}
@@ -1456,100 +1454,167 @@ func matchesByte(node *UTF8Node, b byte) bool {
 }
 func matchesByteFold(node *UTF8Node, b byte) bool { return matchesByte(node, b) }
 
+func (d *DFA) checkCompatibility(prog *syntax.Prog) error {
+	// Detect epsilon cycles (infinite loops that can match empty strings)
+	visited := make([]bool, len(prog.Inst))
+	onStack := make([]bool, len(prog.Inst))
+	var hasCycle func(int) bool
+	hasCycle = func(id int) bool {
+		if onStack[id] {
+			return true
+		}
+		if visited[id] {
+			return false
+		}
+		visited[id] = true
+		onStack[id] = true
+		defer func() { onStack[id] = false }()
+
+		inst := prog.Inst[id]
+		switch inst.Op {
+		case syntax.InstAlt, syntax.InstAltMatch:
+			if hasCycle(int(inst.Out)) || hasCycle(int(inst.Arg)) {
+				return true
+			}
+		case syntax.InstCapture, syntax.InstNop, syntax.InstEmptyWidth:
+			if hasCycle(int(inst.Out)) {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Check if any instruction can reach itself by following only epsilon transitions
+	for i := range prog.Inst {
+		for j := range visited {
+			visited[j] = false
+		}
+		if hasCycle(i) {
+			return fmt.Errorf("DFA: unsupported epsilon loop at instruction %d", i)
+		}
+	}
+	return nil
+}
+
+type PathTagUpdate struct {
+	RelativePriority int32
+	NextPriority     int32
+	Tags             uint64
+}
+
 func epsilonClosureWithPathTags(paths []NFAPath, prog *syntax.Prog, context syntax.EmptyOp, nodes []*UTF8Node) ([]NFAPath, []PathTagUpdate) {
+	// Multiplex states using (NFA ID, NodeID, Tags) as a unique key
 	type key struct {
 		ID     uint32
 		NodeID uint32
+		Tags   uint64
 	}
 	best := make(map[key]int32)
-	bestTags := make(map[key]uint64)
 
 	type pathWithNewTags struct {
 		p    NFAPath
 		tags uint64
+		sourcePrio int32 // Initial priority at the beginning of this epsilon closure
 	}
 	stack := make([]pathWithNewTags, len(paths))
 	for i, p := range paths {
-		stack[i] = pathWithNewTags{p, 0}
+		stack[i] = pathWithNewTags{p, 0, p.Priority}
 	}
 
-	pathTags := make(map[int32]*PathTagUpdate)
+	// Calculate mapping from sourcePrio -> {resultPrio, tags}
+	type result struct {
+		minPrio int32
+		tags    uint64
+	}
+	prioMap := make(map[int32]*result)
+
 	for len(stack) > 0 {
 		ph := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
-		p, k := ph.p, key{ph.p.ID, ph.p.NodeID}
+		p, k := ph.p, key{ph.p.ID, ph.p.NodeID, ph.p.Tags}
 
-		if prio, ok := best[k]; ok {
-			if p.Priority > prio {
-				continue
-			}
-			if p.Priority == prio && (p.Tags == bestTags[k]) {
-				continue
-			}
+		if prio, ok := best[k]; ok && prio <= p.Priority {
+			continue
 		}
 		best[k] = p.Priority
-		bestTags[k] = p.Tags
 
-		if ph.tags != 0 {
-			update := pathTags[p.Priority]
-			if update == nil {
-				update = &PathTagUpdate{RelativePriority: p.Priority}
-				pathTags[p.Priority] = update
-			}
-			update.Tags |= ph.tags
+		// Record the minimum priority and tags reached by each initial priority path
+		res := prioMap[ph.sourcePrio]
+		if res == nil {
+			prioMap[ph.sourcePrio] = &result{p.Priority, ph.tags}
+		} else if p.Priority < res.minPrio {
+			res.minPrio = p.Priority
+			res.tags = ph.tags
+		} else if p.Priority == res.minPrio {
+			res.tags |= ph.tags
 		}
 
 		if p.NodeID == 0 {
 			inst := prog.Inst[p.ID]
-			// IMPORTANT: Don't skip InstMatch here! We need it in the 'best' map.
 			switch inst.Op {
 			case syntax.InstAlt, syntax.InstAltMatch:
-				// Explore Out before Arg. Arg is penalized to respect Prog's priority.
-				// For non-greedy, Out is often the branch that skips the loop (higher priority).
-				stack = append(stack, pathWithNewTags{NFAPath{NFAState: NFAState{ID: inst.Arg, NodeID: 0}, Priority: p.Priority + 1, Tags: p.Tags}, ph.tags})
-				stack = append(stack, pathWithNewTags{NFAPath{NFAState: NFAState{ID: inst.Out, NodeID: 0}, Priority: p.Priority, Tags: p.Tags}, ph.tags})
+				stack = append(stack, pathWithNewTags{NFAPath{NFAState: NFAState{ID: inst.Arg, NodeID: 0}, Priority: p.Priority + 1, Tags: p.Tags}, ph.tags, ph.sourcePrio})
+				stack = append(stack, pathWithNewTags{NFAPath{NFAState: NFAState{ID: inst.Out, NodeID: 0}, Priority: p.Priority, Tags: p.Tags}, ph.tags, ph.sourcePrio})
 			case syntax.InstCapture:
 				tagBit := uint64(0)
 				if inst.Arg < 64 {
 					tagBit = (1 << inst.Arg)
 				}
-				stack = append(stack, pathWithNewTags{NFAPath{NFAState: NFAState{ID: inst.Out, NodeID: 0}, Priority: p.Priority, Tags: p.Tags | tagBit}, ph.tags | tagBit})
+				stack = append(stack, pathWithNewTags{NFAPath{NFAState: NFAState{ID: inst.Out, NodeID: 0}, Priority: p.Priority, Tags: p.Tags | tagBit}, ph.tags | tagBit, ph.sourcePrio})
 			case syntax.InstNop:
-				stack = append(stack, pathWithNewTags{NFAPath{NFAState: NFAState{ID: inst.Out, NodeID: 0}, Priority: p.Priority, Tags: p.Tags}, ph.tags})
+				stack = append(stack, pathWithNewTags{NFAPath{NFAState: NFAState{ID: inst.Out, NodeID: 0}, Priority: p.Priority, Tags: p.Tags}, ph.tags, ph.sourcePrio})
 			case syntax.InstEmptyWidth:
 				if syntax.EmptyOp(inst.Arg)&context == syntax.EmptyOp(inst.Arg) {
-					stack = append(stack, pathWithNewTags{NFAPath{NFAState: NFAState{ID: inst.Out, NodeID: 0}, Priority: p.Priority, Tags: p.Tags}, ph.tags})
+					stack = append(stack, pathWithNewTags{NFAPath{NFAState: NFAState{ID: inst.Out, NodeID: 0}, Priority: p.Priority, Tags: p.Tags}, ph.tags, ph.sourcePrio})
 				}
 			}
 		}
 	}
-	var result []NFAPath
+
+	var resultPaths []NFAPath
 	for k, prio := range best {
-		tags := bestTags[k]
 		if k.NodeID != 0 {
-			result = append(result, NFAPath{NFAState: NFAState{ID: k.ID, NodeID: k.NodeID}, Priority: prio, Tags: tags})
+			resultPaths = append(resultPaths, NFAPath{NFAState: NFAState{ID: k.ID, NodeID: k.NodeID}, Priority: prio, Tags: k.Tags})
 			continue
 		}
 		inst := prog.Inst[k.ID]
 		switch inst.Op {
 		case syntax.InstRune, syntax.InstRune1, syntax.InstRuneAny, syntax.InstRuneAnyNotNL, syntax.InstMatch, syntax.InstEmptyWidth:
-			result = append(result, NFAPath{NFAState: NFAState{ID: k.ID, NodeID: k.NodeID}, Priority: prio, Tags: tags})
+			resultPaths = append(resultPaths, NFAPath{NFAState: NFAState{ID: k.ID, NodeID: k.NodeID}, Priority: prio, Tags: k.Tags})
 		}
 	}
-	sort.Slice(result, func(i, j int) bool {
-		if result[i].Priority != result[j].Priority {
-			return result[i].Priority < result[j].Priority
+
+	// Normalize with minimum total priority
+	minTotalPrio := int32(1 << 30)
+	if len(resultPaths) > 0 {
+		minTotalPrio = resultPaths[0].Priority
+		for _, p := range resultPaths {
+			if p.Priority < minTotalPrio {
+				minTotalPrio = p.Priority
+			}
 		}
-		if result[i].ID != result[j].ID {
-			return result[i].ID < result[j].ID
-		}
-		return result[i].Tags < result[j].Tags
-	})
+	}
 
 	var updates []PathTagUpdate
-	for _, u := range pathTags {
-		updates = append(updates, *u)
+	for sourcePrio, r := range prioMap {
+		updates = append(updates, PathTagUpdate{
+			RelativePriority: sourcePrio,
+			NextPriority:     r.minPrio - minTotalPrio, // Relative priority for the next state
+			Tags:             r.tags,
+		})
 	}
+
+
+	sort.Slice(resultPaths, func(i, j int) bool {
+		if resultPaths[i].Priority != resultPaths[j].Priority {
+			return resultPaths[i].Priority < resultPaths[j].Priority
+		}
+		if resultPaths[i].ID != resultPaths[j].ID {
+			return resultPaths[i].ID < resultPaths[j].ID
+		}
+		return resultPaths[i].Tags < resultPaths[j].Tags
+	})
 	sort.Slice(updates, func(i, j int) bool { return updates[i].RelativePriority < updates[j].RelativePriority })
-	return result, updates
+
+	return resultPaths, updates
 }
