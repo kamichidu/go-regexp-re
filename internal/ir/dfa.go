@@ -1512,8 +1512,8 @@ func epsilonClosureWithPathTags(paths []NFAPath, prog *syntax.Prog, context synt
 	best := make(map[key]int32)
 
 	type pathWithNewTags struct {
-		p    NFAPath
-		tags uint64
+		p          NFAPath
+		tags       uint64
 		sourcePrio int32 // Initial priority at the beginning of this epsilon closure
 	}
 	stack := make([]pathWithNewTags, len(paths))
@@ -1603,7 +1603,6 @@ func epsilonClosureWithPathTags(paths []NFAPath, prog *syntax.Prog, context synt
 			Tags:             r.tags,
 		})
 	}
-
 
 	sort.Slice(resultPaths, func(i, j int) bool {
 		if resultPaths[i].Priority != resultPaths[j].Priority {
