@@ -1,51 +1,46 @@
-= DFA-Guided Bit-Parallel Traceback (DASH-BT)
+= 2-pass Sparse Tagged-DFA (TDFA)
 :sectnums:
 
 == Concept
 
-DFAs are traditionally poor at extracting submatches (capturing groups) because the history of which specific NFA path was taken is lost during state merging. To achieve 100% Go standard library compatibility while maintaining $O(n)$ performance and avoiding NFA thread management (PikeVM), this project employs a **DFA-Guided Bit-Parallel Traceback (DASH-BT)** strategy.
+DFAs are traditionally poor at extracting submatches because the history of which specific NFA path was taken is lost during state merging. To achieve 100% Go standard library compatibility while maintaining extreme throughput, this project employs a **2-pass Sparse Tagged-DFA (TDFA)** strategy.
 
-This strategy treats the DFA state history as a "safe corridor" through the NFA's potential state space, allowing for a deterministic reconstruction of the unique winning path using bitwise operations.
+This strategy separates the concerns of "where is the match" (Pass 1) and "what is inside the match" (Pass 2) to maximize CPU cache efficiency and eliminate dynamic searching during submatch extraction.
 
 == The Three Phases
 
-=== Phase 1: Consolidated Discovery & Recording (Forward Pass)
-* **Objective**: Find the `[start, end]` match boundaries and record the execution history in a single pass.
-* **Mechanism**: Uses a specialized `submatchExecLoop` that performs standard DFA scanning while recording the `ir.StateID` at every byte position into a pre-allocated history buffer.
-* **Lightweight History**: Records only 4-byte `ir.StateID`s instead of heavy NFA state sets.
-* **Performance**: For common match sizes (e.g., <1024 bytes), the history fits entirely on the CPU stack (`[1024]int32`), eliminating heap allocations.
+=== Phase 1: High-Speed Discovery & Recording (Forward Pass)
+* **Objective**: Find the `[start, end]` match boundaries and record the execution history.
+* **Mechanism**: Uses a "naked" DFA scan that only performs state transitions based on input bytes.
+* **Cache Alignment**: The transition table is optimized for 64-byte cache line alignment, with each entry being a 4-byte `ir.StateID`.
+* **Zero Overhead**: This pass ignores all capturing group boundaries, ensuring that the primary search speed matches a pure DFA engine.
 
-=== Phase 2: DFA-Guided Path Reconstruction (Backward Pass)
-* **Objective**: Identify the unique sequence of NFA instructions taken for every byte of the match.
+=== Phase 2: Sparse Tagged Recap (Forward/Backward Walk)
+* **Objective**: Apply capturing group tags (registers) along the confirmed winning path.
 * **Mechanism**:
-    - **Winning Node Identification**: At the `end` position, the engine selects the NFA node that reached a `Match` instruction with the highest absolute priority (leftmost-first) from the final DFA state's closure.
-    - **Guided Reverse Trace**: Moving from `end` back to `start`, the engine consults the historical `ir.StateID`s. For each byte, it fetches the corresponding NFA closure from storage.
-    - **Transition Resolution**: It identifies the unique predecessor `ir.NFAPath` (Instruction ID + Trie Node ID) that could have transitioned to the current node given the byte at that position.
-    - **UTF-8 Precision**: By tracking both the Instruction ID and the Trie Node ID, the engine correctly handles multi-byte UTF-8 runes, even when a single NFA instruction spans multiple bytes.
+    - The engine walks through the recorded `ir.StateID` history within the match boundaries.
+    - **Sparse Action Table**: It consults a secondary `tagActionTable`. Unlike the main transition table, this table only contains entries for DFA states that are "tag-sensitive" (i.e., those that contain NFA paths crossing a capture boundary).
+    - **Command Execution**: For each edge `(State, Byte)`, a pre-calculated `ActionID` identifies a set of commands (e.g., `regs[0] = current_pos`).
+* **Performance**: This pass replaces dynamic NFA closure searching with static table lookups, minimizing branch mispredictions.
 
-=== Phase 3: Forward Recap (Tag Application)
-* **Objective**: Apply capturing group tags along the confirmed path.
-* **Mechanism**:
-    - The engine walks forward along the `ir.NFAState` path reconstructed in Phase 2.
-    - **Epsilon-Path Recovery**: Between byte-consuming transitions, the engine follows the highest-priority epsilon path (following `InstCapture`, `InstAlt`, etc.) to apply tags.
-    - **Bit-Perfect Results**: This ensures the engine captures exactly the same boundaries as Go's `regexp` package, including edge cases like nested empty matches.
+=== Phase 3: Final Result Construction
+* **Objective**: Format the updated registers into the standard Go `[]int` result.
+* **Priority Handling**: Because the `ActionID` is selected during DFA construction based on the highest-priority NFA path, the final submatch indices are guaranteed to match Go's leftmost-first semantics.
 
-== Key Technology: On-Demand Closure Retrieval
+== Key Technology: Capture-Aware Sparse Tagging
 
-=== Lightweight History
-The engine only records 4-byte `ir.StateID`s during the forward scan. This keeps the history buffer small enough to fit in the CPU cache or on the stack for common match lengths.
+=== Tag-Sensitive States
+During compilation, the engine identifies which DFA states involve transitions that update capturing registers. states that are "tag-neutral" (e.g., matching a long literal prefix or a simple character class) are marked to be skipped during Phase 2, further reducing CPU cycles.
 
-=== Absolute Priority Maintenance
-Unlike traditional DFA minimization which might lose path priority, this engine preserves absolute NFA priorities during state construction. This allows Phase 2 to always pick the "winning" NFA path that Go's leftmost-first semantics demand.
+=== Physically Separated Tables
+By keeping the `transitions` and `tagActionTable` in separate memory regions, the forward scan (Pass 1) never loads tagging data into the L1 cache. This preserves cache bandwidth for the primary search task.
 
-=== Zero-Allocation Discovery
-During the forward scan, no heap allocations occur. The NFA closures required for traceback are retrieved from a pre-calculated storage (memory or file-backed), ensuring that submatch extraction is both fast and memory-stable.
-
-=== Tiled Checkpoint Scanning (Future)
-For extremely long inputs where the history exceeds stack limits, the engine uses 512-byte "Checkpoints". It records only periodic `StateID`s and re-scans local blocks on-demand, keeping the working set within the L1 cache.
+=== Zero-Allocation recap
+All tag update commands are executed using stack-resident register arrays. No heap allocations occur during the recap phase, ensuring stable performance even under high concurrency.
 
 == Advantages
 
-* **$O(n)$ Complexity**: Both recording and traceback are strictly linear with respect to match length.
-* **Stack-Resident Memory**: Minimizes memory bandwidth by reducing history size by 6x.
-* **Bit-Perfect Compatibility**: Successfully handles complex cases like greedy loops, non-greedy overlaps, and nested empty matches by mirroring Go's priority rules.
+* **$O(n)$ Complexity**: Both discovery and recap are strictly linear.
+* **CPU Friendly**: Replaces NFA simulation with simple table-driven register assignments.
+* **100% Compatibility**: Mirrors Go's `syntax.Prog` priority rules exactly by baking them into the `ActionID` selection.
+* **Memory Efficient**: Sparse tables ensure that tagging overhead is only paid for parts of the regex that actually involve capturing.

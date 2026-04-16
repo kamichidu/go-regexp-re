@@ -31,19 +31,19 @@ To maximize throughput, the engine MUST select the most efficient execution loop
 - **Anchor-Aware Guarded SIMD Warp**: Selected for patterns with anchors. Utilizes a separate `anchorTransitions` table and **guarded warp points** to allow SIMD skipping even in the presence of anchors (e.g., `^`, `$`, `\b`).
 - **Explicit Hot-Loop Monomorphization**: To ensure zero-overhead, the engine MUST avoid Go generics (`GCShape` sharing) for the primary execution loops. Instead, it employs manually monomorphized functions (e.g., `fastExecLoop`, `extendedExecLoop`) to ensure the Go compiler can completely eliminate unreachable branches (like `if hasAnchors`) and avoid runtime dictionary lookups.
 
-### 2.5 Submatch Extraction Architecture (DASH-BT: DFA-Guided Bit-Parallel Traceback)
-The engine follows a **DASH-BT** strategy to guarantee both performance and 100% Go-compatible precision.
+### 2.5 Submatch Extraction Architecture (2-pass Sparse TDFA)
+The engine follows a **2-pass Sparse Tagged-DFA (TDFA)** strategy to guarantee both peak performance and 100% Go-compatible precision.
 
-- **Phase 1: Discovery & History Recording**: A single high-speed scan determines the match boundaries `[start, end]` and simultaneously records the DFA state history as a sequence of 4-byte `ir.StateID`s. For common match lengths (<1024 bytes), this history is stored in stack-resident buffers (`[1024]int32`), eliminating heap allocations.
-- **Phase 2: DFA-Guided Path Reconstruction (Backward Pass)**: Starting from the winning NFA node at `end`, the engine traces backwards to `start`. It fetches the NFA closure for each historical `StateID` and resolves transitions using `ir.NFAState` (Instruction ID + Trie Node ID). This ensures 100% accuracy for multi-byte UTF-8 runes.
-- **Phase 3: Epsilon Recap (Tag Application)**: A final forward pass along the confirmed `NFAState` path applies `Capture` tags by following the highest-priority epsilon transitions between byte-consuming nodes.
-- **Zero-NFA Mandate**: The engine MUST NOT fall back to a backtracking or thread-managed NFA (PikeVM). All cases must be handled via the DASH-BT strategy to maintain $O(n)$ performance and eliminate runtime memory allocations.
+- **Phase 1: High-Speed Boundary Discovery**: A single high-speed DFA scan determines the match boundaries `[start, end]` and simultaneously records a lightweight history of `ir.StateID`s. This pass uses a "naked" transition table optimized for CPU cache line alignment, ignoring all tagging overhead.
+- **Phase 2: Sparse Tagged Recap**: After a match is found, the engine performs a second pass over the recorded history. This pass consults a separate `tagActionTable` which exists only for DFA states involved in capturing group boundaries.
+- **Zero-Allocation Execution**: By pre-calculating tag-update commands (e.g., "Set register X to current position") and baking them into the DFA edges, the engine eliminates all NFA-level searching or backtracking during submatch extraction.
+- **Cache Integrity**: The main transition table and the `tagActionTable` are physically separated in memory. This ensures that Pass 1 remains "clean" from a CPU cache perspective, maximizing throughput for non-capturing segments.
 
-### 2.6 Bit-Parallel Traceback & Scalable Bitsets
-To remove the traditional 64-node limitation and minimize memory bandwidth, the engine utilizes a scalable bit-parallel architecture.
-- **NFA Membership Bitsets**: Each DFA state maintains a bitset representing the set of active NFA nodes. For patterns larger than 64 nodes, this is stored as a multi-word `[]uint64` (Stride).
-- **Pre-calculated Predecessor Masks**: During compilation, the engine pre-calculates bitsets representing which NFA nodes can transition to a target node given a specific byte. This allows the Traceback to identify the unique predecessor in a single bitwise `AND` operation.
-- **Allocation-Free matchContext**: All buffers (history, path, masks) are managed via a `matchContext` utilizing stack-allocated arrays for common match sizes, ensuring zero heap allocations for the majority of search operations.
+### 2.6 Sparse Tagging & Command Execution
+To support patterns of any size and complexity without state explosion, the engine utilizes a sparse command architecture.
+- **Capture-Aware Construction**: During compilation, the engine identifies DFA states that can potentially trigger capturing group boundaries. Only these states are assigned entries in the `tagActionTable`.
+- **Command Deduplication**: Identical sets of tag updates (e.g., multiple paths hitting the same capture boundary) are deduplicated into unique `ActionID`s, minimizing the footprint of the action table.
+- **Iterative Recap**: The second pass is strictly iterative and utilizes stack-resident register arrays, ensuring zero heap allocations for the majority of search operations.
 
 ### 2.7 Architectural Shortcut (Compilation Efficiency)
 To minimize compilation overhead, the engine MUST use an **Architectural Shortcut** for simple patterns.
