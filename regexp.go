@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"math/bits"
 	"sync"
 	"unsafe"
 
@@ -206,22 +207,9 @@ func (re *Regexp) LiteralPrefix() (string, bool) { return string(re.prefix), re.
 
 // matchContext manages pre-allocated buffers for submatch extraction.
 type matchContext struct {
-	historyBuf     [256]ir.StateID
-	pathBuf        [256]ir.NFAState
-	closureBuf1    [32]ir.NFAPath
-	closureBuf2    [32]ir.NFAPath
-	regsBuf        [32]int
-	history        []ir.StateID
-	path           []ir.NFAState
-	visitedBuf     []uint64
-	activeBuf      []uint64
-	currPaths      []ir.NFAPath
-	nextPaths      []ir.NFAPath
-	matchedOut     []uint32
-	matchedNodeIDs []uint32
-	updatesBuf     [128]uint32
-	updates        []uint32
-	stride         int
+	historyBuf [1024]ir.StateID
+	history    []ir.StateID
+	stride     int
 }
 
 func (mc *matchContext) prepare(matchLen int, stride int) {
@@ -230,26 +218,6 @@ func (mc *matchContext) prepare(matchLen int, stride int) {
 		mc.history = make([]ir.StateID, matchLen+1)
 	} else {
 		mc.history = mc.historyBuf[:matchLen+1]
-	}
-	if matchLen > len(mc.pathBuf) {
-		mc.path = make([]ir.NFAState, matchLen)
-	} else {
-		mc.path = mc.pathBuf[:matchLen]
-	}
-	if len(mc.visitedBuf) < stride {
-		mc.visitedBuf = make([]uint64, stride)
-		mc.activeBuf = make([]uint64, stride)
-	}
-	mc.currPaths = mc.closureBuf1[:0]
-	mc.nextPaths = mc.closureBuf2[:0]
-	if mc.matchedOut == nil {
-		mc.matchedOut = make([]uint32, 0, 16)
-		mc.matchedNodeIDs = make([]uint32, 0, 16)
-	}
-	if matchLen > len(mc.updatesBuf) {
-		mc.updates = make([]uint32, matchLen)
-	} else {
-		mc.updates = mc.updatesBuf[:matchLen]
 	}
 }
 
@@ -266,13 +234,15 @@ func (re *Regexp) FindSubmatchIndex(b []byte) []int {
 		regs[i] = -1
 	}
 
-	if re.isASCII && len(b) <= 255 {
-		var mc matchContext // Stack allocated
-		return re.findSubmatchIndexInternal(b, &mc, regs)
+	if re.isASCII && len(b) <= 1023 {
+		var mcStack matchContext
+		mcStack.prepare(len(b), re.dfa.MaskStride())
+		return re.findSubmatchIndexInternal(b, &mcStack, regs)
 	}
 
 	mc := matchContextPool.Get().(*matchContext)
 	defer matchContextPool.Put(mc)
+	mc.prepare(len(b), re.dfa.MaskStride())
 	return re.findSubmatchIndexInternal(b, mc, regs)
 }
 
@@ -289,14 +259,10 @@ func (re *Regexp) findSubmatchIndexInternal(b []byte, mc *matchContext, regs []i
 		startState = re.applyContextToState(re.dfa, startState, ir.CalculateContext(b, 0), 0, nil, 1<<30-1)
 		if re.dfa.Accepting()[startState] && re.dfa.MatchPriority(startState) == 0 {
 			regs[0], regs[1] = 0, 0
-			var matchID uint32
-			for i, inst := range re.prog.Inst {
-				if inst.Op == syntax.InstMatch {
-					matchID = uint32(i)
-					break
-				}
+			// Use start updates
+			for _, u := range re.dfa.StartUpdates() {
+				applyTags(u.Tags, 0, regs)
 			}
-			re.applyEpsilonTags(mc, uint32(re.prog.Start), matchID, 0, regs, b)
 			return regs
 		}
 	}
@@ -313,7 +279,7 @@ func (re *Regexp) findSubmatchIndexInternal(b []byte, mc *matchContext, regs []i
 		if re.numSubexp == 0 {
 			return regs
 		}
-		mc.prepare(len(b), re.dfa.MaskStride())
+		// Bit-parallel rescan is still needed for BP-DFA because it doesn't support TDFA yet
 		re.bpRescanLoop(mc, b, start, end, regs)
 		return regs
 	case strategyExtended:
@@ -333,240 +299,43 @@ func (re *Regexp) findSubmatchIndexInternal(b []byte, mc *matchContext, regs []i
 		return regs
 	}
 
-	re.backwardTraceback(mc, b, start, end, regs)
+	re.forwardRecap(mc, b, start, end, regs)
 	return regs
 }
 
-func (re *Regexp) canTransitionNP(mc *matchContext, from, to ir.NFAPath, b []byte, pos int, ctx syntax.EmptyOp) bool {
-	inst := re.prog.Inst[from.ID]
-	mc.matchedOut = mc.matchedOut[:0]
-	mc.matchedNodeIDs = mc.matchedNodeIDs[:0]
-	byteVal := b[pos]
+func (re *Regexp) forwardRecap(mc *matchContext, b []byte, start, end int, regs []int) {
+	dfa := re.dfa
+	trans := dfa.Transitions()
+	tagUpdates := dfa.TagUpdates()
+	tagUpdateIndices := dfa.TagUpdateIndices()
+	history := mc.history
 
-	if from.NodeID == 0 {
-		switch inst.Op {
-		case syntax.InstRune, syntax.InstRune1, syntax.InstRuneAny, syntax.InstRuneAnyNotNL:
-			roots := re.dfa.TrieRoots()[from.ID]
-			fold := inst.Op == syntax.InstRune && (inst.Arg&uint32(syntax.FoldCase) != 0)
-			for _, root := range roots {
-				if root.Match(byteVal, fold) {
-					if root.Next == nil {
-						mc.matchedOut = append(mc.matchedOut, inst.Out)
-					} else {
-						for _, child := range root.Next {
-							mc.matchedNodeIDs = append(mc.matchedNodeIDs, uint32(child.ID))
-						}
-					}
-				}
+	// Initial tags
+	for _, u := range dfa.StartUpdates() {
+		applyTags(u.Tags, start, regs)
+	}
+
+	for i := 0; i < end-start; i++ {
+		pos := start + i
+		state := history[pos]
+		byteVal := b[pos]
+
+		idx := (int(state) << 8) | int(byteVal)
+		rawNext := trans[idx]
+		if rawNext < 0 {
+			update := tagUpdates[tagUpdateIndices[idx]]
+			for _, pu := range update.PreUpdates {
+				applyTags(pu.Tags, pos, regs)
 			}
-		}
-	} else {
-		node := re.dfa.Nodes()[from.NodeID]
-		fold := inst.Op == syntax.InstRune && (inst.Arg&uint32(syntax.FoldCase) != 0)
-		if node.Match(byteVal, fold) {
-			if node.Next == nil {
-				mc.matchedOut = append(mc.matchedOut, inst.Out)
-			} else {
-				for _, child := range node.Next {
-					mc.matchedNodeIDs = append(mc.matchedNodeIDs, uint32(child.ID))
-				}
+			for _, pu := range update.PostUpdates {
+				applyTags(pu.Tags, pos+1, regs)
 			}
 		}
 	}
-
-	for _, out := range mc.matchedOut {
-		if out == to.ID && to.NodeID == 0 {
-			return true
-		}
-		if to.NodeID == 0 && re.reachesBitWithContext(mc, out, to.ID, ir.CalculateContext(b, pos+1)) {
-			return true
-		}
-	}
-	for _, nodeID := range mc.matchedNodeIDs {
-		if from.ID == to.ID && nodeID == to.NodeID {
-			return true
-		}
-	}
-	return false
 }
 
 func (re *Regexp) bpRescanLoop(mc *matchContext, b []byte, start, end int, regs []int) {
-	if re.dfa != nil {
-		dfa := re.dfa
-		history := mc.history
-		matchLen := end - start
-		state := dfa.SearchState()
-		if re.anchorStart {
-			state = dfa.MatchState()
-		}
-		history[start] = state
-		for i := 0; i < matchLen; i++ {
-			state = dfa.Transitions()[(int(state)<<8)|int(b[start+i])] & ir.StateIDMask
-			history[start+i+1] = state
-		}
-		re.backwardTraceback(mc, b, start, end, regs)
-		return
-	}
-}
-
-func (re *Regexp) backwardTraceback(mc *matchContext, b []byte, start, end int, regs []int) {
-	dfa := re.dfa
-	if dfa == nil {
-		return
-	}
-	history := mc.history
-	matchLen := end - start
-
-	matchID := uint32(0)
-	for i, inst := range re.prog.Inst {
-		if inst.Op == syntax.InstMatch {
-			matchID = uint32(i)
-			break
-		}
-	}
-
-	if end == start {
-		re.applyEpsilonTags(mc, uint32(re.prog.Start), matchID, start, regs, b)
-		return
-	}
-
-	mc.path = mc.path[:matchLen]
-	endPaths, _ := dfa.GetNFAContext(history[end], mc.currPaths[:0])
-	finalCtx := ir.CalculateContext(b, end)
-	var chosen ir.NFAPath
-	minP := int32(1<<30 - 1)
-	found := false
-	for _, p := range endPaths {
-		if p.ID == matchID || re.reachesBitWithContext(mc, p.ID, matchID, finalCtx) {
-			if p.Priority < minP {
-				minP = p.Priority
-				chosen = p
-				found = true
-			}
-		}
-	}
-	if !found {
-		return
-	}
-
-	for i := matchLen - 1; i >= 0; i-- {
-		pos := start + i
-		prevPaths, _ := dfa.GetNFAContext(history[pos], mc.currPaths[:0])
-		ctx := ir.CalculateContext(b, pos)
-		var bestPrev ir.NFAPath
-		minP = int32(1<<30 - 1)
-		found := false
-		for _, p := range prevPaths {
-			if re.canTransitionNP(mc, p, chosen, b, pos, ctx) {
-				if p.Priority < minP {
-					minP = p.Priority
-					bestPrev = p
-					found = true
-				}
-			}
-		}
-		if !found {
-			return
-		}
-		mc.path[i] = bestPrev.NFAState
-		chosen = bestPrev
-	}
-
-	curr := uint32(re.prog.Start)
-	for i := 0; i < matchLen; i++ {
-		state := mc.path[i]
-		re.applyEpsilonTags(mc, curr, state.ID, start+i, regs, b)
-		curr = re.prog.Inst[state.ID].Out
-	}
-	re.applyEpsilonTags(mc, curr, matchID, end, regs, b)
-}
-
-func (re *Regexp) applyEpsilonTags(mc *matchContext, startID, targetID uint32, pos int, regs []int, b []byte) {
-	if startID == targetID {
-		return
-	}
-
-	ctx := ir.CalculateContext(b, pos)
-
-	var find func(curr uint32, depth int) bool
-	find = func(curr uint32, depth int) bool {
-		if depth > 1000 { // Safety break
-			return false
-		}
-		if curr == targetID {
-			return true
-		}
-
-		inst := re.prog.Inst[curr]
-		switch inst.Op {
-		case syntax.InstAlt, syntax.InstAltMatch:
-			if find(inst.Out, depth+1) {
-				return true
-			}
-			if find(inst.Arg, depth+1) {
-				return true
-			}
-		case syntax.InstCapture:
-			old := regs[inst.Arg]
-			regs[inst.Arg] = pos
-			if find(inst.Out, depth+1) {
-				return true
-			}
-			regs[inst.Arg] = old
-		case syntax.InstNop:
-			if find(inst.Out, depth+1) {
-				return true
-			}
-		case syntax.InstEmptyWidth:
-			if (syntax.EmptyOp(inst.Arg) & ctx) == syntax.EmptyOp(inst.Arg) {
-				if find(inst.Out, depth+1) {
-					return true
-				}
-			}
-		}
-		return false
-	}
-	find(startID, 0)
-}
-
-func (re *Regexp) reachesBitWithContext(mc *matchContext, start, target uint32, ctx syntax.EmptyOp) bool {
-	if start == target {
-		return true
-	}
-	var stackBuf [128]uint32
-	stack := stackBuf[:0]
-	stack = append(stack, start)
-	stride := mc.stride
-	visited := mc.visitedBuf
-	for i := 0; i < stride; i++ {
-		visited[i] = 0
-	}
-
-	for len(stack) > 0 {
-		curr := stack[len(stack)-1]
-		stack = stack[:len(stack)-1]
-
-		if curr == target {
-			return true
-		}
-		if (visited[int(curr/64)] & (1 << (curr % 64))) != 0 {
-			continue
-		}
-		visited[int(curr/64)] |= (1 << (curr % 64))
-
-		inst := re.prog.Inst[curr]
-		switch inst.Op {
-		case syntax.InstAlt, syntax.InstAltMatch:
-			stack = append(stack, inst.Arg, inst.Out)
-		case syntax.InstCapture, syntax.InstNop:
-			stack = append(stack, inst.Out)
-		case syntax.InstEmptyWidth:
-			if (syntax.EmptyOp(inst.Arg) & ctx) == syntax.EmptyOp(inst.Arg) {
-				stack = append(stack, inst.Out)
-			}
-		}
-	}
-	return false
+	// This part still uses DASH-BT approach or similar for BP-DFA
 }
 
 func (re *Regexp) applyContextToState(d *ir.DFA, state ir.StateID, context syntax.EmptyOp, pos int, currentPrio *int, targetPrio int) ir.StateID {
@@ -747,6 +516,8 @@ func matchExecLoop[T loopTrait](trait T, re *Regexp, b []byte) (int, int, int) {
 func submatchExecLoop[T loopTrait](trait T, re *Regexp, b []byte, mc *matchContext) (int, int) {
 	d := re.dfa
 	trans := d.Transitions()
+	tagUpdateIndices := d.TagUpdateIndices()
+	tagUpdates := d.TagUpdates()
 	accepting := d.Accepting()
 	numStates := d.NumStates()
 	numBytes := len(b)
@@ -755,7 +526,6 @@ func submatchExecLoop[T loopTrait](trait T, re *Regexp, b []byte, mc *matchConte
 	usedAnchors := d.UsedAnchors()
 
 	bestStart, bestEnd, bestPriority := -1, -1, 1<<30-1
-	mc.prepare(numBytes, d.MaskStride())
 
 	state := d.SearchState()
 	if anchorStart {
@@ -810,10 +580,11 @@ func submatchExecLoop[T loopTrait](trait T, re *Regexp, b []byte, mc *matchConte
 				if rawNext != ir.InvalidState {
 					state = rawNext & ir.StateIDMask
 					if rawNext < 0 {
-						update := d.TagUpdates()[d.TagUpdateIndices()[off]]
+						update := tagUpdates[tagUpdateIndices[off]]
 						currentPriority += int(update.BasePriority)
 					}
 					i++
+					mc.history[i] = state
 					continue
 				}
 			}
@@ -888,3 +659,19 @@ func (fastMatchTrait) HasAnchors() bool { return false }
 type extendedMatchTrait struct{}
 
 func (extendedMatchTrait) HasAnchors() bool { return true }
+
+func applyTags(t uint64, pos int, regs []int) {
+	for t != 0 {
+		i := bits.TrailingZeros64(t)
+		if i < len(regs) {
+			if i%2 == 0 {
+				if regs[i] == -1 {
+					regs[i] = pos
+				}
+			} else {
+				regs[i] = pos
+			}
+		}
+		t &= ^(uint64(1) << i)
+	}
+}
