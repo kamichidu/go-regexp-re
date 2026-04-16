@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"math/bits"
+	"sync"
 	"unsafe"
 
 	"github.com/kamichidu/go-regexp-re/internal/ir"
@@ -29,6 +29,7 @@ type Regexp struct {
 	complete       bool
 	anchorStart    bool
 	anchorEnd      bool
+	isASCII        bool
 	prog           *syntax.Prog
 	dfa            *ir.DFA
 	bpDfa          *ir.BitParallelDFA
@@ -121,7 +122,9 @@ func CompileContextWithOptions(ctx context.Context, expr string, opt CompileOpti
 		}
 	}
 
-	res := &Regexp{expr: expr, numSubexp: numSubexp, prefix: []byte(prefixStr), prefixState: prefixState, complete: complete, anchorStart: anchorStart, anchorEnd: anchorEnd, prog: prog, dfa: dfa, bpDfa: bpDfa, literalMatcher: literalMatcher, subexpNames: subexpNames}
+	isASCII := isSimpleForBP(prog)
+
+	res := &Regexp{expr: expr, numSubexp: numSubexp, prefix: []byte(prefixStr), prefixState: prefixState, complete: complete, anchorStart: anchorStart, anchorEnd: anchorEnd, isASCII: isASCII, prog: prog, dfa: dfa, bpDfa: bpDfa, literalMatcher: literalMatcher, subexpNames: subexpNames}
 	res.bindMatchStrategy()
 	return res, nil
 }
@@ -165,8 +168,6 @@ func (re *Regexp) bindMatchStrategy() {
 func (re *Regexp) hasNonGreedy() bool {
 	for _, inst := range re.prog.Inst {
 		if (inst.Op == syntax.InstAlt || inst.Op == syntax.InstAltMatch) && inst.Arg < inst.Out {
-			// In Go syntax.Prog, InstAlt with Arg < Out usually means non-greedy
-			// because simplification swaps them for non-greedy.
 			return true
 		}
 	}
@@ -203,96 +204,22 @@ func (re *Regexp) MatchString(s string) bool {
 func (re *Regexp) NumSubexp() int                { return re.numSubexp }
 func (re *Regexp) LiteralPrefix() (string, bool) { return string(re.prefix), re.complete }
 
-func (re *Regexp) FindSubmatchIndex(b []byte) []int {
-	var start, end int
-	var mc matchContext
-
-	// Check if start state is accepting (null match) and it's non-greedy.
-	if re.hasNonGreedy() && re.dfa != nil {
-		startState := re.dfa.SearchState()
-		if re.anchorStart {
-			startState = re.dfa.MatchState()
-		}
-		// Apply initial context
-		startState = re.applyContextToState(re.dfa, startState, ir.CalculateContext(b, 0), 0, nil, 1<<30-1)
-		if re.dfa.Accepting()[startState] && re.dfa.MatchPriority(startState) == 0 {
-			regs := make([]int, (re.numSubexp+1)*2)
-			for i := range regs {
-				regs[i] = -1
-			}
-			regs[0], regs[1] = 0, 0
-			// Finding targetID for Match
-			var matchID uint32
-			for i, inst := range re.prog.Inst {
-				if inst.Op == syntax.InstMatch {
-					matchID = uint32(i)
-					break
-				}
-			}
-			re.applyEpsilonTags(&mc, uint32(re.prog.Start), matchID, 0, regs, b)
-			return regs
-		}
-	}
-
-	switch re.strategy {
-	case strategyLiteral:
-		return re.literalMatcher.FindSubmatchIndex(b)
-	case strategyBitParallel:
-		start, end, _, _ = bitParallelExecLoop(re, b)
-		if start < 0 {
-			return nil
-		}
-		regs := make([]int, (re.numSubexp+1)*2)
-		for i := range regs {
-			regs[i] = -1
-		}
-		regs[0], regs[1] = start, end
-		if re.numSubexp == 0 {
-			return regs
-		}
-		mc.prepare(len(b), re.dfa.MaskStride())
-		re.bpRescanLoop(&mc, b, start, end, regs)
-		return regs
-	case strategyExtended:
-		start, end, mc = submatchExecLoop(extendedMatchTrait{}, re, b)
-	case strategyFast:
-		start, end, mc = submatchExecLoop(fastMatchTrait{}, re, b)
-	default:
-		start = -1
-	}
-
-	if start < 0 {
-		return nil
-	}
-
-	regs := make([]int, (re.numSubexp+1)*2)
-	for i := range regs {
-		regs[i] = -1
-	}
-	regs[0], regs[1] = start, end
-	if re.numSubexp == 0 {
-		return regs
-	}
-
-	re.backwardTraceback(&mc, b, start, end, regs)
-	return regs
-}
-
 // matchContext manages pre-allocated buffers for submatch extraction.
 type matchContext struct {
-	historyBuf     [1024]ir.StateID
-	masksBuf       [512]uint64
-	pathBuf        [1024]ir.NFAState
+	historyBuf     [256]ir.StateID
+	pathBuf        [256]ir.NFAState
+	closureBuf1    [32]ir.NFAPath
+	closureBuf2    [32]ir.NFAPath
+	regsBuf        [32]int
 	history        []ir.StateID
-	masks          []uint64
-	path           []ir.NFAState // nfaStateHistory
+	path           []ir.NFAState
 	visitedBuf     []uint64
 	activeBuf      []uint64
 	currPaths      []ir.NFAPath
 	nextPaths      []ir.NFAPath
 	matchedOut     []uint32
 	matchedNodeIDs []uint32
-	updatesBuf     [512]uint32
+	updatesBuf     [128]uint32
 	updates        []uint32
 	stride         int
 }
@@ -313,6 +240,8 @@ func (mc *matchContext) prepare(matchLen int, stride int) {
 		mc.visitedBuf = make([]uint64, stride)
 		mc.activeBuf = make([]uint64, stride)
 	}
+	mc.currPaths = mc.closureBuf1[:0]
+	mc.nextPaths = mc.closureBuf2[:0]
 	if mc.matchedOut == nil {
 		mc.matchedOut = make([]uint32, 0, 16)
 		mc.matchedNodeIDs = make([]uint32, 0, 16)
@@ -322,6 +251,90 @@ func (mc *matchContext) prepare(matchLen int, stride int) {
 	} else {
 		mc.updates = mc.updatesBuf[:matchLen]
 	}
+}
+
+var matchContextPool = sync.Pool{
+	New: func() interface{} {
+		return &matchContext{}
+	},
+}
+
+func (re *Regexp) FindSubmatchIndex(b []byte) []int {
+	numRegs := (re.numSubexp + 1) * 2
+	regs := make([]int, numRegs)
+	for i := range regs {
+		regs[i] = -1
+	}
+
+	if re.isASCII && len(b) <= 255 {
+		var mc matchContext // Stack allocated
+		return re.findSubmatchIndexInternal(b, &mc, regs)
+	}
+
+	mc := matchContextPool.Get().(*matchContext)
+	defer matchContextPool.Put(mc)
+	return re.findSubmatchIndexInternal(b, mc, regs)
+}
+
+func (re *Regexp) findSubmatchIndexInternal(b []byte, mc *matchContext, regs []int) []int {
+	var start, end int
+
+	// Check if start state is accepting (null match) and it's non-greedy.
+	if re.hasNonGreedy() && re.dfa != nil {
+		startState := re.dfa.SearchState()
+		if re.anchorStart {
+			startState = re.dfa.MatchState()
+		}
+		// Apply initial context
+		startState = re.applyContextToState(re.dfa, startState, ir.CalculateContext(b, 0), 0, nil, 1<<30-1)
+		if re.dfa.Accepting()[startState] && re.dfa.MatchPriority(startState) == 0 {
+			regs[0], regs[1] = 0, 0
+			var matchID uint32
+			for i, inst := range re.prog.Inst {
+				if inst.Op == syntax.InstMatch {
+					matchID = uint32(i)
+					break
+				}
+			}
+			re.applyEpsilonTags(mc, uint32(re.prog.Start), matchID, 0, regs, b)
+			return regs
+		}
+	}
+
+	switch re.strategy {
+	case strategyLiteral:
+		return re.literalMatcher.FindSubmatchIndex(b)
+	case strategyBitParallel:
+		start, end, _, _ = bitParallelExecLoop(re, b)
+		if start < 0 {
+			return nil
+		}
+		regs[0], regs[1] = start, end
+		if re.numSubexp == 0 {
+			return regs
+		}
+		mc.prepare(len(b), re.dfa.MaskStride())
+		re.bpRescanLoop(mc, b, start, end, regs)
+		return regs
+	case strategyExtended:
+		start, end = submatchExecLoop(extendedMatchTrait{}, re, b, mc)
+	case strategyFast:
+		start, end = submatchExecLoop(fastMatchTrait{}, re, b, mc)
+	default:
+		start = -1
+	}
+
+	if start < 0 {
+		return nil
+	}
+
+	regs[0], regs[1] = start, end
+	if re.numSubexp == 0 {
+		return regs
+	}
+
+	re.backwardTraceback(mc, b, start, end, regs)
+	return regs
 }
 
 func (re *Regexp) canTransitionNP(mc *matchContext, from, to ir.NFAPath, b []byte, pos int, ctx syntax.EmptyOp) bool {
@@ -417,9 +430,8 @@ func (re *Regexp) backwardTraceback(mc *matchContext, b []byte, start, end int, 
 		return
 	}
 
-	// 1. Trace backward to identify NFAState for each byte.
 	mc.path = mc.path[:matchLen]
-	endPaths, _ := dfa.GetNFAContext(history[end], nil)
+	endPaths, _ := dfa.GetNFAContext(history[end], mc.currPaths[:0])
 	finalCtx := ir.CalculateContext(b, end)
 	var chosen ir.NFAPath
 	minP := int32(1<<30 - 1)
@@ -439,7 +451,7 @@ func (re *Regexp) backwardTraceback(mc *matchContext, b []byte, start, end int, 
 
 	for i := matchLen - 1; i >= 0; i-- {
 		pos := start + i
-		prevPaths, _ := dfa.GetNFAContext(history[pos], nil)
+		prevPaths, _ := dfa.GetNFAContext(history[pos], mc.currPaths[:0])
 		ctx := ir.CalculateContext(b, pos)
 		var bestPrev ir.NFAPath
 		minP = int32(1<<30 - 1)
@@ -460,7 +472,6 @@ func (re *Regexp) backwardTraceback(mc *matchContext, b []byte, start, end int, 
 		chosen = bestPrev
 	}
 
-	// 2. Trace forward to apply tags.
 	curr := uint32(re.prog.Start)
 	for i := 0; i < matchLen; i++ {
 		state := mc.path[i]
@@ -522,8 +533,6 @@ func (re *Regexp) reachesBitWithContext(mc *matchContext, start, target uint32, 
 	if start == target {
 		return true
 	}
-	// Note: Standard reachesBitWithContext doesn't apply tags.
-	// applyEpsilonTags is responsible for tag application.
 	var stackBuf [128]uint32
 	stack := stackBuf[:0]
 	stack = append(stack, start)
@@ -558,22 +567,6 @@ func (re *Regexp) reachesBitWithContext(mc *matchContext, start, target uint32, 
 		}
 	}
 	return false
-}
-
-func applyTags(t uint64, pos int, regs []int) {
-	for t != 0 {
-		i := bits.TrailingZeros64(t)
-		if i < len(regs) {
-			if i%2 == 0 {
-				if regs[i] == -1 {
-					regs[i] = pos
-				}
-			} else {
-				regs[i] = pos
-			}
-		}
-		t &= ^(uint64(1) << i)
-	}
 }
 
 func (re *Regexp) applyContextToState(d *ir.DFA, state ir.StateID, context syntax.EmptyOp, pos int, currentPrio *int, targetPrio int) ir.StateID {
@@ -690,7 +683,6 @@ func matchExecLoop[T loopTrait](trait T, re *Regexp, b []byte) (int, int, int) {
 		state = d.MatchState()
 	}
 
-	// Apply initial context
 	if hasAnchors {
 		state = re.applyContextToState(d, state, ir.CalculateContext(b, 0), 0, &currentPriority, bestPriority)
 	}
@@ -724,7 +716,6 @@ func matchExecLoop[T loopTrait](trait T, re *Regexp, b []byte) (int, int, int) {
 					continue
 				}
 			}
-			// Restart search
 			if anchorStart {
 				break
 			}
@@ -753,7 +744,7 @@ func matchExecLoop[T loopTrait](trait T, re *Regexp, b []byte) (int, int, int) {
 	return bestStart, bestEnd, bestPriority
 }
 
-func submatchExecLoop[T loopTrait](trait T, re *Regexp, b []byte) (int, int, matchContext) {
+func submatchExecLoop[T loopTrait](trait T, re *Regexp, b []byte, mc *matchContext) (int, int) {
 	d := re.dfa
 	trans := d.Transitions()
 	accepting := d.Accepting()
@@ -764,7 +755,6 @@ func submatchExecLoop[T loopTrait](trait T, re *Regexp, b []byte) (int, int, mat
 	usedAnchors := d.UsedAnchors()
 
 	bestStart, bestEnd, bestPriority := -1, -1, 1<<30-1
-	var mc matchContext
 	mc.prepare(numBytes, d.MaskStride())
 
 	state := d.SearchState()
@@ -773,7 +763,6 @@ func submatchExecLoop[T loopTrait](trait T, re *Regexp, b []byte) (int, int, mat
 	}
 	currentPriority := 0
 
-	// Apply initial context (e.g. EmptyBeginText)
 	if hasAnchors {
 		state = re.applyContextToState(d, state, ir.CalculateContext(b, 0), 0, &currentPriority, bestPriority)
 	}
@@ -789,7 +778,7 @@ func submatchExecLoop[T loopTrait](trait T, re *Regexp, b []byte) (int, int, mat
 				bestStart = p / ir.SearchRestartPenalty
 			}
 			if d.IsBestMatch(state) || re.hasNonGreedy() {
-				return bestStart, bestEnd, mc
+				return bestStart, bestEnd
 			}
 		}
 
@@ -810,7 +799,7 @@ func submatchExecLoop[T loopTrait](trait T, re *Regexp, b []byte) (int, int, mat
 				bestStart = p / ir.SearchRestartPenalty
 			}
 			if d.IsBestMatch(state) || re.hasNonGreedy() {
-				return bestStart, bestEnd, mc
+				return bestStart, bestEnd
 			}
 		}
 
@@ -828,7 +817,6 @@ func submatchExecLoop[T loopTrait](trait T, re *Regexp, b []byte) (int, int, mat
 					continue
 				}
 			}
-			// Restart search
 			if anchorStart {
 				break
 			}
@@ -839,7 +827,7 @@ func submatchExecLoop[T loopTrait](trait T, re *Regexp, b []byte) (int, int, mat
 			break
 		}
 	}
-	return bestStart, bestEnd, mc
+	return bestStart, bestEnd
 }
 
 func (re *Regexp) FindStringSubmatchIndex(s string) []int {

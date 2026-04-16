@@ -80,7 +80,10 @@ func (s *memoryNfaSetStorage) Get(id StateID, buf []NFAPath) ([]NFAPath, error) 
 	}
 	src := s.data[id]
 	if len(buf) < len(src) {
-		buf = make([]NFAPath, len(src))
+		// Optimization: if caller provided buffer is too small, return internal slice directly.
+		// Caller should be careful not to modify it if they care about DFA integrity.
+		// For our search loop, we only read from it.
+		return src, nil
 	}
 	copy(buf, src)
 	return buf[:len(src)], nil
