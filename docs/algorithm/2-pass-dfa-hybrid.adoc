@@ -15,27 +15,31 @@ This strategy treats the DFA state history as a "safe corridor" through the NFA'
 * **Lightweight History**: Records only 4-byte `ir.StateID`s instead of heavy NFA state sets.
 * **Performance**: For common match sizes (e.g., <1024 bytes), the history fits entirely on the CPU stack (`[1024]int32`), eliminating heap allocations.
 
-=== Phase 2: Bit-Parallel Path Reconstruction (Backward Pass)
-* **Objective**: Identify the unique sequence of NFA instructions taken for every byte of the match using bitsets.
+=== Phase 2: DFA-Guided Path Reconstruction (Backward Pass)
+* **Objective**: Identify the unique sequence of NFA instructions taken for every byte of the match.
 * **Mechanism**:
-    - **Winning Node Identification**: At the `end` position, the engine selects the NFA node that reached a `Match` instruction with the highest priority (leftmost-first) from the final DFA state's bitset.
-    - **Reverse Bit-Parallel Trace**: Moving from `end` back to `start`, the engine consults the historical `StateID`s. It uses bitwise `AND` between the current NFA state's "predecessors" and the previous DFA state's "NFA membership bitset" to find the unique predecessor node.
-    - **Zero-Allocation Lookup**: Pre-computed bitsets for each DFA state eliminate the need for `GetNFAContext` or other dynamic memory operations during traceback.
+    - **Winning Node Identification**: At the `end` position, the engine selects the NFA node that reached a `Match` instruction with the highest absolute priority (leftmost-first) from the final DFA state's closure.
+    - **Guided Reverse Trace**: Moving from `end` back to `start`, the engine consults the historical `ir.StateID`s. For each byte, it fetches the corresponding NFA closure from storage.
+    - **Transition Resolution**: It identifies the unique predecessor `ir.NFAPath` (Instruction ID + Trie Node ID) that could have transitioned to the current node given the byte at that position.
+    - **UTF-8 Precision**: By tracking both the Instruction ID and the Trie Node ID, the engine correctly handles multi-byte UTF-8 runes, even when a single NFA instruction spans multiple bytes.
 
 === Phase 3: Forward Recap (Tag Application)
 * **Objective**: Apply capturing group tags along the confirmed path.
 * **Mechanism**:
-    - The engine walks forward along the deterministic path reconstructed in Phase 2.
-    - **Epsilon-Path Recovery**: Between byte-consuming transitions, the engine follows the highest-priority epsilon path to apply `Capture` tags (e.g., `(a)*`).
-    - **Priority Tie-breaking**: Mirrors Go's `regexp` behavior exactly by utilizing pre-calculated NFA path priorities.
+    - The engine walks forward along the `ir.NFAState` path reconstructed in Phase 2.
+    - **Epsilon-Path Recovery**: Between byte-consuming transitions, the engine follows the highest-priority epsilon path (following `InstCapture`, `InstAlt`, etc.) to apply tags.
+    - **Bit-Perfect Results**: This ensures the engine captures exactly the same boundaries as Go's `regexp` package, including edge cases like nested empty matches.
 
-== Key Technology: Bitset-Guided Traceback
+== Key Technology: On-Demand Closure Retrieval
 
-=== NFA Membership Bitsets
-Each DFA state maintains a bitset representing the set of active NFA nodes. For patterns larger than 64 nodes, this is stored as a multi-word `[]uint64` (Stride).
+=== Lightweight History
+The engine only records 4-byte `ir.StateID`s during the forward scan. This keeps the history buffer small enough to fit in the CPU cache or on the stack for common match lengths.
 
-=== Pre-calculated Predecessor Masks
-To accelerate Phase 2, the engine pre-calculates which NFA nodes can transition to a target node given a specific byte. By intersecting this with the DFA state's membership bitset, the winning path is identified in $O(1)$ bitwise operations per byte.
+=== Absolute Priority Maintenance
+Unlike traditional DFA minimization which might lose path priority, this engine preserves absolute NFA priorities during state construction. This allows Phase 2 to always pick the "winning" NFA path that Go's leftmost-first semantics demand.
+
+=== Zero-Allocation Discovery
+During the forward scan, no heap allocations occur. The NFA closures required for traceback are retrieved from a pre-calculated storage (memory or file-backed), ensuring that submatch extraction is both fast and memory-stable.
 
 === Tiled Checkpoint Scanning (Future)
 For extremely long inputs where the history exceeds stack limits, the engine uses 512-byte "Checkpoints". It records only periodic `StateID`s and re-scans local blocks on-demand, keeping the working set within the L1 cache.

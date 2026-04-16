@@ -35,8 +35,8 @@ To maximize throughput, the engine MUST select the most efficient execution loop
 The engine follows a **DASH-BT** strategy to guarantee both performance and 100% Go-compatible precision.
 
 - **Phase 1: Discovery & History Recording**: A single high-speed scan determines the match boundaries `[start, end]` and simultaneously records the DFA state history as a sequence of 4-byte `ir.StateID`s. For common match lengths (<1024 bytes), this history is stored in stack-resident buffers (`[1024]int32`), eliminating heap allocations.
-- **Phase 2: Bit-Parallel Path Reconstruction (Backward Pass)**: The engine identifies the winning NFA path by tracing backwards from `end` to `start`. It uses bitwise intersection between pre-calculated **Predecessor Masks** and the DFA state's **NFA Membership Bitset** to resolve transitions in $O(1)$ per byte.
-- **Phase 3: Epsilon Recap (Tag Application)**: A final forward pass along the confirmed path applies `Capture` tags by following the highest-priority epsilon transitions between byte-consuming nodes.
+- **Phase 2: DFA-Guided Path Reconstruction (Backward Pass)**: Starting from the winning NFA node at `end`, the engine traces backwards to `start`. It fetches the NFA closure for each historical `StateID` and resolves transitions using `ir.NFAState` (Instruction ID + Trie Node ID). This ensures 100% accuracy for multi-byte UTF-8 runes.
+- **Phase 3: Epsilon Recap (Tag Application)**: A final forward pass along the confirmed `NFAState` path applies `Capture` tags by following the highest-priority epsilon transitions between byte-consuming nodes.
 - **Zero-NFA Mandate**: The engine MUST NOT fall back to a backtracking or thread-managed NFA (PikeVM). All cases must be handled via the DASH-BT strategy to maintain $O(n)$ performance and eliminate runtime memory allocations.
 
 ### 2.6 Bit-Parallel Traceback & Scalable Bitsets
