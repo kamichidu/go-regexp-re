@@ -161,6 +161,14 @@ func isSimpleForBP(prog *syntax.Prog) bool {
 
 	for _, inst := range prog.Inst {
 		switch inst.Op {
+		case syntax.InstRune, syntax.InstRune1:
+			for _, r := range inst.Rune {
+				if r > 127 {
+					return false
+				}
+			}
+		case syntax.InstRuneAny, syntax.InstRuneAnyNotNL:
+			return false
 		case syntax.InstAlt, syntax.InstAltMatch:
 			if inst.Arg < inst.Out {
 				hasNonGreedy = true
@@ -336,14 +344,31 @@ func (re *Regexp) burnedRecap(mc *matchContext, b []byte, start, end, bestPriori
 	pathPrios := make([]int32, end-start+1)
 	pathPrios[end-start] = p_end
 
-	for i := end; i > start; i-- {
+	for i := end; i > start; {
 		p_out := pathPrios[i-start]
 
-		prevState := mc.history[i-1]
-		byteVal := b[i-1]
+		charStart := i - 1
+		for charStart > start && (b[charStart]&0xC0) == 0x80 {
+			charStart--
+		}
+
+		prevState := mc.history[charStart]
+		byteVal := b[charStart]
 		idx := (int(prevState) << 8) | int(byteVal)
 		rawNext := trans[idx]
 		stateAfterByte := rawNext & ir.StateIDMask
+
+		// Multi-byte Warp Awareness:
+		// If it's a warp transition, it covers multiple bytes.
+		// If it's NOT a warp transition but still a multi-byte character,
+		// the DFA handles it byte-by-byte, so charStart should just be i-1.
+		if (rawNext & ir.WarpStateFlag) == 0 {
+			charStart = i - 1
+			byteVal = b[charStart]
+			idx = (int(prevState) << 8) | int(byteVal)
+			rawNext = trans[idx]
+			stateAfterByte = rawNext & ir.StateIDMask
+		}
 
 		bestPIn := int32(1<<30 - 1)
 
@@ -381,7 +406,8 @@ func (re *Regexp) burnedRecap(mc *matchContext, b []byte, start, end, bestPriori
 				break
 			}
 		}
-		pathPrios[i-1-start] = bestPIn
+		pathPrios[charStart-start] = bestPIn
+		i = charStart
 	}
 
 	// Step 2: Apply tags along the found priority path.
@@ -402,14 +428,27 @@ func (re *Regexp) burnedRecap(mc *matchContext, b []byte, start, end, bestPriori
 	}
 	p = re.followPathAnchors(d, initialState, mc.history[start], ir.CalculateContext(b, start), start, regs, p)
 
-	for i := start; i < end; i++ {
+	for i := start; i < end; {
 		byteVal := b[i]
 		prevState := mc.history[i]
 		idx := (int(prevState) << 8) | int(byteVal)
 		rawNext := trans[idx]
 		stateAfterByte := rawNext & ir.StateIDMask
 
-		p_next_target := pathPrios[i+1-start]
+		// Determine the next character's start position
+		nextI := i + 1
+		if (rawNext & ir.WarpStateFlag) != 0 {
+			skip := bits.LeadingZeros8(^byteVal) - 1
+			if skip < 0 {
+				skip = 0
+			}
+			nextI = i + 1 + skip
+		}
+		if nextI > end {
+			nextI = end
+		}
+
+		p_next_target := pathPrios[nextI-start]
 
 		if rawNext < 0 {
 			update := tagUpdates[tagUpdateIndices[idx]]
@@ -420,18 +459,18 @@ func (re *Regexp) burnedRecap(mc *matchContext, b []byte, start, end, bestPriori
 					for _, pu_post := range update.PostUpdates {
 						if pu_post.RelativePriority == p_mid {
 							p_after_byte := pu_post.NextPriority
-							if re.canReachPriority(d, stateAfterByte, mc.history[i+1], ir.CalculateContext(b, i+1), p_after_byte, p_next_target) {
+							if re.canReachPriority(d, stateAfterByte, mc.history[nextI], ir.CalculateContext(b, nextI), p_after_byte, p_next_target) {
 								applyTags(pu_pre.Tags, i, regs)
-								applyTags(pu_post.Tags, i+1, regs)
-								p = re.followPathAnchors(d, stateAfterByte, mc.history[i+1], ir.CalculateContext(b, i+1), i+1, regs, p_after_byte)
+								applyTags(pu_post.Tags, nextI, regs)
+								p = re.followPathAnchors(d, stateAfterByte, mc.history[nextI], ir.CalculateContext(b, nextI), nextI, regs, p_after_byte)
 								found = true
 								break
 							}
 						}
 					}
-					if !found && re.canReachPriority(d, stateAfterByte, mc.history[i+1], ir.CalculateContext(b, i+1), p_mid, p_next_target) {
+					if !found && re.canReachPriority(d, stateAfterByte, mc.history[nextI], ir.CalculateContext(b, nextI), p_mid, p_next_target) {
 						applyTags(pu_pre.Tags, i, regs)
-						p = re.followPathAnchors(d, stateAfterByte, mc.history[i+1], ir.CalculateContext(b, i+1), i+1, regs, p_mid)
+						p = re.followPathAnchors(d, stateAfterByte, mc.history[nextI], ir.CalculateContext(b, nextI), nextI, regs, p_mid)
 						found = true
 					}
 					if found {
@@ -440,8 +479,9 @@ func (re *Regexp) burnedRecap(mc *matchContext, b []byte, start, end, bestPriori
 				}
 			}
 		} else {
-			p = re.followPathAnchors(d, stateAfterByte, mc.history[i+1], ir.CalculateContext(b, i+1), i+1, regs, p)
+			p = re.followPathAnchors(d, stateAfterByte, mc.history[nextI], ir.CalculateContext(b, nextI), nextI, regs, p)
 		}
+		i = nextI
 	}
 
 	// Final MatchTags
@@ -623,8 +663,9 @@ func submatchExecLoop[T loopTrait](trait T, re *Regexp, b []byte, mc *matchConte
 		}
 
 		if i < numBytes {
+			byteVal := b[i]
 			if sidx >= 0 && sidx < numStates {
-				off := (sidx << 8) | int(b[i])
+				off := (sidx << 8) | int(byteVal)
 				rawNext := trans[off]
 				if rawNext != ir.InvalidState {
 					state = rawNext & ir.StateIDMask
@@ -632,7 +673,22 @@ func submatchExecLoop[T loopTrait](trait T, re *Regexp, b []byte, mc *matchConte
 						update := tagUpdates[tagUpdateIndices[off]]
 						currentPriority += int(update.BasePriority)
 					}
-					i++
+					if byteVal < 0x80 || (rawNext&ir.WarpStateFlag) == 0 {
+						i++
+					} else {
+						// Multi-byte Warp: Skip trailing bytes
+						skip := bits.LeadingZeros8(^byteVal) - 1
+						if skip < 0 {
+							skip = 0
+						}
+						// Fill history for skipped bytes to aid burnedRecap
+						for j := 1; j <= skip; j++ {
+							if i+j < len(mc.history) {
+								mc.history[i+j] = state
+							}
+						}
+						i += 1 + skip
+					}
 					continue
 				}
 			}
@@ -755,12 +811,22 @@ func matchExecLoop[T loopTrait](trait T, re *Regexp, b []byte) (int, int, int) {
 		}
 
 		if i < numBytes {
+			byteVal := b[i]
 			if sidx >= 0 && sidx < numStates {
-				off := (sidx << 8) | int(b[i])
+				off := (sidx << 8) | int(byteVal)
 				rawNext := trans[off]
 				if rawNext != ir.InvalidState {
 					state = rawNext & ir.StateIDMask
-					i++
+					if byteVal < 0x80 || (rawNext&ir.WarpStateFlag) == 0 {
+						i++
+					} else {
+						// Multi-byte Warp: Skip trailing bytes
+						skip := bits.LeadingZeros8(^byteVal) - 1
+						if skip < 0 {
+							skip = 0
+						}
+						i += 1 + skip
+					}
 					continue
 				}
 			}

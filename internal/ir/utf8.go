@@ -78,7 +78,7 @@ func serializeNode(ranges []ByteRange, next []*UTF8Node) string {
 
 // runeRangesToUTF8Trie converts a set of rune ranges [lo1, hi1, lo2, hi2, ...]
 // into a Trie of byte-range sequences.
-func (c *utf8NodeCache) runeRangesToUTF8Trie(runes []rune, foldCase bool) []*UTF8Node {
+func (c *utf8NodeCache) runeRangesToUTF8Trie(runes []rune, foldCase bool, shortcut bool) []*UTF8Node {
 	var roots []*UTF8Node
 	if foldCase {
 		// Expand each rune range to include its case-folded equivalents.
@@ -112,34 +112,41 @@ func (c *utf8NodeCache) runeRangesToUTF8Trie(runes []rune, foldCase bool) []*UTF
 			}
 		}
 		for _, r := range expanded {
-			roots = append(roots, c.decomposeRuneRange(r, r)...)
+			roots = append(roots, c.decomposeRuneRange(r, r, shortcut)...)
 		}
 		return roots
 	}
 
 	for i := 0; i+1 < len(runes); i += 2 {
 		lo, hi := runes[i], runes[i+1]
-		roots = append(roots, c.decomposeRuneRange(lo, hi)...)
+		roots = append(roots, c.decomposeRuneRange(lo, hi, shortcut)...)
 	}
 	// If there's a trailing rune, treat it as a single-rune range.
 	if len(runes)%2 == 1 {
 		r := runes[len(runes)-1]
-		roots = append(roots, c.decomposeRuneRange(r, r)...)
+		roots = append(roots, c.decomposeRuneRange(r, r, shortcut)...)
 	}
 	return roots
 }
 
-func (c *utf8NodeCache) decomposeRuneRange(lo, hi rune) []*UTF8Node {
+func (c *utf8NodeCache) decomposeRuneRange(lo, hi rune, shortcut bool) []*UTF8Node {
 	var nodes []*UTF8Node
 	for _, seq := range encodeRange(lo, hi) {
-		nodes = append(nodes, c.sequenceToTrie(seq))
+		nodes = append(nodes, c.sequenceToTrie(seq, shortcut))
 	}
 	return nodes
 }
 
-func (c *utf8NodeCache) sequenceToTrie(seq []ByteRange) *UTF8Node {
+func (c *utf8NodeCache) sequenceToTrie(seq []ByteRange, shortcut bool) *UTF8Node {
 	if len(seq) == 0 {
 		return nil
+	}
+	// Multi-byte Warp Optimization:
+	// If shortcut is enabled and this is a multi-byte sequence (len > 1),
+	// we link the lead byte directly to the completion state (nil Next).
+	// The execution engine will handle skipping the trailing bytes.
+	if shortcut && len(seq) > 1 {
+		return c.newNode([]ByteRange{seq[0]}, nil)
 	}
 	return c.newNode([]ByteRange{seq[0]}, c.sequenceToTrieChildren(seq[1:]))
 }
@@ -148,7 +155,7 @@ func (c *utf8NodeCache) sequenceToTrieChildren(seq []ByteRange) []*UTF8Node {
 	if len(seq) == 0 {
 		return nil
 	}
-	return []*UTF8Node{c.sequenceToTrie(seq)}
+	return []*UTF8Node{c.sequenceToTrie(seq, false)}
 }
 
 // encodeRange converts a rune range [lo, hi] into a set of byte-range sequences.
@@ -246,23 +253,28 @@ func (c *utf8NodeCache) byteRangesToTrie(ranges []ByteRange) []*UTF8Node {
 
 // anyRuneTrie returns a Trie that matches any valid UTF-8 rune OR any invalid UTF-8 byte.
 func (c *utf8NodeCache) anyRuneTrie(includeNL bool) []*UTF8Node {
-	var runes []rune
-	if includeNL {
-		runes = []rune{0, 0x10FFFF}
-	} else {
-		runes = []rune{0, '\n' - 1, '\n' + 1, 0x10FFFF}
-	}
-	roots := c.runeRangesToUTF8Trie(runes, false)
+	var roots []*UTF8Node
 
-	// Add disjoint raw byte fallback for invalid UTF-8 bytes.
-	// Valid UTF-8 starts are: 00-7F, C2-DF, E0-EF, F0-F4.
-	// We exclude 80-BF (continuations) to avoid matching parts of a valid sequence as single runes.
-	var br []ByteRange
-	br = []ByteRange{
-		{0xC0, 0xC1},
-		{0xF5, 0xFF},
+	// Multi-byte Warp Optimization for Dot (.):
+	// We directly create nodes for valid UTF-8 lead bytes and mark them as leaves (Next=nil).
+	// The execution engine handles skipping based on the lead byte's bit pattern.
+
+	if includeNL {
+		roots = append(roots, c.newNode([]ByteRange{{0x00, 0x7F}}, nil))
+	} else {
+		roots = append(roots, c.newNode([]ByteRange{{0x00, '\n' - 1}}, nil))
+		roots = append(roots, c.newNode([]ByteRange{{'\n' + 1, 0x7F}}, nil))
 	}
-	roots = append(roots, c.byteRangesToTrie(br)...)
+
+	// 2-byte: C2-DF
+	roots = append(roots, c.newNode([]ByteRange{{0xC2, 0xDF}}, nil))
+	// 3-byte: E0-EF
+	roots = append(roots, c.newNode([]ByteRange{{0xE0, 0xEF}}, nil))
+	// 4-byte: F0-F4
+	roots = append(roots, c.newNode([]ByteRange{{0xF0, 0xF4}}, nil))
+
+	// Invalid UTF-8 bytes fallback.
+	roots = append(roots, c.newNode([]ByteRange{{0xC0, 0xC1}, {0xF5, 0xFF}}, nil))
 
 	return roots
 }

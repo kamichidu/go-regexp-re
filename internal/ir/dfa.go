@@ -176,8 +176,9 @@ const (
 	TaggedStateFlag StateID = -2147483648 // Bit 31
 
 	AnchorVerifyFlag StateID = 0x40000000 // Bit 30
+	WarpStateFlag    StateID = 0x00800000 // Bit 23
 	AnchorMask       StateID = 0x3F000000 // Bits 24-29 (6 bits for syntax.EmptyOp)
-	StateIDMask      StateID = 0x00FFFFFF // Bits 0-23 (up to 16M states)
+	StateIDMask      StateID = 0x007FFFFF // Bits 0-22 (up to 8M states)
 )
 
 type DFA struct {
@@ -781,7 +782,7 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 		switch inst.Op {
 		case syntax.InstRune, syntax.InstRune1:
 			fold := inst.Op == syntax.InstRune && (inst.Arg&uint32(syntax.FoldCase) != 0)
-			roots = cache.runeRangesToUTF8Trie(inst.Rune, fold)
+			roots = cache.runeRangesToUTF8Trie(inst.Rune, fold, false)
 		case syntax.InstRuneAny:
 			roots = cache.anyRuneTrie(true)
 		case syntax.InstRuneAnyNotNL:
@@ -878,14 +879,27 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 	}
 
 	var errBuild error
+	usedMemory := 0
+	checkMem := func(bytes int) error {
+		usedMemory += bytes
+		if usedMemory > maxMemory {
+			return ErrStateExplosion
+		}
+		return nil
+	}
+
 	addDfaState := func(closure []NFAPath, isSearch bool) StateID {
 		if errBuild != nil {
 			return InvalidState
 		}
-		if (d.numStates+1)*256*8 > maxMemory {
-			errBuild = ErrStateExplosion
+		// Estimate memory for this state (transitions, tags, masks, etc.)
+		// 256 * 4 (transitions) + 256 * 4 (tag indices) + masks + other properties
+		stateMem := 256*4 + 256*4 + d.maskStride*8 + 64
+		if err := checkMem(stateMem); err != nil {
+			errBuild = err
 			return InvalidState
 		}
+
 		if len(closure) > 0 {
 			minP := closure[0].Priority
 			for i := 1; i < len(closure); i++ {
@@ -915,16 +929,26 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 		if id, ok := nfaToDfa[key]; ok {
 			return id
 		}
-		if d.numStates >= 10000 {
+		if d.numStates >= 1000000 { // Increased limit, rely on checkMem instead
 			errBuild = fmt.Errorf("regexp: pattern too large or ambiguous (state limit exceeded)")
 			return InvalidState
 		}
 		id := StateID(d.numStates)
 		nfaToDfa[key] = id
+		if err := checkMem(64); err != nil { // Map entry overhead
+			errBuild = err
+			return InvalidState
+		}
 
 		if err := storage.Put(id, closure); err != nil {
 			errBuild = err
 			return InvalidState
+		}
+		if !isFileMode {
+			if err := checkMem(len(closure) * NFAPathSize); err != nil {
+				errBuild = err
+				return InvalidState
+			}
 		}
 
 		for i := 0; i < d.maskStride; i++ {
@@ -1033,9 +1057,15 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 			initialPaths = currentClosure
 		}
 		searchRes := getCachedClosure(initialPaths, 0)
+		// Track memory for closure results
+		if err := checkMem(len(searchRes.nextClosure)*NFAPathSize + len(searchRes.updates)*16 + 128); err != nil {
+			return err
+		}
 		for b := 0; b < 256; b++ {
 			nextPaths = nextPaths[:0]
 			foundMatch := false
+			canWarp := true
+			hasWarpCandidate := false
 			for _, p := range searchRes.nextClosure {
 				s := p.NFAState
 				inst := prog.Inst[s.ID]
@@ -1053,6 +1083,12 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 								match = matchesByteFold
 							}
 							if match(root, byte(b)) {
+								if b >= 0x80 {
+									hasWarpCandidate = true
+									if root.Next != nil {
+										canWarp = false
+									}
+								}
 								if root.Next == nil {
 									matchedOut = append(matchedOut, inst.Out)
 								} else {
@@ -1071,6 +1107,12 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 						match = matchesByteFold
 					}
 					if match(node, byte(b)) {
+						if b >= 0x80 {
+							hasWarpCandidate = true
+							if node.Next != nil {
+								canWarp = false
+							}
+						}
 						if node.Next == nil {
 							matchedOut = append(matchedOut, inst.Out)
 						} else {
@@ -1115,12 +1157,17 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 					}
 				}
 
+				flag := StateID(0)
+				if hasWarpCandidate && canWarp {
+					flag |= WarpStateFlag
+				}
+
 				if minP != 0 || isMeaningful(searchRes.updates) || isMeaningful(postUpdates) {
-					d.transitions[idx] = nextDfaID | TaggedStateFlag
+					d.transitions[idx] = nextDfaID | TaggedStateFlag | flag
 					update := TransitionUpdate{BasePriority: int32(minP), PreUpdates: searchRes.updates, PostUpdates: postUpdates}
 					d.tagUpdateIndices[idx] = addUpdate(update)
 				} else {
-					d.transitions[idx] = nextDfaID
+					d.transitions[idx] = nextDfaID | flag
 				}
 			}
 		}
@@ -1305,11 +1352,10 @@ func (d *DFA) minimize() {
 			target := d.transitions[oldIdx]
 			if target != InvalidState {
 				newID := StateID(stateToGroup[target&StateIDMask])
+				flags := target & ^StateIDMask
+				newTransitions[int(g)*256+b] = newID | flags
 				if target < 0 {
-					newTransitions[int(g)*256+b] = newID | TaggedStateFlag
 					newUpdateIndices[int(g)*256+b] = d.tagUpdateIndices[oldIdx]
-				} else {
-					newTransitions[int(g)*256+b] = newID
 				}
 			} else {
 				newTransitions[int(g)*256+b] = InvalidState
@@ -1320,11 +1366,10 @@ func (d *DFA) minimize() {
 			target := d.anchorTransitions[oldIdx]
 			if target != InvalidState {
 				newID := StateID(stateToGroup[target&StateIDMask])
+				flags := target & ^StateIDMask
+				newAnchorTransitions[int(g)*6+bit] = newID | flags
 				if target < 0 {
-					newAnchorTransitions[int(g)*6+bit] = newID | TaggedStateFlag
 					newAnchorUpdateIndices[int(g)*6+bit] = d.anchorTagUpdateIndices[oldIdx]
-				} else {
-					newAnchorTransitions[int(g)*6+bit] = newID
 				}
 			} else {
 				newAnchorTransitions[int(g)*6+bit] = InvalidState
@@ -1712,17 +1757,28 @@ func epsilonClosureWithPathTags(paths []NFAPath, prog *syntax.Prog, context synt
 	}
 
 	sort.Slice(resultPaths, func(i, j int) bool {
-		if resultPaths[i].Priority != resultPaths[j].Priority {
-			return resultPaths[i].Priority < resultPaths[j].Priority
-		}
 		if resultPaths[i].ID != resultPaths[j].ID {
 			return resultPaths[i].ID < resultPaths[j].ID
 		}
 		if resultPaths[i].NodeID != resultPaths[j].NodeID {
 			return resultPaths[i].NodeID < resultPaths[j].NodeID
 		}
+		if resultPaths[i].Priority != resultPaths[j].Priority {
+			return resultPaths[i].Priority < resultPaths[j].Priority
+		}
 		return resultPaths[i].Tags < resultPaths[j].Tags
 	})
+
+	// Unique paths: for each (ID, NodeID), keep only the one with the highest priority (min Priority).
+	if len(resultPaths) > 0 {
+		unique := resultPaths[:0]
+		for i := 0; i < len(resultPaths); i++ {
+			if i == 0 || resultPaths[i].ID != resultPaths[i-1].ID || resultPaths[i].NodeID != resultPaths[i-1].NodeID {
+				unique = append(unique, resultPaths[i])
+			}
+		}
+		resultPaths = unique
+	}
 
 	if len(updates) > 1 {
 		sort.Slice(updates, func(i, j int) bool {
