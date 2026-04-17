@@ -48,7 +48,62 @@ func CompileWithOptions(expr string, opt CompileOptions) (*Regexp, error) {
 func CompileContext(ctx context.Context, expr string) (*Regexp, error) {
 	return CompileContextWithOptions(ctx, expr, CompileOptions{MaxMemory: ir.MaxDFAMemory})
 }
-func CompileContextWithOptions(ctx context.Context, expr string, opt CompileOptions) (*Regexp, error) {
+func factorAlternation(re *syntax.Regexp) *syntax.Regexp {
+	if re == nil {
+		return nil
+	}
+	for i, sub := range re.Sub {
+		re.Sub[i] = factorAlternation(sub)
+	}
+
+	if re.Op != syntax.OpAlternate {
+		return re
+	}
+
+	// Simple common prefix factoring for OpAlternate.
+	// For now, handle the most basic case: a|aa -> a(a|)
+	if len(re.Sub) < 2 {
+		return re
+	}
+
+	newSub := make([]*syntax.Regexp, 0, len(re.Sub))
+	for i := 0; i < len(re.Sub); i++ {
+		s1 := re.Sub[i]
+		found := false
+		if s1.Op == syntax.OpLiteral || s1.Op == syntax.OpCharClass || s1.Op == syntax.OpAnyChar || s1.Op == syntax.OpAnyCharNotNL {
+			for j := i + 1; j < len(re.Sub); j++ {
+				s2 := re.Sub[j]
+				if s2.Op == syntax.OpConcat && len(s2.Sub) > 1 && s2.Sub[0].Equal(s1) {
+					// Factor s1 from s1|s1 s2[1:]... -> s1(|s2[1:]...)
+					factored := &syntax.Regexp{Op: syntax.OpConcat}
+					factored.Sub = []*syntax.Regexp{
+						s1,
+						{
+							Op: syntax.OpAlternate,
+							Sub: []*syntax.Regexp{
+								{Op: syntax.OpEmptyMatch},
+								{Op: syntax.OpConcat, Sub: s2.Sub[1:]},
+							},
+						},
+					}
+					newSub = append(newSub, factored)
+					i = j // Skip s2
+					found = true
+					break
+				}
+			}
+		}
+		if !found {
+			newSub = append(newSub, s1)
+		}
+	}
+	re.Sub = newSub
+	return re
+}
+
+func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOptions) (*Regexp, error) {
+	// ... (rest of the imports and logic)
+
 	s, err := syntax.Parse(expr, syntax.Perl)
 	if err != nil {
 		return nil, err
@@ -57,6 +112,7 @@ func CompileContextWithOptions(ctx context.Context, expr string, opt CompileOpti
 	subexpNames := s.CapNames()
 
 	s = syntax.Simplify(s)
+	s = factorAlternation(s)
 	prog, err := syntax.Compile(s)
 	if err != nil {
 		return nil, err
@@ -103,11 +159,12 @@ func CompileContextWithOptions(ctx context.Context, expr string, opt CompileOpti
 
 	// Only build Table-DFA if BP-DFA is not available or if explicitly needed.
 	if bpDfa == nil {
-		dfa, err = ir.NewDFAWithMemoryLimit(ctx, prog, opt.MaxMemory)
+		dfa, err = ir.NewDFAWithMemoryLimit(ctx, prog, opts.MaxMemory)
 		if err != nil {
 			return nil, err
 		}
 	}
+
 
 	prefixState := ir.InvalidState
 	if dfa != nil {
@@ -354,7 +411,7 @@ func (re *Regexp) burnedRecap(mc *matchContext, b []byte, start, end, bestPriori
 
 		prevState := mc.history[charStart]
 		byteVal := b[charStart]
-		idx := (int(prevState) << 8) | int(byteVal)
+		idx := (int(prevState&ir.StateIDMask) << 8) | int(byteVal)
 		rawNext := trans[idx]
 		stateAfterByte := rawNext & ir.StateIDMask
 
@@ -431,7 +488,7 @@ func (re *Regexp) burnedRecap(mc *matchContext, b []byte, start, end, bestPriori
 	for i := start; i < end; {
 		byteVal := b[i]
 		prevState := mc.history[i]
-		idx := (int(prevState) << 8) | int(byteVal)
+		idx := (int(prevState&ir.StateIDMask) << 8) | int(byteVal)
 		rawNext := trans[idx]
 		stateAfterByte := rawNext & ir.StateIDMask
 
@@ -591,22 +648,23 @@ func (re *Regexp) applyContextToState(d *ir.DFA, state ir.StateID, context synta
 	}
 	tagUpdates := d.TagUpdates()
 	anchorTagUpdateIndices := d.AnchorTagUpdateIndices()
+	s := state & ir.StateIDMask
 	for iter := 0; iter < 6; iter++ {
 		changed := false
 		for bit := 0; bit < 6; bit++ {
 			if (context & (1 << uint(bit))) != 0 {
-				idx := int(state)*6 + bit
-				rawNext := d.AnchorNext(state, bit)
+				idx := int(s)*6 + bit
+				rawNext := d.AnchorNext(s, bit)
 				if rawNext != ir.InvalidState {
 					nextID := rawNext & ir.StateIDMask
-					if nextID != state {
+					if nextID != s {
 						if rawNext < 0 {
 							update := tagUpdates[anchorTagUpdateIndices[idx]]
 							if currentPrio != nil {
 								*currentPrio += int(update.BasePriority)
 							}
 						}
-						state = nextID
+						s = nextID
 						changed = true
 					}
 				}
@@ -616,7 +674,7 @@ func (re *Regexp) applyContextToState(d *ir.DFA, state ir.StateID, context synta
 			break
 		}
 	}
-	return state
+	return s | (state & ^ir.StateIDMask)
 }
 
 func submatchExecLoop[T loopTrait](trait T, re *Regexp, b []byte, mc *matchContext) (int, int, int) {
@@ -637,7 +695,7 @@ func submatchExecLoop[T loopTrait](trait T, re *Regexp, b []byte, mc *matchConte
 	if anchorStart {
 		state = d.MatchState()
 	}
-	currentPriority := 0
+	prio := 0
 
 	for i := 0; i <= numBytes; {
 		if hasAnchors && ((usedAnchors&(syntax.EmptyWordBoundary|syntax.EmptyNoWordBoundary)) != 0 ||
@@ -645,19 +703,19 @@ func submatchExecLoop[T loopTrait](trait T, re *Regexp, b []byte, mc *matchConte
 			(i == numBytes && (usedAnchors&(syntax.EmptyEndText|syntax.EmptyEndLine)) != 0) ||
 			((usedAnchors&syntax.EmptyBeginLine) != 0 && i > 0 && b[i-1] == '\n') ||
 			((usedAnchors&syntax.EmptyEndLine) != 0 && i < numBytes && b[i] == '\n')) {
-			state = re.applyContextToState(d, state, ir.CalculateContext(b, i), i, &currentPriority, bestPriority)
+			state = re.applyContextToState(d, state, ir.CalculateContext(b, i), i, &prio, bestPriority)
 		}
 
 		mc.history[i] = state
-		sidx := int(state)
+		sidx := int(state & ir.StateIDMask)
 
 		if sidx >= 0 && sidx < len(accepting) && accepting[sidx] {
-			p := currentPriority + d.MatchPriority(state)
+			p := prio + d.MatchPriority(state&ir.StateIDMask)
 			if p <= bestPriority {
 				bestPriority, bestEnd = p, i
 				bestStart = p / ir.SearchRestartPenalty
 			}
-			if d.IsBestMatch(state) || re.hasNonGreedy() {
+			if d.IsBestMatch(state&ir.StateIDMask) || re.hasNonGreedy() {
 				return bestStart, bestEnd, bestPriority
 			}
 		}
@@ -668,10 +726,10 @@ func submatchExecLoop[T loopTrait](trait T, re *Regexp, b []byte, mc *matchConte
 				off := (sidx << 8) | int(byteVal)
 				rawNext := trans[off]
 				if rawNext != ir.InvalidState {
-					state = rawNext & ir.StateIDMask
+					state = rawNext & (ir.StateIDMask | ir.WarpStateFlag)
 					if rawNext < 0 {
 						update := tagUpdates[tagUpdateIndices[off]]
-						currentPriority += int(update.BasePriority)
+						prio += int(update.BasePriority)
 					}
 					if byteVal < 0x80 || (rawNext&ir.WarpStateFlag) == 0 {
 						i++
@@ -696,7 +754,7 @@ func submatchExecLoop[T loopTrait](trait T, re *Regexp, b []byte, mc *matchConte
 				break
 			}
 			i++
-			currentPriority = i * ir.SearchRestartPenalty
+			prio = i * ir.SearchRestartPenalty
 			state = d.SearchState()
 		} else {
 			break
@@ -782,7 +840,7 @@ func matchExecLoop[T loopTrait](trait T, re *Regexp, b []byte) (int, int, int) {
 	usedAnchors := d.UsedAnchors()
 
 	bestStart, bestEnd, bestPriority := -1, -1, 1<<30-1
-	currentPriority := 0
+	prio := 0
 
 	state := d.SearchState()
 	if anchorStart {
@@ -795,17 +853,17 @@ func matchExecLoop[T loopTrait](trait T, re *Regexp, b []byte) (int, int, int) {
 			(i == numBytes && (usedAnchors&(syntax.EmptyEndText|syntax.EmptyEndLine)) != 0) ||
 			((usedAnchors&syntax.EmptyBeginLine) != 0 && i > 0 && b[i-1] == '\n') ||
 			((usedAnchors&syntax.EmptyEndLine) != 0 && i < numBytes && b[i] == '\n')) {
-			state = re.applyContextToState(d, state, ir.CalculateContext(b, i), i, &currentPriority, bestPriority)
+			state = re.applyContextToState(d, state, ir.CalculateContext(b, i), i, &prio, bestPriority)
 		}
 
-		sidx := int(state)
+		sidx := int(state & ir.StateIDMask)
 		if sidx >= 0 && sidx < len(accepting) && accepting[sidx] {
-			p := currentPriority + d.MatchPriority(state)
+			p := prio + d.MatchPriority(state&ir.StateIDMask)
 			if p <= bestPriority {
 				bestPriority, bestEnd = p, i
 				bestStart = p / ir.SearchRestartPenalty
 			}
-			if d.IsBestMatch(state) || re.hasNonGreedy() {
+			if d.IsBestMatch(state&ir.StateIDMask) || re.hasNonGreedy() {
 				return bestStart, bestEnd, bestPriority
 			}
 		}
@@ -816,7 +874,7 @@ func matchExecLoop[T loopTrait](trait T, re *Regexp, b []byte) (int, int, int) {
 				off := (sidx << 8) | int(byteVal)
 				rawNext := trans[off]
 				if rawNext != ir.InvalidState {
-					state = rawNext & ir.StateIDMask
+					state = rawNext & (ir.StateIDMask | ir.WarpStateFlag)
 					if byteVal < 0x80 || (rawNext&ir.WarpStateFlag) == 0 {
 						i++
 					} else {
@@ -837,13 +895,14 @@ func matchExecLoop[T loopTrait](trait T, re *Regexp, b []byte) (int, int, int) {
 				skip := bytes.Index(b[i+1:], prefix)
 				if skip >= 0 {
 					i += skip + 1
-					currentPriority = i * ir.SearchRestartPenalty
+					prio = i * ir.SearchRestartPenalty
 					state = re.prefixState
 					continue
 				}
 			}
+
 			i++
-			currentPriority = i * ir.SearchRestartPenalty
+			prio = i * ir.SearchRestartPenalty
 			state = d.SearchState()
 		} else {
 			break

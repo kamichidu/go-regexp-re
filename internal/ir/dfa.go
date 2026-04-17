@@ -968,7 +968,7 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 		for _, s := range closure {
 			if prog.Inst[s.ID].Op == syntax.InstMatch && s.NodeID == 0 {
 				isAcc = true
-				prio := int(s.Priority)*(d.maxInst+1) + int(s.ID)
+				prio := int(s.Priority)
 				if prio < matchP {
 					matchP = prio
 					matchTags = s.Tags
@@ -988,7 +988,16 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 			isBest = true
 			for _, s := range closure {
 				// NFA priority of this path
-				if int(s.Priority) < (matchP / (d.maxInst + 1)) {
+				if int(s.Priority) <= matchP {
+					// If there is any path that is not yet matched but has better or equal priority
+					// than our current match, then our current match is not yet "best" (final).
+					// It might be beaten by a longer match from an equal priority path,
+					// or by a shorter match from a better priority path.
+					if prog.Inst[s.ID].Op == syntax.InstMatch && s.NodeID == 0 {
+						// This is the current best match itself or another match with same priority.
+						// If multiple paths reach Match with same priority, the first one in closure wins.
+						continue
+					}
 					if s.ID < 64 && (d.instReachableToMatch&(1<<uint(s.ID))) != 0 {
 						isBest = false
 						break
@@ -1069,6 +1078,7 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 			foundMatch := false
 			canWarp := true
 			hasWarpCandidate := false
+			var shortcutUpdates []PathTagUpdate
 			for _, p := range searchRes.nextClosure {
 				s := p.NFAState
 				inst := prog.Inst[s.ID]
@@ -1128,7 +1138,14 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 				if len(matchedOut) > 0 || len(matchedNodeIDs) > 0 {
 					foundMatch = true
 					for _, out := range matchedOut {
-						nextPaths = append(nextPaths, NFAPath{NFAState: NFAState{ID: out, NodeID: 0}, Priority: p.Priority, Tags: p.Tags})
+						// Shortcut! Follow epsilons and collect tags.
+						res := getCachedClosure([]NFAPath{{NFAState: NFAState{ID: out, NodeID: 0}, Priority: p.Priority, Tags: p.Tags}}, 0)
+						for _, np := range res.nextClosure {
+							nextPaths = append(nextPaths, np)
+						}
+						for _, u := range res.updates {
+							shortcutUpdates = append(shortcutUpdates, u)
+						}
 					}
 					for _, nodeID := range matchedNodeIDs {
 						nextPaths = append(nextPaths, NFAPath{NFAState: NFAState{ID: s.ID, NodeID: nodeID}, Priority: p.Priority, Tags: p.Tags})
@@ -1140,12 +1157,38 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 				if len(nextRes.nextClosure) == 0 {
 					continue
 				}
-				minP := nextRes.nextClosure[0].Priority
-				for _, p := range nextRes.nextClosure {
-					if p.Priority < minP {
-						minP = p.Priority
+
+				// Merge shortcut updates into nextRes.updates
+				allPostUpdates := make([]PathTagUpdate, 0, len(nextRes.updates)+len(shortcutUpdates))
+				allPostUpdates = append(allPostUpdates, nextRes.updates...)
+				for _, su := range shortcutUpdates {
+					found := false
+					for _, au := range allPostUpdates {
+						if su == au {
+							found = true
+							break
+						}
+					}
+					if !found {
+						allPostUpdates = append(allPostUpdates, su)
 					}
 				}
+
+				minP := int32(1 << 30)
+				if len(nextRes.nextClosure) > 0 {
+					minP = nextRes.nextClosure[0].Priority
+					for _, p := range nextRes.nextClosure {
+						if p.Priority < minP {
+							minP = p.Priority
+						}
+					}
+				}
+				for _, u := range allPostUpdates {
+					if u.NextPriority < minP {
+						minP = u.NextPriority
+					}
+				}
+
 				nextDfaID := addDfaState(nextRes.nextClosure, currentIsSearch)
 				if errBuild != nil {
 					return errBuild
@@ -1153,9 +1196,9 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 				idx := int(currentDfaID)*256 + b
 
 				var postUpdates []PathTagUpdate
-				if len(nextRes.updates) > 0 {
-					postUpdates = make([]PathTagUpdate, len(nextRes.updates))
-					for j, u := range nextRes.updates {
+				if len(allPostUpdates) > 0 {
+					postUpdates = make([]PathTagUpdate, len(allPostUpdates))
+					for j, u := range allPostUpdates {
 						postUpdates[j] = PathTagUpdate{RelativePriority: u.RelativePriority - int32(minP), NextPriority: u.NextPriority - int32(minP), Tags: u.Tags}
 					}
 				}
