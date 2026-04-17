@@ -1,3 +1,5 @@
+//go:build catalog
+
 package regexp
 
 import (
