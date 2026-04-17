@@ -13,6 +13,9 @@ The goal is to fix submatch extraction and anchor matching failures while strict
 
 ## 3. Submatch Precision & Burn-in Logic
 - [x] **BP-DFA 2-System Recap**: Implement 2-system Forward BP-Recap for simple patterns (Step 1, 2, 3).
+  - [x] Memory explosion fixed (Architectural Shortcut, state limit, priority cap).
+  - [x] History-guided forward winning path tracking.
+  - [ ] **BP-DFA Boundary Refinement**: Fix the remaining 1-byte offsets and `-1` results for nested/complex captures (e.g., `(a*)b`, `a*(a)`). Refine `PreEpsilonMasks` and `PostEpsilonMasks` synchronization with byte consumption.
 - [ ] **Strict Multiplexing (Step 4)**: Fix the 1-byte offset in Table-DFA by including cumulative priority in `dfaStateKey` to force state separation for greedy/non-greedy ambiguities.
 - [ ] **Multiplexing Verification**: Ensure `epsilonClosureWithPathTags` in `dfa.go` correctly separates paths with identical NFA state sets but different tag histories into distinct DFA states.
 

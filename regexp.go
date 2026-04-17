@@ -97,12 +97,16 @@ func CompileContextWithOptions(ctx context.Context, expr string, opt CompileOpti
 	var dfa *ir.DFA
 	var bpDfa *ir.BitParallelDFA
 
-	dfa, err = ir.NewDFAWithMemoryLimit(ctx, prog, opt.MaxMemory)
-	if err != nil {
-		return nil, err
-	}
 	if isSimpleForBP(prog) {
 		bpDfa = ir.NewBitParallelDFA(prog)
+	}
+
+	// Only build Table-DFA if BP-DFA is not available or if explicitly needed.
+	if bpDfa == nil {
+		dfa, err = ir.NewDFAWithMemoryLimit(ctx, prog, opt.MaxMemory)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	prefixState := ir.InvalidState
@@ -125,33 +129,51 @@ func CompileContextWithOptions(ctx context.Context, expr string, opt CompileOpti
 
 	isASCII := isSimpleForBP(prog)
 
-	res := &Regexp{expr: expr, numSubexp: numSubexp, prefix: []byte(prefixStr), prefixState: prefixState, complete: complete, anchorStart: anchorStart, anchorEnd: anchorEnd, isASCII: isASCII, prog: prog, dfa: dfa, bpDfa: bpDfa, literalMatcher: literalMatcher, subexpNames: subexpNames}
+	res := &Regexp{
+		expr:           expr,
+		numSubexp:      numSubexp,
+		prefix:         []byte(prefixStr),
+		prefixState:    prefixState,
+		complete:       complete,
+		anchorStart:    anchorStart,
+		anchorEnd:      anchorEnd,
+		isASCII:        isASCII,
+		prog:           prog,
+		dfa:            dfa,
+		bpDfa:          bpDfa,
+		literalMatcher: literalMatcher,
+		subexpNames:    subexpNames,
+	}
 	res.bindMatchStrategy()
 	return res, nil
 }
 
 func isSimpleForBP(prog *syntax.Prog) bool {
-	if prog.NumCap > 2 {
+	if prog == nil {
 		return false
 	}
 	if len(prog.Inst) > 62 {
 		return false
 	}
+
+	hasGreedy := false
+	hasNonGreedy := false
+
 	for _, inst := range prog.Inst {
 		switch inst.Op {
-		case syntax.InstAlt, syntax.InstAltMatch, syntax.InstEmptyWidth:
-			return false
-		case syntax.InstRune, syntax.InstRune1, syntax.InstRuneAny, syntax.InstRuneAnyNotNL:
-			if inst.Op == syntax.InstRuneAny || inst.Op == syntax.InstRuneAnyNotNL {
-				return false
-			}
-			for _, r := range inst.Rune {
-				if r > 127 {
-					return false
-				}
+		case syntax.InstAlt, syntax.InstAltMatch:
+			if inst.Arg < inst.Out {
+				hasNonGreedy = true
+			} else {
+				hasGreedy = true
 			}
 		}
 	}
+
+	if hasGreedy && hasNonGreedy {
+		return false
+	}
+
 	return true
 }
 
@@ -189,7 +211,7 @@ func (re *Regexp) Match(b []byte) bool {
 			start = -1
 		}
 	case strategyBitParallel:
-		start, _, _, _ = bitParallelExecLoop(re, b)
+		start, _, _, _ = bitParallelExecLoop(re, b, nil)
 	case strategyFast:
 		start, _, _ = matchExecLoop(fastMatchTrait{}, re, b)
 	case strategyExtended:
@@ -209,9 +231,11 @@ func (re *Regexp) NumSubexp() int                { return re.numSubexp }
 func (re *Regexp) LiteralPrefix() (string, bool) { return string(re.prefix), re.complete }
 
 type matchContext struct {
-	historyBuf [1024]ir.StateID
-	history    []ir.StateID
-	stride     int
+	historyBuf   [1024]ir.StateID
+	history      []ir.StateID
+	bpHistoryBuf [1024]uint64
+	bpHistory    []uint64
+	stride       int
 }
 
 func (mc *matchContext) prepare(matchLen int, stride int) {
@@ -220,6 +244,11 @@ func (mc *matchContext) prepare(matchLen int, stride int) {
 		mc.history = make([]ir.StateID, matchLen+1)
 	} else {
 		mc.history = mc.historyBuf[:matchLen+1]
+	}
+	if matchLen+1 > len(mc.bpHistoryBuf) {
+		mc.bpHistory = make([]uint64, matchLen+1)
+	} else {
+		mc.bpHistory = mc.bpHistoryBuf[:matchLen+1]
 	}
 }
 
@@ -236,15 +265,20 @@ func (re *Regexp) FindSubmatchIndex(b []byte) []int {
 		regs[i] = -1
 	}
 
+	maskStride := 1
+	if re.dfa != nil {
+		maskStride = re.dfa.MaskStride()
+	}
+
 	if re.isASCII && len(b) <= 1023 {
 		var mcStack matchContext
-		mcStack.prepare(len(b), re.dfa.MaskStride())
+		mcStack.prepare(len(b), maskStride)
 		return re.findSubmatchIndexInternal(b, &mcStack, regs)
 	}
 
 	mc := matchContextPool.Get().(*matchContext)
 	defer matchContextPool.Put(mc)
-	mc.prepare(len(b), re.dfa.MaskStride())
+	mc.prepare(len(b), maskStride)
 	return re.findSubmatchIndexInternal(b, mc, regs)
 }
 
@@ -255,11 +289,14 @@ func (re *Regexp) findSubmatchIndexInternal(b []byte, mc *matchContext, regs []i
 	case strategyLiteral:
 		return re.literalMatcher.FindSubmatchIndex(b)
 	case strategyBitParallel:
-		start, end, _, _ = bitParallelExecLoop(re, b)
+		start, end, _, _ = bitParallelExecLoop(re, b, mc)
 		if start < 0 {
 			return nil
 		}
 		regs[0], regs[1] = start, end
+		if re.numSubexp > 0 {
+			re.bitParallelForwardRecap(b, mc, start, end, regs)
+		}
 		return regs
 	case strategyExtended:
 		start, end, prio = submatchExecLoop(extendedMatchTrait{}, re, b, mc)
@@ -310,7 +347,7 @@ func (re *Regexp) burnedRecap(mc *matchContext, b []byte, start, end, bestPriori
 
 		bestPIn := int32(1<<30 - 1)
 
-		for p_in := int32(0); p_in < 1000; p_in++ { // Search all possible paths
+		for p_in := int32(0); p_in < 1000; p_in++ {
 			found := false
 			if rawNext < 0 {
 				update := tagUpdates[tagUpdateIndices[idx]]
@@ -404,6 +441,14 @@ func (re *Regexp) burnedRecap(mc *matchContext, b []byte, start, end, bestPriori
 			}
 		} else {
 			p = re.followPathAnchors(d, stateAfterByte, mc.history[i+1], ir.CalculateContext(b, i+1), i+1, regs, p)
+		}
+	}
+
+	// Final MatchTags
+	for _, u := range d.MatchUpdates(mc.history[end]) {
+		if u.RelativePriority == pathPrios[end-start] {
+			applyTags(u.Tags, end, regs)
+			break
 		}
 	}
 }
@@ -604,7 +649,7 @@ func submatchExecLoop[T loopTrait](trait T, re *Regexp, b []byte, mc *matchConte
 	return bestStart, bestEnd, bestPriority
 }
 
-func bitParallelExecLoop(re *Regexp, b []byte) (int, int, int, uint64) {
+func bitParallelExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int, int, uint64) {
 	bp := re.bpDfa
 	numBytes := len(b)
 	bestStart, bestEnd, bestPriority, bestMatchTags := -1, -1, 1<<30-1, uint64(0)
@@ -619,6 +664,10 @@ func bitParallelExecLoop(re *Regexp, b []byte) (int, int, int, uint64) {
 		for j := i; ; j++ {
 			currContext := ir.CalculateContext(b, j)
 			active := state & bp.ContextMasks[currContext]
+
+			if mc != nil {
+				mc.bpHistory[j] = active
+			}
 
 			if (active & bp.MatchMasks[currContext]) != 0 {
 				prio := i * ir.SearchRestartPenalty
@@ -795,3 +844,80 @@ func (fastMatchTrait) HasAnchors() bool { return false }
 type extendedMatchTrait struct{}
 
 func (extendedMatchTrait) HasAnchors() bool { return true }
+
+func (re *Regexp) bitParallelForwardRecap(b []byte, mc *matchContext, start, end int, regs []int) {
+	bp := re.bpDfa
+	if bp == nil {
+		return
+	}
+
+	charMasks := &bp.CharMasks
+	table := &bp.SuccessorTable
+
+	ctx := ir.CalculateContext(b, start)
+	state := bp.StartMasks[ctx]
+
+	for i := start; i <= end; i++ {
+		// intersection with history filters to ONLY the winning path.
+		active := state & mc.bpHistory[i]
+
+		winnerCandidates := active & bp.ReachableToMatch
+		winningBit := bits.TrailingZeros64(winnerCandidates)
+		if winningBit >= 64 {
+			winningBit = bits.TrailingZeros64(active)
+		}
+
+		if winningBit < 64 {
+			preClosure := bp.PreEpsilonMasks[winningBit]
+			for c := 0; c < len(regs); c++ {
+				if (preClosure & bp.CaptureMasks[c]) != 0 {
+					if c%2 == 0 { // Start tag
+						if regs[c] == -1 {
+							regs[c] = i
+						}
+					} else { // End tag
+						regs[c] = i
+					}
+				}
+			}
+		}
+
+		if i == end {
+			break
+		}
+
+		if winningBit >= 64 {
+			break
+		}
+
+		// Follow the winning bit
+		matched := (1 << uint(winningBit)) & charMasks[b[i]]
+		if matched == 0 {
+			matched = active & charMasks[b[i]]
+		}
+
+		if winningBit < 64 {
+			postClosure := bp.PostEpsilonMasks[winningBit]
+			for c := 0; c < len(regs); c++ {
+				if (postClosure & bp.CaptureMasks[c]) != 0 {
+					if c%2 == 0 { // Start tag
+						if regs[c] == -1 {
+							regs[c] = i + 1
+						}
+					} else { // End tag
+						regs[c] = i + 1
+					}
+				}
+			}
+		}
+
+		state = table[0][matched&0xff] |
+			table[1][(matched>>8)&0xff] |
+			table[2][(matched>>16)&0xff] |
+			table[3][(matched>>24)&0xff] |
+			table[4][(matched>>32)&0xff] |
+			table[5][(matched>>40)&0xff] |
+			table[6][(matched>>48)&0xff] |
+			table[7][(matched>>56)&0xff]
+	}
+}

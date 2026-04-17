@@ -301,11 +301,11 @@ func TestSpecializationPath(t *testing.T) {
 		{"^abc", "literal"},
 		{"a|b|c", "bit-parallel"},
 		{"[a-z]", "bit-parallel"},
-		{"a*", "dfa"},
-		{"(a|b)*", "dfa"},
+		{"a*", "bit-parallel"},
+		{"(a|b)*", "bit-parallel"},
 		{patternDFA, "dfa"},
-		{"^a|b$", "dfa-anchor"}, // Alternation: takes DFA
-		{"\\bword\\b", "dfa-anchor"},
+		{"^a|b$", "bit-parallel"},
+		{"\\bword\\b", "bit-parallel"},
 	}
 
 	for _, tt := range tests {

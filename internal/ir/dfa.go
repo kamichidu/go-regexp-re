@@ -214,6 +214,7 @@ type DFA struct {
 	predecessorMasks       []uint64 // byte (256) -> targetNFA (NumInst) -> sourceNFA bitset (maskStride)
 	instPriorities         []int32  // NFA Inst ID -> Absolute Priority
 	maxInst                int
+	stateMatchUpdates      [][]PathTagUpdate // priority -> tags (encoded as updates with NextPriority=-1)
 }
 
 func (d *DFA) PredecessorMasks() []uint64 { return d.predecessorMasks }
@@ -250,13 +251,21 @@ func (d *DFA) StateToMask(s StateID) uint64 {
 }
 
 type BitParallelDFA struct {
-	CharMasks      [256]uint64
-	AnchorMasks    [6]uint64
-	ContextMasks   [64]uint64
-	SuccessorTable [8][256]uint64
-	MatchMask      uint64
-	MatchMasks     [64]uint64
-	StartMasks     [64]uint64
+	CharMasks        [256]uint64
+	AnchorMasks      [6]uint64
+	ContextMasks     [64]uint64
+	SuccessorTable   [8][256]uint64
+	MatchMask        uint64
+	MatchMasks       [64]uint64
+	StartMasks       [64]uint64
+	CaptureMasks     [128]uint64 // 2 * numSubexp masks
+	IsNonGreedy      bool
+	AltMatchMasks    uint64     // For InstAlt: bit i is set if Alt is prioritized (standard greedy)
+	EpsilonMasks     [64]uint64 // [inst_idx] -> closure of non-epsilon instructions
+	PreEpsilonMasks  [64]uint64 // [inst_idx] -> epsilon closure BEFORE consuming a byte
+	PostEpsilonMasks [64]uint64 // [inst_idx] -> epsilon closure AFTER consuming a byte
+	ContextEpsMask   [64]uint64 // [context] -> union of closures for all anchors active in context
+	ReachableToMatch uint64     // Bitmask of NFA states that can reach InstMatch
 }
 
 func (bp *BitParallelDFA) HasAnchors() bool {
@@ -321,6 +330,12 @@ func (d *DFA) MatchTags(s StateID) uint64 {
 	}
 	return d.stateMatchTags[s]
 }
+func (d *DFA) MatchUpdates(s StateID) []PathTagUpdate {
+	if s < 0 || int(s) >= len(d.stateMatchUpdates) {
+		return nil
+	}
+	return d.stateMatchUpdates[s]
+}
 func (d *DFA) SearchState() StateID          { return d.searchState }
 func (d *DFA) MatchState() StateID           { return d.matchState }
 func (d *DFA) StartUpdates() []PathTagUpdate { return d.startUpdates }
@@ -382,10 +397,30 @@ func NewBitParallelDFA(prog *syntax.Prog) *BitParallelDFA {
 	if len(prog.Inst) > 62 { // Reserve bit 63
 		return nil
 	}
-	bp := &BitParallelDFA{}
+
+	// Step 1: Uniform Greediness Detection
+	hasGreedy := false
+	hasNonGreedy := false
+	for _, inst := range prog.Inst {
+		if inst.Op == syntax.InstAlt || inst.Op == syntax.InstAltMatch {
+			if inst.Arg < inst.Out {
+				hasNonGreedy = true
+			} else {
+				hasGreedy = true
+			}
+		}
+	}
+	if hasGreedy && hasNonGreedy {
+		// Mixed greediness is currently unsupported by the 2-system BP-DFA.
+		return nil
+	}
+
+	bp := &BitParallelDFA{
+		IsNonGreedy: hasNonGreedy,
+	}
 
 	// epsilonClosure returns a bitmask of states reachable from i via epsilons.
-	epsilonClosureWithContext := func(start int, ctx syntax.EmptyOp) uint64 {
+	epsilonClosureWithContext := func(start int, ctx syntax.EmptyOp, full bool) uint64 {
 		var active uint64
 		var visited uint64
 		var dfs func(int)
@@ -395,6 +430,9 @@ func NewBitParallelDFA(prog *syntax.Prog) *BitParallelDFA {
 			}
 			visited |= (1 << uint(curr))
 			inst := prog.Inst[curr]
+			if full {
+				active |= (1 << uint(curr))
+			}
 			switch inst.Op {
 			case syntax.InstAlt, syntax.InstAltMatch:
 				dfs(int(inst.Out))
@@ -406,7 +444,9 @@ func NewBitParallelDFA(prog *syntax.Prog) *BitParallelDFA {
 					dfs(int(inst.Out))
 				}
 			default:
-				active |= (1 << uint(curr))
+				if !full {
+					active |= (1 << uint(curr))
+				}
 			}
 		}
 		dfs(start)
@@ -426,6 +466,16 @@ func NewBitParallelDFA(prog *syntax.Prog) *BitParallelDFA {
 				if (inst.Arg & (1 << uint(bit))) != 0 {
 					bp.AnchorMasks[bit] |= (1 << uint(i))
 				}
+			}
+		case syntax.InstCapture:
+			if inst.Arg < 128 {
+				bp.CaptureMasks[inst.Arg] |= (1 << uint(i))
+			}
+		case syntax.InstAlt, syntax.InstAltMatch:
+			if !bp.IsNonGreedy {
+				// In standard greedy, Alt.Out (the loop) is prioritized.
+				// We record which instruction is the prioritized one.
+				bp.AltMatchMasks |= (1 << uint(i))
 			}
 		case syntax.InstMatch:
 			bp.MatchMask |= (1 << uint(i))
@@ -495,12 +545,37 @@ func NewBitParallelDFA(prog *syntax.Prog) *BitParallelDFA {
 		ctx := syntax.EmptyOp(c)
 		var matchMask uint64
 		for i := 0; i < len(prog.Inst); i++ {
-			if (epsilonClosureWithContext(i, ctx) & bp.MatchMask) != 0 {
+			if (epsilonClosureWithContext(i, ctx, false) & bp.MatchMask) != 0 {
 				matchMask |= (1 << uint(i))
 			}
 		}
 		bp.MatchMasks[c] = matchMask
-		bp.StartMasks[c] = epsilonClosureWithContext(prog.Start, ctx)
+		bp.StartMasks[c] = epsilonClosureWithContext(prog.Start, ctx, false)
+
+		// Context-dependent epsilon closure for all anchors
+		var contextClosure uint64
+		for i, inst := range prog.Inst {
+			if inst.Op == syntax.InstEmptyWidth && (syntax.EmptyOp(inst.Arg)&ctx) == syntax.EmptyOp(inst.Arg) {
+				contextClosure |= epsilonClosureWithContext(i, ctx, false)
+			}
+		}
+		bp.ContextEpsMask[c] = contextClosure
+	}
+
+	for i := 0; i < len(prog.Inst); i++ {
+		bp.EpsilonMasks[i] = epsilonClosureWithContext(i, 0, false)
+		// Pre: closure from i until we MUST consume a byte.
+		bp.PreEpsilonMasks[i] = epsilonClosureWithContext(i, 0, true)
+
+		// Post: closure AFTER consuming a byte.
+		// We use the successors of the non-epsilon state i.
+		if prog.Inst[i].Op != syntax.InstMatch && !isEpsilon(prog.Inst[i].Op) {
+			bp.PostEpsilonMasks[i] = epsilonClosureWithContext(int(prog.Inst[i].Out), 0, true)
+		}
+
+		if (bp.PreEpsilonMasks[i] & bp.MatchMask) != 0 {
+			bp.ReachableToMatch |= (1 << uint(i))
+		}
 	}
 
 	return bp
@@ -659,7 +734,7 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 
 	d.trieRoots = make([][]*UTF8Node, len(prog.Inst))
 	var nodes []*UTF8Node
-	nodes = append(nodes, nil)
+	nodes = append(nodes, nil) // ID 0 is nil
 
 	getTrie := func(ID uint32) []*UTF8Node {
 		if roots := d.trieRoots[ID]; roots != nil {
@@ -698,7 +773,7 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 	d.storage = storage
 
 	nfaToDfa := make(map[dfaStateKey]StateID)
-	updateToIdx := make(map[[2]uint64]uint32)
+	updateToIdx := make(map[[2]uint64]uint32) // Use hash key
 	addUpdate := func(u TransitionUpdate) uint32 {
 		key := hashUpdate(u)
 		if idx, ok := updateToIdx[key]; ok {
@@ -746,7 +821,7 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 		limit := 100000
 		if isFileMode {
 			limit = 10000
-		}
+		} // Aggressive clearing in file mode
 		if len(closureCache) > limit {
 			closureCache = make(map[closureCacheKey]closureResult)
 		}
@@ -804,6 +879,10 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 		if id, ok := nfaToDfa[key]; ok {
 			return id
 		}
+		if d.numStates >= 10000 {
+			errBuild = fmt.Errorf("regexp: pattern too large or ambiguous (state limit exceeded)")
+			return InvalidState
+		}
 		id := StateID(d.numStates)
 		nfaToDfa[key] = id
 
@@ -822,15 +901,22 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 		d.stateIsSearch = append(d.stateIsSearch, isSearch)
 		isAcc, matchP := false, 1<<30-1
 		var matchTags uint64
+		var matchUpdates []PathTagUpdate
 		for _, s := range closure {
 			if prog.Inst[s.ID].Op == syntax.InstMatch && s.NodeID == 0 {
 				isAcc = true
-				// WINNING match priority mapping: NFA priority * (MaxInst + 1) + NFA ID
 				prio := int(s.Priority)*(d.maxInst+1) + int(s.ID)
 				if prio < matchP {
 					matchP = prio
 					matchTags = s.Tags
 				}
+				// All paths that reach Match in this closure are potential winning tags.
+				// NextPriority = -1 indicates match destination.
+				matchUpdates = append(matchUpdates, PathTagUpdate{
+					RelativePriority: s.Priority, // In backward recap, we search for this src priority.
+					NextPriority:     -1,
+					Tags:             s.Tags,
+				})
 			}
 		}
 
@@ -854,6 +940,7 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 		d.accepting = append(d.accepting, isAcc)
 		d.stateMatchPriority = append(d.stateMatchPriority, matchP)
 		d.stateMatchTags = append(d.stateMatchTags, matchTags)
+		d.stateMatchUpdates = append(d.stateMatchUpdates, matchUpdates)
 		d.stateIsBestMatch = append(d.stateIsBestMatch, isBest)
 		for i := 0; i < 256; i++ {
 			d.transitions = append(d.transitions, InvalidState)
@@ -1168,6 +1255,7 @@ func (d *DFA) minimize() {
 	newUpdateIndices := make([]uint32, int(numGroups)*256)
 	newAnchorUpdateIndices := make([]uint32, int(numGroups)*6)
 	newAccepting, newPrio, newMatchTags, newBest, newIsSearch := make([]bool, numGroups), make([]int, numGroups), make([]uint64, numGroups), make([]bool, numGroups), make([]bool, numGroups)
+	newStateMatchUpdates := make([][]PathTagUpdate, numGroups)
 	for g := int32(0); g < numGroups; g++ {
 		oldS := groupToFirstState[g]
 		newAccepting[g] = d.accepting[oldS]
@@ -1175,6 +1263,7 @@ func (d *DFA) minimize() {
 		newMatchTags[g] = d.stateMatchTags[oldS]
 		newBest[g] = d.stateIsBestMatch[oldS]
 		newIsSearch[g] = d.stateIsSearch[oldS]
+		newStateMatchUpdates[g] = d.stateMatchUpdates[oldS]
 		for b := 0; b < 256; b++ {
 			oldIdx := oldS*256 + b
 			target := d.transitions[oldIdx]
@@ -1217,7 +1306,7 @@ func (d *DFA) minimize() {
 			newStorage.data[g] = paths
 		}
 	}
-	d.transitions, d.anchorTransitions, d.tagUpdateIndices, d.anchorTagUpdateIndices, d.accepting, d.stateMatchPriority, d.stateMatchTags, d.stateIsBestMatch, d.stateIsSearch, d.stateToMask, d.storage, d.numStates, d.searchState, d.matchState = newTransitions, newAnchorTransitions, newUpdateIndices, newAnchorUpdateIndices, newAccepting, newPrio, newMatchTags, newBest, newIsSearch, newMasks, newStorage, int(numGroups), StateID(stateToGroup[d.searchState]), StateID(stateToGroup[d.matchState])
+	d.transitions, d.anchorTransitions, d.tagUpdateIndices, d.anchorTagUpdateIndices, d.accepting, d.stateMatchPriority, d.stateMatchTags, d.stateMatchUpdates, d.stateIsBestMatch, d.stateIsSearch, d.stateToMask, d.storage, d.numStates, d.searchState, d.matchState = newTransitions, newAnchorTransitions, newUpdateIndices, newAnchorUpdateIndices, newAccepting, newPrio, newMatchTags, newStateMatchUpdates, newBest, newIsSearch, newMasks, newStorage, int(numGroups), StateID(stateToGroup[d.searchState]), StateID(stateToGroup[d.matchState])
 }
 
 func (d *DFA) computePhase2Metadata(prog *syntax.Prog) {
@@ -1544,7 +1633,11 @@ func epsilonClosureWithPathTags(paths []NFAPath, prog *syntax.Prog, context synt
 			inst := prog.Inst[p.ID]
 			switch inst.Op {
 			case syntax.InstAlt, syntax.InstAltMatch:
-				stack = append(stack, pathWithNewTags{NFAPath{NFAState: NFAState{ID: inst.Arg, NodeID: 0}, Priority: p.Priority + 1, Tags: p.Tags}, ph.newTags, ph.sourcePrio})
+				nextPrio := p.Priority + 1
+				if nextPrio > 1000 {
+					nextPrio = 1000
+				}
+				stack = append(stack, pathWithNewTags{NFAPath{NFAState: NFAState{ID: inst.Arg, NodeID: 0}, Priority: nextPrio, Tags: p.Tags}, ph.newTags, ph.sourcePrio})
 				stack = append(stack, pathWithNewTags{NFAPath{NFAState: NFAState{ID: inst.Out, NodeID: 0}, Priority: p.Priority, Tags: p.Tags}, ph.newTags, ph.sourcePrio})
 				continue
 			case syntax.InstCapture:
