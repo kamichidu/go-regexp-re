@@ -1,105 +1,78 @@
-= Multi-byte Warp Optimization (External Delegation Skip)
+= Multi-byte Warp Optimization & State Explosion Protection
 
-This document describes the design and implementation of the "Multi-byte Warp" optimization, which eliminates DFA state explosion and improves cache efficiency for patterns containing dots (`.`) or wide character classes in multi-byte (UTF-8) contexts.
+This document describes the design and implementation of two synergistic optimizations: the **Multi-byte Warp** for $O(1)$ character throughput, and **Priority-based Uniquing** for state explosion protection.
 
 == 1. Objective
 
-* **Prevent State Explosion**: Avoid the combinatorial explosion of states caused by sequences of `.` or wide character classes that match multi-byte characters.
-* **Maximize Cache Efficiency**: By eliminating intermediate "intra-character" states, the transition table size is kept small, maximizing L1/L2 cache hit rates.
-* **Maintain $O(1)$ Throughput**: Achieve near-constant time per character by "warping" (skipping) the trailing bytes of a multi-byte sequence after processing only the first byte.
+* **Prevent State Explosion**: Avoid the combinatorial explosion of DFA states caused by loop structures (`.*`, `a*`) where redundant NFA paths with different priorities diverge.
+* **Maximize Throughput**: Achieve near-constant time per UTF-8 character by "warping" (skipping) trailing bytes after processing only the Lead Byte.
+* **Maintain Precision**: Ensure that capture groups and anchors remain accurate even when byte-level scanning is partially bypassed.
 
-== 2. Core Principle: The "Warp" Strategy
+== 2. Multi-byte Warp (External Delegation Skip)
 
-In a standard DFA, each byte of a multi-byte UTF-8 sequence requires a state transition. In this optimized model, the DFA handles only the **first byte** (Lead Byte) of a multi-byte character.
+The Warp strategy treats a multi-byte UTF-8 sequence as a single logical transition in the DFA hot loop.
 
-1. **Detection**: When the execution engine encounters a byte `>= 0x80`, it identifies a potential multi-byte sequence.
-2. **Transition**: The Lead Byte's transition in the DFA table points directly to the state **after** the entire multi-byte character is consumed.
-3. **Skipping**: The engine calculates the number of trailing bytes ($N$) based on the Lead Byte's bit pattern and advances the input pointer by $1 + N$ in a single step.
+=== 2.1 Lead-Byte Detection & Length Calculation
 
-== 3. Logical Design
-
-=== 3.1 Length Calculation from Bit Pattern
-
-The total length $L$ of a UTF-8 character can be determined solely from its first byte.
+The total length $L$ of a UTF-8 character can be determined solely from its first byte (Lead Byte).
 
 [cols="1,1,1"]
 |===
-| Bit Pattern | $L$ (Total) | $N$ (Trailing)
-| `0xxxxxxx`  | 1           | 0 (ASCII)
-| `110xxxxx`  | 2           | 1
-| `1110xxxx`  | 3           | 2
-| `11110xxx`  | 4           | 3
+| Bit Pattern | $L$ (Total Bytes) | $N$ (Trailing Bytes to Skip)
+| `0xxxxxxx`  | 1                 | 0 (ASCII)
+| `110xxxxx`  | 2                 | 1
+| `1110xxxx`  | 3                 | 2
+| `11110xxx`  | 4                 | 3
 |===
 
-Implementation uses `math/bits.LeadingZeros8(^first)` to calculate $N$ without branching:
-[source,go]
-----
-ones := bits.LeadingZeros8(^b)
-skip := ones - 1 // N
-----
+The execution engine uses `math/bits.LeadingZeros8(^byteVal) - 1` to calculate the skip distance $N$ without branching.
 
-=== 3.2 Transition Table Encoding
+=== 2.2 Execution Engine Logic (`matchExecLoop` / `submatchExecLoop`)
 
-The transition table (Stride 256) is modified to encode "jump" information for bytes `0x80-0xFF`.
-
-* **Target State ID**: The ID of the state reached after the character is complete.
-* **Verify Flag (Bit 30/31)**: Anchors and match boundaries are updated based on the state reached after the warp.
-
-== 4. DFA Compiler Changes
-
-=== 4.1 `utf8Node` Termination
-
-In `internal/ir/utf8.go`, the trie construction is modified. Instead of creating intermediate nodes for trailing bytes, the first byte of a multi-byte range or literal is linked directly to the destination NFA path set.
-
-=== 4.2 Transition Burning (Literals & Dot)
-
-* **Multi-byte Literals**: The Lead Byte transition is "burned" to point to the state following the literal character.
-* **Dot (`.`) Optimization**: For a dot, all valid Lead Byte ranges (`0xC2` to `0xF4`) are burned to point to the same "next character boundary" state. This ensures that `.*` remains linear $O(N)$ in terms of DFA states.
-
-== 5. Execution Engine Optimization (`strategyFast`)
-
-The core loop in `strategyFast` (and other fast paths) is updated to include the warp logic with minimal branching.
+When the engine encounters a Lead Byte with `WarpStateFlag` (Bit 23) set in the transition table:
 
 [source,go]
 ----
-// strategyFast core loop concept
-for i < len(input) {
-    b := input[i]
+// Logic inside DFA execution loop
+if (rawNext & ir.WarpStateFlag) != 0 {
+    skip := bits.LeadingZeros8(^byteVal) - 1
+    if skip < 0 { skip = 0 }
 
-    // Always perform a single table lookup
-    // For multi-byte, state reflects the state AFTER the warp
-    state = table[(state << 8) | uint32(b)]
-
-    if b < 0x80 {
-        // ASCII Path: Predictable branch
-        i++
-    } else {
-        // Multi-byte Warp: Calculate skip distance from bit pattern
-        // 110xxxxx -> LeadingZeros(^b) = 2 -> skip = 1
-        // 1110xxxx -> LeadingZeros(^b) = 3 -> skip = 2
-        // 11110xxx -> LeadingZeros(^b) = 4 -> skip = 3
-        skip := bits.LeadingZeros8(^b) - 1
-
-        // Minimal guard for invalid bytes (e.g., 10xxxxxx)
-        if skip < 0 { skip = 0 }
-
-        i += (1 + skip)
+    // For submatch extraction, we fill the history for intermediate bytes
+    for j := 1; j <= skip; j++ {
+        mc.history[i+j] = state // triggered Lead-Byte state
     }
-
-    // Verify match/anchors using flags encoded in state ID
-    if state >= ir.VerifyFlag {
-        // ... handled in slow path if necessary ...
-    }
+    i += 1 + skip
 }
 ----
 
-== 6. Performance Characteristics
+=== 2.3 Warp-Aware Tag Bundling
 
-* **ASCII Performance**: Remains at peak speed as the `b < 0x80` branch is highly predictable.
-* **Multi-byte Throughput**: Memory access is reduced from "per byte" to "per character," significantly reducing CPU pipeline stalls and cache misses.
-* **State Complexity**: Sequences like `.{100}` which previously required thousands of states for UTF-8 now require exactly 100 states (linear $O(N)$).
+During DFA construction, if a transition corresponds to a shortcut (warp), all tags encountered on the skipped NFA path are bundled:
 
-== 7. Constraints & Trade-offs
+1. **Shortcutting**: In `internal/ir/utf8.go`, the `anyRuneTrie` directly links Lead Byte ranges to the completion state.
+2. **Collection**: `DFA.build` follows the epsilon closure from the shortcut destination to collect tags.
+3. **Encoding**: These tags are merged into the transition's `PostUpdates`.
 
-* **UTF-8 Validation**: This optimization prioritizes speed and assumes valid UTF-8 input or that matching failures on invalid sequences are acceptable.
-* **Anchor Consistency**: Anchors like `\b` or `^` are only valid at character boundaries. Since the warp always lands on a character boundary, logical consistency is maintained.
+== 3. State Explosion Protection (Priority Uniquing)
+
+State explosion occurs when loop structures create a vast set of NFA paths with diverging priorities.
+
+=== 3.1 Winner-Takes-All Policy
+
+In `epsilonClosureWithPathTags`, the engine enforces a strict uniquing rule based on the **Leftmost-First** principle:
+
+* For each NFA state `(StateID, NodeID)`, only the **highest priority (minimum Priority value)** path is retained.
+* Any lower-priority path reaching the same NFA state is discarded immediately, as it can never "win" the match.
+* This convergence prevents the creation of thousands of DFA states for simple patterns like `.*` or `a*`.
+
+=== 3.2 isBestMatch Optimization
+
+A match is only finalized (`isBestMatch = true`) if **no other active NFA path** with equal or better priority can still reach a match. This ensures the engine correctly identifies the longest match in greedy repetitions.
+
+== 4. Implementation Details
+
+* **WarpStateFlag (Bit 23)**: Marks transitions that cover a full UTF-8 character.
+* **StateIDMask (0x007FFFFF)**: Reserves bits for flags while allowing 8M states.
+* **Minimization Preservation**: The `minimize` function uses bitwise operations to ensure `WarpStateFlag` and `TaggedStateFlag` are carried over to the minimized transition table.
+* **Memory Tracking**: Construction caches (`nfaToDfa`, `closureCache`) are tracked against `MaxMemory` to prevent OOM.

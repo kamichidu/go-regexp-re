@@ -108,6 +108,13 @@ To maintain the 50%+ throughput gains achieved through empirical benchmarking, a
 - **Avoid Dispatcher Fragmentation**: The `Match` and `FindSubmatchIndex` methods MUST NOT be split into `Hot` and `Slow` helpers to "encourage inlining." Empirically, keeping the dispatch logic in a single, flat method provides more efficient stack frame management and register usage for the Go compiler (gc).
 - **Reject Recursive Incremental Updates**: Hot-loop optimizations that introduce branching or state-carrying (e.g., incremental context updates) MUST be avoided if they increase the complexity of the innermost loop. Simple, redundant L1-cached memory reads (e.g., `b[i]`, `b[i-1]`) are significantly cheaper than additional conditional branches in the hot path.
 
+### 2.19 Multi-byte Warp & State Explosion Protection (Mandatory)
+To maintain constant-time throughput and sub-linear memory growth for complex patterns, the engine MUST adhere to these stabilization principles:
+- **Lead-Byte Warp (Jump Optimization)**: For the "any-rune" (dot) and wide character classes, the DFA MUST employ a **Warp-on-Lead-Byte** strategy. The execution engine calculates the trailing byte count $N$ from the lead byte's bit pattern and performs a pointer jump ($i += 1+N$) in a single step, bypassing intermediate DFA states.
+- **Warp-Aware Tag Propagation**: When a shortcut (warp) is taken, any tags (capture boundaries) residing on the skipped NFA path MUST be bundled into the DFA transition's `PostUpdates` and re-applied at the jump destination to ensure submatch precision.
+- **Priority-based NFA Path Uniquing**: During DFA construction (Subset Construction), the builder MUST strictly unique the NFA path set by `(StateID, NodeID)`. If multiple paths reach the same NFA state, only the path with the **highest priority (minimum value)** MUST be retained. This is the primary defense against state explosion in loop structures (e.g., `.*`, `a*`).
+- **Warp Flag Preservation**: The `WarpStateFlag` (Bit 23) MUST be preserved during DFA minimization to ensure that optimized transitions are not reverted to byte-by-byte scanning in the final engine.
+
 ## 3. Feature Selection Policy
 
 ### 3.1 Supported Features
