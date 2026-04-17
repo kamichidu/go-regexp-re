@@ -181,6 +181,26 @@ const (
 	StateIDMask      StateID = 0x007FFFFF // Bits 0-22 (up to 8M states)
 )
 
+type RecapCommand uint8
+
+const (
+	RecapNop RecapCommand = iota
+	RecapSet              // Set register to current position
+)
+
+type RecapEntry struct {
+	InputPriority int16
+	NextPriority  int16
+	PreTags       uint64
+	PostTags      uint64
+}
+
+type GroupRecapTable struct {
+	// index: (StateID << 8) | ByteVal
+	// value: Priority -> RecapEntry
+	Transitions [][]RecapEntry
+}
+
 type DFA struct {
 	transitions            []StateID
 	anchorTransitions      []StateID // numStates * 6
@@ -217,10 +237,79 @@ type DFA struct {
 	instPriorities         []int32  // NFA Inst ID -> Absolute Priority
 	maxInst                int
 	stateMatchUpdates      [][]PathTagUpdate // priority -> tags (encoded as updates with NextPriority=-1)
+	recapTables            []GroupRecapTable // Per-group tables
 }
 
-func (d *DFA) PredecessorMasks() []uint64 { return d.predecessorMasks }
-func (d *DFA) InstPriorities() []int32    { return d.instPriorities }
+func (d *DFA) IsNaked() bool                    { return d.Naked }
+func (d *DFA) NumStates() int                   { return d.numStates }
+func (d *DFA) RecapTables() []GroupRecapTable   { return d.recapTables }
+func (d *DFA) Transitions() []StateID           { return d.transitions }
+func (d *DFA) TagUpdates() []TransitionUpdate   { return d.tagUpdates }
+func (d *DFA) TagUpdateIndices() []uint32       { return d.tagUpdateIndices }
+func (d *DFA) AnchorTagUpdateIndices() []uint32 { return d.anchorTagUpdateIndices }
+func (d *DFA) AnchorNext(s StateID, bit int) StateID {
+	if s < 0 || int(s) >= d.numStates {
+		return InvalidState
+	}
+	return d.anchorTransitions[int(s)*6+bit]
+}
+func (d *DFA) NumSubexp() int     { return d.numSubexp }
+func (d *DFA) Nodes() []*UTF8Node { return d.nodes }
+func (d *DFA) MatchPriority(s StateID) int {
+	if s < 0 || int(s) >= d.numStates {
+		return 1<<30 - 1
+	}
+	return d.stateMatchPriority[s]
+}
+func (d *DFA) MatchUpdates(s StateID) []PathTagUpdate {
+	if s < 0 || int(s) >= d.numStates {
+		return nil
+	}
+	return d.stateMatchUpdates[s]
+}
+func (d *DFA) MatchTags(s StateID) uint64 {
+	if s < 0 || int(s) >= d.numStates {
+		return 0
+	}
+	return d.stateMatchTags[s]
+}
+func (d *DFA) SearchState() StateID          { return d.searchState }
+func (d *DFA) MatchState() StateID           { return d.matchState }
+func (d *DFA) StartUpdates() []PathTagUpdate { return d.startUpdates }
+func (d *DFA) HasAnchors() bool              { return d.hasAnchors }
+func (d *DFA) UsedAnchors() syntax.EmptyOp   { return d.usedAnchors }
+func (d *DFA) AnchorTransitionUpdate(s StateID, bit int) TransitionUpdate {
+	if s < 0 || int(s) >= d.numStates {
+		return TransitionUpdate{}
+	}
+	idx := int(s)*6 + bit
+	uIdx := d.anchorTagUpdateIndices[idx]
+	return d.tagUpdates[uIdx]
+}
+func (d *DFA) TransitionUpdate(s StateID, b byte) TransitionUpdate {
+	if s < 0 || int(s) >= d.numStates {
+		return TransitionUpdate{}
+	}
+	idx := (int(s) << 8) | int(b)
+	uIdx := d.tagUpdateIndices[idx]
+	return d.tagUpdates[uIdx]
+}
+
+func (d *DFA) Stride() int { return 256 }
+func (d *DFA) IsAccepting(s StateID) bool {
+	if s < 0 || int(s) >= d.numStates {
+		return false
+	}
+	return d.accepting[s]
+}
+func (d *DFA) IsBestMatch(s StateID) bool {
+	if s < 0 || int(s) >= d.numStates {
+		return false
+	}
+	return d.stateIsBestMatch[s]
+}
+func (d *DFA) Accepting() []bool { return d.accepting }
+func (d *DFA) MaxInst() int      { return d.maxInst }
 
 func (d *DFA) GetNFAContext(s StateID, buf []NFAPath) ([]NFAPath, error) {
 	if d.storage == nil {
@@ -293,69 +382,6 @@ func (d *DFA) Next(current StateID, b int) StateID {
 	}
 	return raw & StateIDMask
 }
-func (d *DFA) AnchorNext(current StateID, bit int) StateID {
-	if current < 0 || int(current) >= d.numStates || bit < 0 || bit >= 6 {
-		return InvalidState
-	}
-	return d.anchorTransitions[int(current)*6+bit]
-}
-func (d *DFA) NumStates() int                   { return d.numStates }
-func (d *DFA) TotalStates() int                 { return d.numStates }
-func (d *DFA) Transitions() []StateID           { return d.transitions }
-func (d *DFA) AnchorTransitions() []StateID     { return d.anchorTransitions }
-func (d *DFA) TagUpdateIndices() []uint32       { return d.tagUpdateIndices }
-func (d *DFA) AnchorTagUpdateIndices() []uint32 { return d.anchorTagUpdateIndices }
-func (d *DFA) TagUpdates() []TransitionUpdate   { return d.tagUpdates }
-func (d *DFA) Stride() int                      { return 256 }
-func (d *DFA) IsAccepting(s StateID) bool {
-	if s < 0 || int(s) >= d.numStates {
-		return false
-	}
-	return d.accepting[s]
-}
-func (d *DFA) IsBestMatch(s StateID) bool {
-	if s < 0 || int(s) >= d.numStates {
-		return false
-	}
-	return d.stateIsBestMatch[s]
-}
-func (d *DFA) Accepting() []bool { return d.accepting }
-func (d *DFA) MatchPriority(s StateID) int {
-	if s < 0 || int(s) >= d.numStates {
-		return 1<<30 - 1
-	}
-	return d.stateMatchPriority[s]
-}
-func (d *DFA) MatchUpdates(s StateID) []PathTagUpdate {
-	if s < 0 || int(s) >= d.numStates {
-		return nil
-	}
-	return d.stateMatchUpdates[s]
-}
-func (d *DFA) MatchTags(s StateID) uint64 {
-	if s < 0 || int(s) >= d.numStates {
-		return 0
-	}
-	return d.stateMatchTags[s]
-}
-func (d *DFA) SearchState() StateID             { return d.searchState }
-func (d *DFA) MatchState() StateID              { return d.matchState }
-func (d *DFA) StartUpdates() []PathTagUpdate    { return d.startUpdates }
-func (d *DFA) HasAnchors() bool                 { return d.hasAnchors }
-func (d *DFA) UsedAnchors() syntax.EmptyOp      { return d.usedAnchors }
-func (d *DFA) Transitions() []StateID           { return d.transitions }
-func (d *DFA) TagUpdates() []TransitionUpdate   { return d.tagUpdates }
-func (d *DFA) TagUpdateIndices() []uint32       { return d.tagUpdateIndices }
-func (d *DFA) AnchorTagUpdateIndices() []uint32 { return d.anchorTagUpdateIndices }
-func (d *DFA) AnchorNext(s StateID, bit int) StateID {
-	if s < 0 || int(s) >= d.numStates {
-		return InvalidState
-	}
-	return d.anchorTransitions[int(s)*6+bit]
-}
-func (d *DFA) Nodes() []*UTF8Node { return d.nodes }
-func (d *DFA) MaxInst() int       { return d.maxInst }
-
 func (d *DFA) WarpPoint(s StateID) int {
 	if s < 0 || int(s) >= d.numStates {
 		return -1
@@ -718,69 +744,6 @@ func hashUpdate(u TransitionUpdate) [2]uint64 {
 	return [2]uint64{h1, h2}
 }
 
-func (d *DFA) IsNaked() bool {
-	return d.Naked
-}
-
-func (d *DFA) TransitionUpdate(s StateID, b byte) TransitionUpdate {
-	if s < 0 || int(s) >= d.numStates {
-		return TransitionUpdate{}
-	}
-	idx := (int(s) << 8) | int(b)
-	uIdx := d.tagUpdateIndices[idx]
-	return d.tagUpdates[uIdx]
-}
-
-func (d *DFA) AnchorTransitionUpdate(s StateID, bit int) TransitionUpdate {
-	if s < 0 || int(s) >= d.numStates {
-		return TransitionUpdate{}
-	}
-	idx := int(s)*6 + bit
-	uIdx := d.anchorTagUpdateIndices[idx]
-	return d.tagUpdates[uIdx]
-}
-
-func (d *DFA) CanReachPriority(fromState, toState StateID, context syntax.EmptyOp, p_in, p_out int32) bool {
-	if fromState == toState {
-		return p_in == p_out
-	}
-	s := fromState
-	p := p_in
-	for iter := 0; iter < 6; iter++ {
-		changed := false
-		for bit := 0; bit < 6; bit++ {
-			if (context & (1 << uint(bit))) != 0 {
-				rawNext := d.AnchorNext(s, bit)
-				if rawNext != InvalidState {
-					nextID := rawNext & StateIDMask
-					if nextID != s {
-						if rawNext < 0 {
-							update := d.AnchorTransitionUpdate(s, bit)
-							found := false
-							for _, pu := range update.PreUpdates {
-								if pu.RelativePriority == p {
-									p = pu.NextPriority
-									found = true
-									break
-								}
-							}
-							if !found {
-								return false
-							}
-						}
-						s = nextID
-						changed = true
-					}
-				}
-			}
-		}
-		if !changed {
-			break
-		}
-	}
-	return s == toState && p == p_out
-}
-
 func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error {
 	d.maskStride = (len(prog.Inst) + 63) / 64
 	cache := newUTF8NodeCache()
@@ -1121,6 +1084,11 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 	d.startUpdates = defaultStartRes.Updates
 	d.searchState = addDfaState(defaultStartRes.NextClosure, true)
 
+	d.recapTables = make([]GroupRecapTable, d.numSubexp+1)
+	for i := range d.recapTables {
+		d.recapTables[i].Transitions = make([][]RecapEntry, 0, 1024)
+	}
+
 	scratchBuf := make([]NFAPath, 0, 1024)
 	nextPaths := make([]NFAPath, 0, 1024)
 
@@ -1285,6 +1253,46 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 				}
 				idx := int(currentDfaID)*256 + b
 
+				// Group-Specific Recap Table Population (Phase 3)
+				for groupIdx := range d.recapTables {
+					for len(d.recapTables[groupIdx].Transitions) <= idx {
+						d.recapTables[groupIdx].Transitions = append(d.recapTables[groupIdx].Transitions, nil)
+					}
+					var entries []RecapEntry
+					for _, u_pre := range searchRes.Updates {
+						p_in := u_pre.RelativePriority
+						p_mid := u_pre.NextPriority
+						for _, u_post := range nextRes.Updates {
+							if u_post.RelativePriority == p_mid {
+								tagStart := uint32(groupIdx * 2)
+								tagEnd := tagStart + 1
+								preTags := uint64(0)
+								if (u_pre.Tags & (1 << tagStart)) != 0 {
+									preTags |= (1 << tagStart)
+								}
+								if (u_pre.Tags & (1 << tagEnd)) != 0 {
+									preTags |= (1 << tagEnd)
+								}
+								postTags := uint64(0)
+								if (u_post.Tags & (1 << tagStart)) != 0 {
+									postTags |= (1 << tagStart)
+								}
+								if (u_post.Tags & (1 << tagEnd)) != 0 {
+									postTags |= (1 << tagEnd)
+								}
+
+								entries = append(entries, RecapEntry{
+									InputPriority: int16(p_in),
+									NextPriority:  int16(u_post.NextPriority),
+									PreTags:       preTags,
+									PostTags:      postTags,
+								})
+							}
+						}
+					}
+					d.recapTables[groupIdx].Transitions[idx] = entries
+				}
+
 				var postUpdates []PathTagUpdate
 				if len(allPostUpdates) > 0 {
 					postUpdates = make([]PathTagUpdate, len(allPostUpdates))
@@ -1333,6 +1341,16 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 					return errBuild
 				}
 				idx := int(currentDfaID)*6 + bit
+
+				// Group-Specific Recap Table Population (Phase 3)
+				for i := range d.recapTables {
+					for len(d.recapTables[i].Transitions) <= int(currentDfaID)*256+255 { // Ensure padding
+						d.recapTables[i].Transitions = append(d.recapTables[i].Transitions, nil)
+					}
+					// Anchor transitions are virtual bytes, we'll store them in a separate place or encode them.
+					// Actually, current RecapEntry doesn't support anchors easily.
+					// We'll skip anchor tags for now or use a different table.
+				}
 
 				var postUpdates []PathTagUpdate
 				if len(nextRes.Updates) > 0 {
@@ -1770,13 +1788,14 @@ func epsilonClosureWithPathTags(paths []NFAPath, prog *syntax.Prog, context synt
 	}
 
 	var updates []PathTagUpdate
-	// resultPathsMap handles multiplexing: (ID, NodeID, Tags) -> NFAPath
+	// resultPathsMap handles merging: (ID, NodeID) -> NFAPath
 	type resultMapKey struct {
 		ID     uint32
 		NodeID uint32
-		Tags   uint64
 	}
 	resultPathsMap := make(map[resultMapKey]NFAPath)
+	// We also need to record which tags were associated with which result path.
+	// But since we only keep the best priority path, we only need its tags.
 
 	for len(stack) > 0 {
 		ph := stack[len(stack)-1]
@@ -1789,18 +1808,18 @@ func epsilonClosureWithPathTags(paths []NFAPath, prog *syntax.Prog, context synt
 			continue
 		}
 
-		// Non-epsilon state or anchor that didn't match.
 		if p.NodeID != 0 || !isEpsilon(prog.Inst[p.ID].Op) {
-			rk := resultMapKey{p.ID, p.NodeID, p.Tags}
+			rk := resultMapKey{p.ID, p.NodeID}
 			if existing, ok := resultPathsMap[rk]; !ok || p.Priority < existing.Priority {
 				resultPathsMap[rk] = p
-			}
 
-			updates = append(updates, PathTagUpdate{
-				RelativePriority: ph.sourcePrio,
-				NextPriority:     p.Priority,
-				Tags:             ph.newTags,
-			})
+				// We need to know which tags were added on THIS specific epsilon path
+				updates = append(updates, PathTagUpdate{
+					RelativePriority: ph.sourcePrio,
+					NextPriority:     p.Priority,
+					Tags:             ph.newTags,
+				})
+			}
 		}
 
 		if p.NodeID == 0 {

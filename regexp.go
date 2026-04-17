@@ -164,7 +164,8 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 	var dfa *ir.DFA
 	var bpDfa *ir.BitParallelDFA
 
-	if isSimpleForBP(prog) {
+	// FORCE Table-DFA for 3-Pass debugging
+	if false && isSimpleForBP(prog) {
 		bpDfa = ir.NewBitParallelDFA(prog)
 	}
 
@@ -174,6 +175,7 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 		if err != nil {
 			return nil, err
 		}
+		fmt.Printf("Compiled Table-DFA: %d states\n", dfa.NumStates())
 	}
 
 	prefixState := ir.InvalidState
