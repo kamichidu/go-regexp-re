@@ -33,6 +33,9 @@ Advanced Go-specific optimizations, including manual loop monomorphization and b
 === 7. xref:algorithm/ast-optimization.adoc[AST-Level Optimization & Factoring]
 Pre-compilation AST rewriting and common sub-expression factoring to minimize state divergence and memory footprint.
 
+=== 8. xref:algorithm/multibyte-warp-optimization.adoc[Multi-byte Warp Optimization (External Delegation Skip)]
+A deterministic skipping strategy for multi-byte UTF-8 sequences that eliminates state explosion in dots and wide character classes.
+
 == Design Philosophy
 
 * **Pure Go (Zero CGO)**: Achieving maximum performance without sacrificing portability or introducing the overhead of C-interop.

@@ -1,0 +1,105 @@
+= Multi-byte Warp Optimization (External Delegation Skip)
+
+This document describes the design and implementation of the "Multi-byte Warp" optimization, which eliminates DFA state explosion and improves cache efficiency for patterns containing dots (`.`) or wide character classes in multi-byte (UTF-8) contexts.
+
+== 1. Objective
+
+* **Prevent State Explosion**: Avoid the combinatorial explosion of states caused by sequences of `.` or wide character classes that match multi-byte characters.
+* **Maximize Cache Efficiency**: By eliminating intermediate "intra-character" states, the transition table size is kept small, maximizing L1/L2 cache hit rates.
+* **Maintain $O(1)$ Throughput**: Achieve near-constant time per character by "warping" (skipping) the trailing bytes of a multi-byte sequence after processing only the first byte.
+
+== 2. Core Principle: The "Warp" Strategy
+
+In a standard DFA, each byte of a multi-byte UTF-8 sequence requires a state transition. In this optimized model, the DFA handles only the **first byte** (Lead Byte) of a multi-byte character.
+
+1. **Detection**: When the execution engine encounters a byte `>= 0x80`, it identifies a potential multi-byte sequence.
+2. **Transition**: The Lead Byte's transition in the DFA table points directly to the state **after** the entire multi-byte character is consumed.
+3. **Skipping**: The engine calculates the number of trailing bytes ($N$) based on the Lead Byte's bit pattern and advances the input pointer by $1 + N$ in a single step.
+
+== 3. Logical Design
+
+=== 3.1 Length Calculation from Bit Pattern
+
+The total length $L$ of a UTF-8 character can be determined solely from its first byte.
+
+[cols="1,1,1"]
+|===
+| Bit Pattern | $L$ (Total) | $N$ (Trailing)
+| `0xxxxxxx`  | 1           | 0 (ASCII)
+| `110xxxxx`  | 2           | 1
+| `1110xxxx`  | 3           | 2
+| `11110xxx`  | 4           | 3
+|===
+
+Implementation uses `math/bits.LeadingZeros8(^first)` to calculate $N$ without branching:
+[source,go]
+----
+ones := bits.LeadingZeros8(^b)
+skip := ones - 1 // N
+----
+
+=== 3.2 Transition Table Encoding
+
+The transition table (Stride 256) is modified to encode "jump" information for bytes `0x80-0xFF`.
+
+* **Target State ID**: The ID of the state reached after the character is complete.
+* **Verify Flag (Bit 30/31)**: Anchors and match boundaries are updated based on the state reached after the warp.
+
+== 4. DFA Compiler Changes
+
+=== 4.1 `utf8Node` Termination
+
+In `internal/ir/utf8.go`, the trie construction is modified. Instead of creating intermediate nodes for trailing bytes, the first byte of a multi-byte range or literal is linked directly to the destination NFA path set.
+
+=== 4.2 Transition Burning (Literals & Dot)
+
+* **Multi-byte Literals**: The Lead Byte transition is "burned" to point to the state following the literal character.
+* **Dot (`.`) Optimization**: For a dot, all valid Lead Byte ranges (`0xC2` to `0xF4`) are burned to point to the same "next character boundary" state. This ensures that `.*` remains linear $O(N)$ in terms of DFA states.
+
+== 5. Execution Engine Optimization (`strategyFast`)
+
+The core loop in `strategyFast` (and other fast paths) is updated to include the warp logic with minimal branching.
+
+[source,go]
+----
+// strategyFast core loop concept
+for i < len(input) {
+    b := input[i]
+
+    // Always perform a single table lookup
+    // For multi-byte, state reflects the state AFTER the warp
+    state = table[(state << 8) | uint32(b)]
+
+    if b < 0x80 {
+        // ASCII Path: Predictable branch
+        i++
+    } else {
+        // Multi-byte Warp: Calculate skip distance from bit pattern
+        // 110xxxxx -> LeadingZeros(^b) = 2 -> skip = 1
+        // 1110xxxx -> LeadingZeros(^b) = 3 -> skip = 2
+        // 11110xxx -> LeadingZeros(^b) = 4 -> skip = 3
+        skip := bits.LeadingZeros8(^b) - 1
+
+        // Minimal guard for invalid bytes (e.g., 10xxxxxx)
+        if skip < 0 { skip = 0 }
+
+        i += (1 + skip)
+    }
+
+    // Verify match/anchors using flags encoded in state ID
+    if state >= ir.VerifyFlag {
+        // ... handled in slow path if necessary ...
+    }
+}
+----
+
+== 6. Performance Characteristics
+
+* **ASCII Performance**: Remains at peak speed as the `b < 0x80` branch is highly predictable.
+* **Multi-byte Throughput**: Memory access is reduced from "per byte" to "per character," significantly reducing CPU pipeline stalls and cache misses.
+* **State Complexity**: Sequences like `.{100}` which previously required thousands of states for UTF-8 now require exactly 100 states (linear $O(N)$).
+
+== 7. Constraints & Trade-offs
+
+* **UTF-8 Validation**: This optimization prioritizes speed and assumes valid UTF-8 input or that matching failures on invalid sequences are acceptable.
+* **Anchor Consistency**: Anchors like `\b` or `^` are only valid at character boundaries. Since the warp always lands on a character boundary, logical consistency is maintained.
