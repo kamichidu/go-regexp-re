@@ -165,7 +165,6 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 		}
 	}
 
-
 	prefixState := ir.InvalidState
 	if dfa != nil {
 		prefixState = dfa.SearchState()
@@ -594,33 +593,37 @@ func (re *Regexp) canReachPriority(d *ir.DFA, fromState, toState ir.StateID, con
 }
 
 func (re *Regexp) followPathAnchors(d *ir.DFA, fromState, toState ir.StateID, context syntax.EmptyOp, pos int, regs []int, p_in int32) int32 {
-	if fromState == toState {
+	if (fromState & ir.StateIDMask) == (toState & ir.StateIDMask) {
 		return p_in
 	}
 	tagUpdates := d.TagUpdates()
 	anchorTagUpdateIndices := d.AnchorTagUpdateIndices()
-	s := fromState
+	s := fromState & ir.StateIDMask
 	p := p_in
 	for iter := 0; iter < 6; iter++ {
 		changed := false
 		for bit := 0; bit < 6; bit++ {
 			if (context & (1 << uint(bit))) != 0 {
+				idx := int(s)*6 + bit
 				rawNext := d.AnchorNext(s, bit)
 				if rawNext != ir.InvalidState {
 					nextID := rawNext & ir.StateIDMask
-					if nextID != s {
-						if rawNext < 0 {
-							update := tagUpdates[anchorTagUpdateIndices[int(s)*6+bit]]
-							for _, pu := range update.PreUpdates {
-								if pu.RelativePriority == p {
-									applyTags(pu.Tags, pos, regs)
-									p = pu.NextPriority
-									break
-								}
+					if rawNext < 0 {
+						update := tagUpdates[anchorTagUpdateIndices[idx]]
+						for _, pu := range update.PreUpdates {
+							if pu.RelativePriority == p {
+								applyTags(pu.Tags, pos, regs)
+								p = pu.NextPriority
+								break
 							}
 						}
+					}
+					if nextID != s {
 						s = nextID
 						changed = true
+						if s == (toState & ir.StateIDMask) {
+							return p
+						}
 					}
 				}
 			}
@@ -649,6 +652,7 @@ func (re *Regexp) applyContextToState(d *ir.DFA, state ir.StateID, context synta
 	tagUpdates := d.TagUpdates()
 	anchorTagUpdateIndices := d.AnchorTagUpdateIndices()
 	s := state & ir.StateIDMask
+	flags := state & ^ir.StateIDMask
 	for iter := 0; iter < 6; iter++ {
 		changed := false
 		for bit := 0; bit < 6; bit++ {
@@ -657,13 +661,13 @@ func (re *Regexp) applyContextToState(d *ir.DFA, state ir.StateID, context synta
 				rawNext := d.AnchorNext(s, bit)
 				if rawNext != ir.InvalidState {
 					nextID := rawNext & ir.StateIDMask
-					if nextID != s {
-						if rawNext < 0 {
-							update := tagUpdates[anchorTagUpdateIndices[idx]]
-							if currentPrio != nil {
-								*currentPrio += int(update.BasePriority)
-							}
+					if rawNext < 0 {
+						update := tagUpdates[anchorTagUpdateIndices[idx]]
+						if currentPrio != nil {
+							*currentPrio += int(update.BasePriority)
 						}
+					}
+					if nextID != s {
 						s = nextID
 						changed = true
 					}
@@ -674,7 +678,7 @@ func (re *Regexp) applyContextToState(d *ir.DFA, state ir.StateID, context synta
 			break
 		}
 	}
-	return s | (state & ^ir.StateIDMask)
+	return s | flags
 }
 
 func submatchExecLoop[T loopTrait](trait T, re *Regexp, b []byte, mc *matchContext) (int, int, int) {
@@ -708,12 +712,15 @@ func submatchExecLoop[T loopTrait](trait T, re *Regexp, b []byte, mc *matchConte
 
 		mc.history[i] = state
 		sidx := int(state & ir.StateIDMask)
-
 		if sidx >= 0 && sidx < len(accepting) && accepting[sidx] {
 			p := prio + d.MatchPriority(state&ir.StateIDMask)
 			if p <= bestPriority {
 				bestPriority, bestEnd = p, i
-				bestStart = p / ir.SearchRestartPenalty
+				if anchorStart {
+					bestStart = 0
+				} else {
+					bestStart = p / ir.SearchRestartPenalty
+				}
 			}
 			if d.IsBestMatch(state&ir.StateIDMask) || re.hasNonGreedy() {
 				return bestStart, bestEnd, bestPriority
@@ -861,7 +868,11 @@ func matchExecLoop[T loopTrait](trait T, re *Regexp, b []byte) (int, int, int) {
 			p := prio + d.MatchPriority(state&ir.StateIDMask)
 			if p <= bestPriority {
 				bestPriority, bestEnd = p, i
-				bestStart = p / ir.SearchRestartPenalty
+				if anchorStart {
+					bestStart = 0
+				} else {
+					bestStart = p / ir.SearchRestartPenalty
+				}
 			}
 			if d.IsBestMatch(state&ir.StateIDMask) || re.hasNonGreedy() {
 				return bestStart, bestEnd, bestPriority
