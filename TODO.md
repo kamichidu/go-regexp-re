@@ -12,12 +12,9 @@ The goal is to fix submatch extraction and anchor matching failures while strict
 - [ ] **Word Boundary Precision**: Investigate why `\babc\b` fails. Ensure `CalculateContext` and `anchorTransitions` are perfectly aligned.
 
 ## 3. Submatch Precision & Burn-in Logic
+- [x] **BP-DFA 2-System Recap**: Implement 2-system Forward BP-Recap for simple patterns (Step 1, 2, 3).
+- [ ] **Strict Multiplexing (Step 4)**: Fix the 1-byte offset in Table-DFA by including cumulative priority in `dfaStateKey` to force state separation for greedy/non-greedy ambiguities.
 - [ ] **Multiplexing Verification**: Ensure `epsilonClosureWithPathTags` in `dfa.go` correctly separates paths with identical NFA state sets but different tag histories into distinct DFA states.
-- [ ] **Greedy vs. Non-Greedy Priorities**: Confirm that `SearchRestartPenalty` (1,000,000) does not interfere with the fine-grained relative priorities used for submatch selection.
-- [ ] **Fix Golden Patterns**: Resolve remaining mismatches in `TestRegexp_FindSubmatchIndex` for:
-    - `(a|b)c` (currently returning `[-1 -1]`)
-    - `a*(a)` (currently returning wrong indices)
-    - `(a*)b`
 
 ## 4. Code Cleanup & Safety
 - [ ] **Deduplicate Loops**: Remove redundant match/submatch loop variations in `regexp.go` introduced during refactoring.

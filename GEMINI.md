@@ -31,14 +31,15 @@ To maximize throughput, the engine MUST select the most efficient execution loop
 - **Anchor-Aware Guarded SIMD Warp**: Selected for patterns with anchors. Utilizes a separate `anchorTransitions` table and **guarded warp points** to allow SIMD skipping even in the presence of anchors (e.g., `^`, `$`, `\b`).
 - **Explicit Hot-Loop Monomorphization**: To ensure zero-overhead, the engine MUST avoid Go generics (`GCShape` sharing) for the primary execution loops. Instead, it employs manually monomorphized functions (e.g., `fastExecLoop`, `extendedExecLoop`) to ensure the Go compiler can completely eliminate unreachable branches (like `if hasAnchors`) and avoid runtime dictionary lookups.
 
-### 2.5 Submatch Extraction Architecture (2-pass Sparse TDFA with Priority Burning)
-The engine follows a **2-pass Sparse Tagged-DFA (TDFA)** strategy to guarantee peak performance, $O(n)$ time complexity, and 100% Go-compatible precision.
+### 2.5 Submatch Extraction Architecture (2-pass Sparse TDFA & 2-System BP-Recap)
+The engine follows a **2-pass Hybrid Submatch Extraction** strategy to guarantee peak performance, $O(n)$ time complexity, and 100% Go-compatible precision.
 
-- **NFA-Free Mandate**: Runtime NFA simulation, backtracking, or dynamic epsilon-closure searching is **STRICTLY PROHIBITED**. All submatch extraction logic must be deterministic and table-driven.
-- **Phase 1: High-Speed Discovery**: A single high-speed DFA scan determines the match boundaries `[start, end]` and records a lightweight history of `ir.StateID`s. This pass uses a "naked" transition table optimized for CPU cache efficiency, ignoring all tagging overhead.
-- **Phase 2: Deterministic Priority-Burned Recap**: After a match is found, the engine performs a second pass over the recorded history. This pass utilizes pre-calculated priority transition maps to follow the winning path.
-- **Burned-in Priorities & Actions**: Every submatch decision (priorities and tag updates) MUST be "burned into" the transition tables (`TransitionUpdate`) during the compilation phase. The recap pass simply follows these pre-calculated mappings: `(current_priority) -> (next_priority, tags)`.
-- **Zero-Allocation Execution**: The second pass is strictly iterative and utilizes stack-resident register arrays, ensuring zero heap allocations.
+- **NFA-Free Mandate**: Runtime NFA simulation, backtracking, or dynamic epsilon-closure searching is **STRICTLY PROHIBITED**. All submatch extraction logic must be deterministic and table-driven (TDFA) or bit-parallel (BP-Recap).
+- **Phase 1: High-Speed Discovery**: A single high-speed scan (DFA or BP-DFA) determines match boundaries `[start, end]` and records a history of states.
+- **Phase 2: Strategy-Specific Recap**:
+  - **BP-Recap (High-Speed)**: For compatible patterns (uniform greediness, ≤62 nodes), uses a **2-system Forward BP-Recap**. It utilizes specialized execution loops (Greedy/Non-Greedy) to deterministically follow the winning path with SIMD-accelerated literal skipping.
+  - **Deterministic Priority-Burned Recap (Table-DFA)**: For complex patterns, uses pre-calculated priority transition maps. Every submatch decision (priorities and tag updates) MUST be "burned into" the transition tables during compilation.
+- **Zero-Allocation Execution**: Both recap paths are strictly iterative and utilize stack-resident or pre-allocated buffers, ensuring zero heap allocations.
 
 ### 2.6 Tag-Aware Subsetting (DFA State Multiplexing)
 To achieve 100% Go compatibility without runtime NFA simulation, the DFA construction must disambiguate paths with different tag histories:
