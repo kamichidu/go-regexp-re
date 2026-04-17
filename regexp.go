@@ -41,7 +41,6 @@ type Regexp struct {
 
 type CompileOptions struct {
 	MaxMemory int
-	Naked     bool
 }
 
 func Compile(expr string) (*Regexp, error) { return CompileContext(context.Background(), expr) }
@@ -165,13 +164,13 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 	var dfa *ir.DFA
 	var bpDfa *ir.BitParallelDFA
 
-	if isSimpleForBP(prog) && !opts.Naked {
+	if isSimpleForBP(prog) {
 		bpDfa = ir.NewBitParallelDFA(prog)
 	}
 
 	// Only build Table-DFA if BP-DFA is not available or if explicitly needed.
-	if bpDfa == nil || opts.Naked {
-		dfa, err = ir.NewDFAWithMemoryLimit(ctx, prog, opts.MaxMemory, opts.Naked)
+	if bpDfa == nil {
+		dfa, err = ir.NewDFAWithMemoryLimit(ctx, prog, opts.MaxMemory, true)
 		if err != nil {
 			return nil, err
 		}
@@ -313,10 +312,10 @@ func (re *Regexp) NumStates() int {
 	return 0
 }
 
-
 type matchContext struct {
 	historyBuf   [1024]ir.StateID
 	history      []ir.StateID
+	pathHistory  []int32
 	bpHistoryBuf [1024]uint64
 	bpHistory    []uint64
 	stride       int
@@ -326,8 +325,14 @@ func (mc *matchContext) prepare(matchLen int, stride int) {
 	mc.stride = stride
 	if matchLen+1 > len(mc.historyBuf) {
 		mc.history = make([]ir.StateID, matchLen+1)
+		mc.pathHistory = make([]int32, matchLen+1)
 	} else {
 		mc.history = mc.historyBuf[:matchLen+1]
+		if len(mc.pathHistory) < matchLen+1 {
+			mc.pathHistory = make([]int32, matchLen+1)
+		} else {
+			mc.pathHistory = mc.pathHistory[:matchLen+1]
+		}
 	}
 	if matchLen+1 > len(mc.bpHistoryBuf) {
 		mc.bpHistory = make([]uint64, matchLen+1)
@@ -399,306 +404,12 @@ func (re *Regexp) findSubmatchIndexInternal(b []byte, mc *matchContext, regs []i
 		return regs
 	}
 
-	re.burnedRecap(mc, b, start, end, prio, regs)
+	if d := re.dfa; d != nil && d.IsNaked() {
+		re.sparseTDFA_Recap(mc, b, start, end, prio, regs)
+	} else {
+		re.burnedRecap(mc, b, start, end, prio, regs)
+	}
 	return regs
-}
-
-func (re *Regexp) burnedRecap(mc *matchContext, b []byte, start, end, bestPriority int, regs []int) {
-	d := re.dfa
-	if d == nil {
-		return
-	}
-
-	trans := d.Transitions()
-	tagUpdates := d.TagUpdates()
-	tagUpdateIndices := d.TagUpdateIndices()
-
-	// Initial path priority at the end of the match.
-	p_end := int32(bestPriority % ir.SearchRestartPenalty)
-
-	// Step 1: Find the priority path from start to end that leads to p_end.
-	pathPrios := make([]int32, end-start+1)
-	pathPrios[end-start] = p_end
-
-	for i := end; i > start; {
-		p_out := pathPrios[i-start]
-
-		charStart := i - 1
-		for charStart > start && (b[charStart]&0xC0) == 0x80 {
-			charStart--
-		}
-
-		prevState := mc.history[charStart]
-		byteVal := b[charStart]
-		idx := (int(prevState&ir.StateIDMask) << 8) | int(byteVal)
-		rawNext := trans[idx]
-		stateAfterByte := rawNext & ir.StateIDMask
-
-		// Multi-byte Warp Awareness:
-		// If it's a warp transition, it covers multiple bytes.
-		// If it's NOT a warp transition but still a multi-byte character,
-		// the DFA handles it byte-by-byte, so charStart should just be i-1.
-		if (rawNext & ir.WarpStateFlag) == 0 {
-			charStart = i - 1
-			byteVal = b[charStart]
-			idx = (int(prevState) << 8) | int(byteVal)
-			rawNext = trans[idx]
-			stateAfterByte = rawNext & ir.StateIDMask
-		}
-
-		bestPIn := int32(1<<30 - 1)
-
-		for p_in := int32(0); p_in < 1000; p_in++ {
-			found := false
-			if rawNext < 0 {
-				update := tagUpdates[tagUpdateIndices[idx]]
-				for _, pu := range update.PreUpdates {
-					if pu.RelativePriority == p_in {
-						tempMid := pu.NextPriority
-						for _, pu_post := range update.PostUpdates {
-							if pu_post.RelativePriority == tempMid {
-								if re.canReachPriority(d, stateAfterByte, mc.history[i], ir.CalculateContext(b, i), pu_post.NextPriority, p_out) {
-									found = true
-									break
-								}
-							}
-						}
-						if !found && re.canReachPriority(d, stateAfterByte, mc.history[i], ir.CalculateContext(b, i), tempMid, p_out) {
-							found = true
-						}
-						if found {
-							break
-						}
-					}
-				}
-			} else {
-				if re.canReachPriority(d, stateAfterByte, mc.history[i], ir.CalculateContext(b, i), p_in, p_out) {
-					found = true
-				}
-			}
-
-			if found {
-				bestPIn = p_in
-				break
-			}
-		}
-		pathPrios[charStart-start] = bestPIn
-		i = charStart
-	}
-
-	// Step 2: Apply tags along the found priority path.
-	p := pathPrios[0]
-
-	// StartUpdates
-	for _, u := range d.StartUpdates() {
-		if u.NextPriority == p {
-			applyTags(u.Tags, start, regs)
-			break
-		}
-	}
-
-	// Initial anchors at start
-	initialState := d.SearchState()
-	if re.anchorStart {
-		initialState = d.MatchState()
-	}
-	p = re.followPathAnchors(d, initialState, mc.history[start], ir.CalculateContext(b, start), start, regs, p)
-
-	for i := start; i < end; {
-		byteVal := b[i]
-		prevState := mc.history[i]
-		idx := (int(prevState&ir.StateIDMask) << 8) | int(byteVal)
-		rawNext := trans[idx]
-		stateAfterByte := rawNext & ir.StateIDMask
-
-		// Determine the next character's start position
-		nextI := i + 1
-		if (rawNext & ir.WarpStateFlag) != 0 {
-			skip := bits.LeadingZeros8(^byteVal) - 1
-			if skip < 0 {
-				skip = 0
-			}
-			nextI = i + 1 + skip
-		}
-		if nextI > end {
-			nextI = end
-		}
-
-		p_next_target := pathPrios[nextI-start]
-
-		if rawNext < 0 {
-			update := tagUpdates[tagUpdateIndices[idx]]
-			for _, pu_pre := range update.PreUpdates {
-				if pu_pre.RelativePriority == p {
-					p_mid := pu_pre.NextPriority
-					found := false
-					for _, pu_post := range update.PostUpdates {
-						if pu_post.RelativePriority == p_mid {
-							p_after_byte := pu_post.NextPriority
-							if re.canReachPriority(d, stateAfterByte, mc.history[nextI], ir.CalculateContext(b, nextI), p_after_byte, p_next_target) {
-								applyTags(pu_pre.Tags, i, regs)
-								applyTags(pu_post.Tags, nextI, regs)
-								p = re.followPathAnchors(d, stateAfterByte, mc.history[nextI], ir.CalculateContext(b, nextI), nextI, regs, p_after_byte)
-								found = true
-								break
-							}
-						}
-					}
-					if !found && re.canReachPriority(d, stateAfterByte, mc.history[nextI], ir.CalculateContext(b, nextI), p_mid, p_next_target) {
-						applyTags(pu_pre.Tags, i, regs)
-						p = re.followPathAnchors(d, stateAfterByte, mc.history[nextI], ir.CalculateContext(b, nextI), nextI, regs, p_mid)
-						found = true
-					}
-					if found {
-						break
-					}
-				}
-			}
-		} else {
-			p = re.followPathAnchors(d, stateAfterByte, mc.history[nextI], ir.CalculateContext(b, nextI), nextI, regs, p)
-		}
-		i = nextI
-	}
-
-	// Final MatchTags
-	for _, u := range d.MatchUpdates(mc.history[end]) {
-		if u.RelativePriority == pathPrios[end-start] {
-			applyTags(u.Tags, end, regs)
-			break
-		}
-	}
-}
-
-func (re *Regexp) canReachPriority(d *ir.DFA, fromState, toState ir.StateID, context syntax.EmptyOp, p_in, p_out int32) bool {
-	if fromState == toState {
-		return p_in == p_out
-	}
-	tagUpdates := d.TagUpdates()
-	anchorTagUpdateIndices := d.AnchorTagUpdateIndices()
-	s := fromState
-	p := p_in
-	for iter := 0; iter < 6; iter++ {
-		changed := false
-		for bit := 0; bit < 6; bit++ {
-			if (context & (1 << uint(bit))) != 0 {
-				rawNext := d.AnchorNext(s, bit)
-				if rawNext != ir.InvalidState {
-					nextID := rawNext & ir.StateIDMask
-					if nextID != s {
-						if rawNext < 0 {
-							update := tagUpdates[anchorTagUpdateIndices[int(s)*6+bit]]
-							found := false
-							for _, pu := range update.PreUpdates {
-								if pu.RelativePriority == p {
-									p = pu.NextPriority
-									found = true
-									break
-								}
-							}
-							if !found {
-								return false
-							}
-						}
-						s = nextID
-						changed = true
-					}
-				}
-			}
-		}
-		if !changed {
-			break
-		}
-	}
-	return s == toState && p == p_out
-}
-
-func (re *Regexp) followPathAnchors(d *ir.DFA, fromState, toState ir.StateID, context syntax.EmptyOp, pos int, regs []int, p_in int32) int32 {
-	if (fromState & ir.StateIDMask) == (toState & ir.StateIDMask) {
-		return p_in
-	}
-	tagUpdates := d.TagUpdates()
-	anchorTagUpdateIndices := d.AnchorTagUpdateIndices()
-	s := fromState & ir.StateIDMask
-	p := p_in
-	for iter := 0; iter < 6; iter++ {
-		changed := false
-		for bit := 0; bit < 6; bit++ {
-			if (context & (1 << uint(bit))) != 0 {
-				idx := int(s)*6 + bit
-				rawNext := d.AnchorNext(s, bit)
-				if rawNext != ir.InvalidState {
-					nextID := rawNext & ir.StateIDMask
-					if rawNext < 0 {
-						update := tagUpdates[anchorTagUpdateIndices[idx]]
-						for _, pu := range update.PreUpdates {
-							if pu.RelativePriority == p {
-								applyTags(pu.Tags, pos, regs)
-								p = pu.NextPriority
-								break
-							}
-						}
-					}
-					if nextID != s {
-						s = nextID
-						changed = true
-						if s == (toState & ir.StateIDMask) {
-							return p
-						}
-					}
-				}
-			}
-		}
-		if !changed {
-			break
-		}
-	}
-	return p
-}
-
-func applyTags(t uint64, pos int, regs []int) {
-	for t != 0 {
-		i := bits.TrailingZeros64(t)
-		if i < len(regs) {
-			regs[i] = pos
-		}
-		t &= ^(uint64(1) << i)
-	}
-}
-
-func (re *Regexp) applyContextToState(d *ir.DFA, state ir.StateID, context syntax.EmptyOp, pos int, currentPrio *int, targetPrio int) ir.StateID {
-	if state == ir.InvalidState || context == 0 {
-		return state
-	}
-	tagUpdates := d.TagUpdates()
-	anchorTagUpdateIndices := d.AnchorTagUpdateIndices()
-	s := state & ir.StateIDMask
-	flags := state & ^ir.StateIDMask
-	for iter := 0; iter < 6; iter++ {
-		changed := false
-		for bit := 0; bit < 6; bit++ {
-			if (context & (1 << uint(bit))) != 0 {
-				idx := int(s)*6 + bit
-				rawNext := d.AnchorNext(s, bit)
-				if rawNext != ir.InvalidState {
-					nextID := rawNext & ir.StateIDMask
-					if rawNext < 0 {
-						update := tagUpdates[anchorTagUpdateIndices[idx]]
-						if currentPrio != nil {
-							*currentPrio += int(update.BasePriority)
-						}
-					}
-					if nextID != s {
-						s = nextID
-						changed = true
-					}
-				}
-			}
-		}
-		if !changed {
-			break
-		}
-	}
-	return s | flags
 }
 
 func submatchExecLoop[T loopTrait](trait T, re *Regexp, b []byte, mc *matchContext) (int, int, int) {
