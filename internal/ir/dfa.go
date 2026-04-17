@@ -251,21 +251,21 @@ func (d *DFA) StateToMask(s StateID) uint64 {
 }
 
 type BitParallelDFA struct {
-	CharMasks        [256]uint64
-	AnchorMasks      [6]uint64
-	ContextMasks     [64]uint64
-	SuccessorTable   [8][256]uint64
-	MatchMask        uint64
-	MatchMasks       [64]uint64
-	StartMasks       [64]uint64
-	CaptureMasks     [128]uint64 // 2 * numSubexp masks
-	IsNonGreedy      bool
-	AltMatchMasks    uint64     // For InstAlt: bit i is set if Alt is prioritized (standard greedy)
-	EpsilonMasks     [64]uint64 // [inst_idx] -> closure of non-epsilon instructions
-	PreEpsilonMasks  [64]uint64 // [inst_idx] -> epsilon closure BEFORE consuming a byte
-	PostEpsilonMasks [64]uint64 // [inst_idx] -> epsilon closure AFTER consuming a byte
-	ContextEpsMask   [64]uint64 // [context] -> union of closures for all anchors active in context
-	ReachableToMatch uint64     // Bitmask of NFA states that can reach InstMatch
+	CharMasks         [256]uint64
+	AnchorMasks       [6]uint64
+	ContextMasks      [64]uint64
+	SuccessorTable    [8][256]uint64
+	MatchMask         uint64
+	MatchMasks        [64]uint64
+	StartMasks        [64]uint64
+	CaptureMasks      [128]uint64 // 2 * numSubexp masks
+	IsNonGreedy       bool
+	AltMatchMasks     uint64     // For InstAlt: bit i is set if Alt is prioritized (standard greedy)
+	EpsilonMasks      [64]uint64 // [inst_idx] -> closure of non-epsilon instructions
+	PreEpsilonMasks   [64]uint64 // [inst_idx] -> epsilon closure BEFORE consuming a byte
+	ContextEpsMask    [64]uint64 // [context] -> union of closures for all anchors active in context
+	ReachableToMatch  uint64     // Bitmask of NFA states that can reach InstMatch
+	ReverseSuccessors [64]uint64 // [target_bit] -> bitmask of source bits j such that target_bit in successors[j]
 }
 
 func (bp *BitParallelDFA) HasAnchors() bool {
@@ -510,6 +510,14 @@ func NewBitParallelDFA(prog *syntax.Prog) *BitParallelDFA {
 		}
 	}
 
+	for i, s := range successors {
+		for bit := 0; bit < 64; bit++ {
+			if (s & (1 << uint(bit))) != 0 {
+				bp.ReverseSuccessors[bit] |= (1 << uint(i))
+			}
+		}
+	}
+
 	for t := 0; t < 8; t++ {
 		for byteVal := 0; byteVal < 256; byteVal++ {
 			var union uint64
@@ -562,18 +570,46 @@ func NewBitParallelDFA(prog *syntax.Prog) *BitParallelDFA {
 		bp.ContextEpsMask[c] = contextClosure
 	}
 
+	// Backward epsilon closure calculation for submatch extraction.
+	// bp.PreEpsilonMasks[i] will contain all instructions j such that there is an
+	// epsilon-only path from j to i.
+	reverseEpsilon := make([]uint64, len(prog.Inst))
+	for i, inst := range prog.Inst {
+		switch inst.Op {
+		case syntax.InstAlt, syntax.InstAltMatch:
+			reverseEpsilon[int(inst.Out)] |= (1 << uint(i))
+			reverseEpsilon[int(inst.Arg)] |= (1 << uint(i))
+		case syntax.InstCapture, syntax.InstNop:
+			reverseEpsilon[int(inst.Out)] |= (1 << uint(i))
+		case syntax.InstEmptyWidth:
+			reverseEpsilon[int(inst.Out)] |= (1 << uint(i))
+		}
+	}
+
+	for i := 0; i < len(prog.Inst); i++ {
+		visited := uint64(1 << uint(i))
+		queue := make([]int, 0, 64)
+		queue = append(queue, i)
+		for len(queue) > 0 {
+			curr := queue[0]
+			queue = queue[1:]
+
+			prevs := reverseEpsilon[curr]
+			for j := 0; j < len(prog.Inst); j++ {
+				if (prevs & (1 << uint(j))) != 0 {
+					if (visited & (1 << uint(j))) == 0 {
+						visited |= (1 << uint(j))
+						queue = append(queue, j)
+					}
+				}
+			}
+		}
+		bp.PreEpsilonMasks[i] = visited
+	}
+
 	for i := 0; i < len(prog.Inst); i++ {
 		bp.EpsilonMasks[i] = epsilonClosureWithContext(i, 0, false)
-		// Pre: closure from i until we MUST consume a byte.
-		bp.PreEpsilonMasks[i] = epsilonClosureWithContext(i, 0, true)
-
-		// Post: closure AFTER consuming a byte.
-		// We use the successors of the non-epsilon state i.
-		if prog.Inst[i].Op != syntax.InstMatch && !isEpsilon(prog.Inst[i].Op) {
-			bp.PostEpsilonMasks[i] = epsilonClosureWithContext(int(prog.Inst[i].Out), 0, true)
-		}
-
-		if (bp.PreEpsilonMasks[i] & bp.MatchMask) != 0 {
+		if (epsilonClosureWithContext(i, 0, true) & bp.MatchMask) != 0 {
 			bp.ReachableToMatch |= (1 << uint(i))
 		}
 	}

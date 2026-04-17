@@ -851,22 +851,26 @@ func (re *Regexp) bitParallelForwardRecap(b []byte, mc *matchContext, start, end
 		return
 	}
 
-	charMasks := &bp.CharMasks
-	table := &bp.SuccessorTable
+	// Step 1: Filter history backwards to ensure we only follow paths that reach the match at 'end'.
+	ctxEnd := ir.CalculateContext(b, end)
+	mc.bpHistory[end] &= bp.MatchMasks[ctxEnd]
+	for i := end - 1; i >= start; i-- {
+		// A state at i can reach match if it matches b[i] and reaches a state at i+1 that reached match.
+		matchedAtI := mc.bpHistory[i] & bp.CharMasks[b[i]]
 
-	ctx := ir.CalculateContext(b, start)
-	state := bp.StartMasks[ctx]
-
-	for i := start; i <= end; i++ {
-		// intersection with history filters to ONLY the winning path.
-		active := state & mc.bpHistory[i]
-
-		winnerCandidates := active & bp.ReachableToMatch
-		winningBit := bits.TrailingZeros64(winnerCandidates)
-		if winningBit >= 64 {
-			winningBit = bits.TrailingZeros64(active)
+		var canReachNext uint64
+		hNext := mc.bpHistory[i+1]
+		for bit := 0; bit < 64; bit++ {
+			if (hNext & (1 << uint(bit))) != 0 {
+				canReachNext |= bp.ReverseSuccessors[bit]
+			}
 		}
+		mc.bpHistory[i] = matchedAtI & canReachNext
+	}
 
+	// Step 2: Forward pass through the filtered history.
+	for i := start; i <= end; i++ {
+		winningBit := bits.TrailingZeros64(mc.bpHistory[i])
 		if winningBit < 64 {
 			preClosure := bp.PreEpsilonMasks[winningBit]
 			for c := 0; c < len(regs); c++ {
@@ -881,43 +885,5 @@ func (re *Regexp) bitParallelForwardRecap(b []byte, mc *matchContext, start, end
 				}
 			}
 		}
-
-		if i == end {
-			break
-		}
-
-		if winningBit >= 64 {
-			break
-		}
-
-		// Follow the winning bit
-		matched := (1 << uint(winningBit)) & charMasks[b[i]]
-		if matched == 0 {
-			matched = active & charMasks[b[i]]
-		}
-
-		if winningBit < 64 {
-			postClosure := bp.PostEpsilonMasks[winningBit]
-			for c := 0; c < len(regs); c++ {
-				if (postClosure & bp.CaptureMasks[c]) != 0 {
-					if c%2 == 0 { // Start tag
-						if regs[c] == -1 {
-							regs[c] = i + 1
-						}
-					} else { // End tag
-						regs[c] = i + 1
-					}
-				}
-			}
-		}
-
-		state = table[0][matched&0xff] |
-			table[1][(matched>>8)&0xff] |
-			table[2][(matched>>16)&0xff] |
-			table[3][(matched>>24)&0xff] |
-			table[4][(matched>>32)&0xff] |
-			table[5][(matched>>40)&0xff] |
-			table[6][(matched>>48)&0xff] |
-			table[7][(matched>>56)&0xff]
 	}
 }
