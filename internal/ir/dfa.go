@@ -195,6 +195,7 @@ type DFA struct {
 	hasAnchors             bool
 	usedAnchors            syntax.EmptyOp
 	numSubexp              int
+	Naked                  bool
 	stateIsSearch          []bool
 	maskStride             int
 	stateToMask            []uint64
@@ -377,10 +378,10 @@ type dfaStateKey struct {
 const SearchRestartPenalty = 1000000
 
 func NewDFA(prog *syntax.Prog) (*DFA, error) {
-	return NewDFAWithMemoryLimit(context.Background(), prog, MaxDFAMemory)
+	return NewDFAWithMemoryLimit(context.Background(), prog, MaxDFAMemory, false)
 }
-func NewDFAWithMemoryLimit(ctx context.Context, prog *syntax.Prog, maxMemory int) (*DFA, error) {
-	d := &DFA{numSubexp: prog.NumCap / 2, maxInst: len(prog.Inst)}
+func NewDFAWithMemoryLimit(ctx context.Context, prog *syntax.Prog, maxMemory int, naked bool) (*DFA, error) {
+	d := &DFA{numSubexp: prog.NumCap / 2, maxInst: len(prog.Inst), Naked: naked}
 	if err := d.checkCompatibility(prog); err != nil {
 		return nil, err
 	}
@@ -627,14 +628,16 @@ type closureResult struct {
 	updates     []PathTagUpdate
 }
 
-func hashSet(set []NFAPath) [2]uint64 {
+func hashSet(set []NFAPath, naked bool) [2]uint64 {
 	if len(set) == 0 {
 		return [2]uint64{0, 0}
 	}
 	minP := set[0].Priority
-	for i := 1; i < len(set); i++ {
-		if set[i].Priority < minP {
-			minP = set[i].Priority
+	if !naked {
+		for i := 1; i < len(set); i++ {
+			if set[i].Priority < minP {
+				minP = set[i].Priority
+			}
 		}
 	}
 
@@ -652,16 +655,18 @@ func hashSet(set []NFAPath) [2]uint64 {
 		h2 ^= uint64(s.NodeID)
 		h2 *= 1000003
 
-		prio := uint64(uint32(s.Priority - minP))
-		h1 ^= prio
-		h1 *= 1099511628211
-		h2 ^= prio
-		h2 *= 1000003
+		if !naked {
+			prio := uint64(uint32(s.Priority - minP))
+			h1 ^= prio
+			h1 *= 1099511628211
+			h2 ^= prio
+			h2 *= 1000003
 
-		h1 ^= s.Tags
-		h1 *= 1099511628211
-		h2 ^= s.Tags
-		h2 *= 1000003
+			h1 ^= s.Tags
+			h1 *= 1099511628211
+			h2 ^= s.Tags
+			h2 *= 1000003
+		}
 	}
 	return [2]uint64{h1, h2}
 }
@@ -827,14 +832,16 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 			return closureResult{}
 		}
 		minP := paths[0].Priority
-		for i := 1; i < len(paths); i++ {
-			if paths[i].Priority < minP {
-				minP = paths[i].Priority
+		if !d.Naked {
+			for i := 1; i < len(paths); i++ {
+				if paths[i].Priority < minP {
+					minP = paths[i].Priority
+				}
 			}
 		}
-		key := closureCacheKey{hashSet(paths), context}
+		key := closureCacheKey{hashSet(paths, d.Naked), context}
 		if res, ok := closureCache[key]; ok {
-			if minP == 0 {
+			if minP == 0 || d.Naked {
 				return res
 			}
 			newClosure := make([]NFAPath, len(res.nextClosure))
@@ -849,8 +856,12 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 		}
 
 		normPaths := make([]NFAPath, len(paths))
-		for i, p := range paths {
-			normPaths[i] = NFAPath{NFAState: NFAState{ID: p.ID, NodeID: p.NodeID}, Priority: p.Priority - minP, Tags: p.Tags}
+		if d.Naked {
+			copy(normPaths, paths)
+		} else {
+			for i, p := range paths {
+				normPaths[i] = NFAPath{NFAState: NFAState{ID: p.ID, NodeID: p.NodeID}, Priority: p.Priority - minP, Tags: p.Tags}
+			}
 		}
 		nextClosure, updates := epsilonClosureWithPathTags(normPaths, prog, context, d.nodes)
 		res := closureResult{nextClosure, updates}
@@ -864,7 +875,7 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 		}
 		closureCache[key] = res
 
-		if minP == 0 {
+		if minP == 0 || d.Naked {
 			return res
 		}
 		denormClosure := make([]NFAPath, len(nextClosure))
@@ -882,7 +893,7 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 	usedMemory := 0
 	checkMem := func(bytes int) error {
 		usedMemory += bytes
-		if usedMemory > maxMemory {
+		if usedMemory > maxMemory && !d.Naked {
 			return ErrStateExplosion
 		}
 		return nil
@@ -893,7 +904,7 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 			return InvalidState
 		}
 
-		if len(closure) > 0 {
+		if len(closure) > 0 && !d.Naked {
 			minP := closure[0].Priority
 			for i := 1; i < len(closure); i++ {
 				if closure[i].Priority < minP {
@@ -913,12 +924,15 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 			if closure[i].NodeID != closure[j].NodeID {
 				return closure[i].NodeID < closure[j].NodeID
 			}
+			if d.Naked {
+				return false
+			}
 			if closure[i].Priority != closure[j].Priority {
 				return closure[i].Priority < closure[j].Priority
 			}
 			return closure[i].Tags < closure[j].Tags
 		})
-		key := dfaStateKey{hashSet(closure), isSearch}
+		key := dfaStateKey{hashSet(closure, d.Naked), isSearch}
 		if id, ok := nfaToDfa[key]; ok {
 			return id
 		}
@@ -1229,7 +1243,7 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 					anchorPaths = currentClosure
 				}
 				nextRes := getCachedClosure(anchorPaths, op)
-				if len(nextRes.nextClosure) == 0 || hashSet(nextRes.nextClosure) == hashSet(currentClosure) {
+				if len(nextRes.nextClosure) == 0 || hashSet(nextRes.nextClosure, d.Naked) == hashSet(currentClosure, d.Naked) {
 					continue
 				}
 				minP := nextRes.nextClosure[0].Priority

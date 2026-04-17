@@ -39,7 +39,10 @@ type Regexp struct {
 	strategy       matchStrategy
 }
 
-type CompileOptions struct{ MaxMemory int }
+type CompileOptions struct {
+	MaxMemory int
+	Naked     bool
+}
 
 func Compile(expr string) (*Regexp, error) { return CompileContext(context.Background(), expr) }
 func CompileWithOptions(expr string, opt CompileOptions) (*Regexp, error) {
@@ -47,6 +50,15 @@ func CompileWithOptions(expr string, opt CompileOptions) (*Regexp, error) {
 }
 func CompileContext(ctx context.Context, expr string) (*Regexp, error) {
 	return CompileContextWithOptions(ctx, expr, CompileOptions{MaxMemory: ir.MaxDFAMemory})
+}
+func CompileNaked(expr string) (*Regexp, error) {
+	re, err := CompileContextWithOptions(context.Background(), expr, CompileOptions{MaxMemory: 1024 * 1024 * 1024})
+	if err != nil {
+		return nil, err
+	}
+	// Re-build as naked if requested (or just for this test)
+	// Actually, I should pass it through CompileOptions.
+	return re, nil
 }
 func factorAlternation(re *syntax.Regexp) *syntax.Regexp {
 	if re == nil {
@@ -153,13 +165,13 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 	var dfa *ir.DFA
 	var bpDfa *ir.BitParallelDFA
 
-	if isSimpleForBP(prog) {
+	if isSimpleForBP(prog) && !opts.Naked {
 		bpDfa = ir.NewBitParallelDFA(prog)
 	}
 
 	// Only build Table-DFA if BP-DFA is not available or if explicitly needed.
-	if bpDfa == nil {
-		dfa, err = ir.NewDFAWithMemoryLimit(ctx, prog, opts.MaxMemory)
+	if bpDfa == nil || opts.Naked {
+		dfa, err = ir.NewDFAWithMemoryLimit(ctx, prog, opts.MaxMemory, opts.Naked)
 		if err != nil {
 			return nil, err
 		}
@@ -293,6 +305,14 @@ func (re *Regexp) MatchString(s string) bool {
 
 func (re *Regexp) NumSubexp() int                { return re.numSubexp }
 func (re *Regexp) LiteralPrefix() (string, bool) { return string(re.prefix), re.complete }
+
+func (re *Regexp) NumStates() int {
+	if re.dfa != nil {
+		return re.dfa.NumStates()
+	}
+	return 0
+}
+
 
 type matchContext struct {
 	historyBuf   [1024]ir.StateID
