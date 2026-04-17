@@ -892,13 +892,6 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 		if errBuild != nil {
 			return InvalidState
 		}
-		// Estimate memory for this state (transitions, tags, masks, etc.)
-		// 256 * 4 (transitions) + 256 * 4 (tag indices) + masks + other properties
-		stateMem := 256*4 + 256*4 + d.maskStride*8 + 64
-		if err := checkMem(stateMem); err != nil {
-			errBuild = err
-			return InvalidState
-		}
 
 		if len(closure) > 0 {
 			minP := closure[0].Priority
@@ -929,12 +922,22 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 		if id, ok := nfaToDfa[key]; ok {
 			return id
 		}
-		if d.numStates >= 1000000 { // Increased limit, rely on checkMem instead
+
+		// New state: charge memory
+		stateMem := 256*4 + 256*4 + d.maskStride*8 + 128
+		if err := checkMem(stateMem); err != nil {
+			errBuild = err
+			return InvalidState
+		}
+
+		if d.numStates >= 1000000 {
 			errBuild = fmt.Errorf("regexp: pattern too large or ambiguous (state limit exceeded)")
 			return InvalidState
 		}
 		id := StateID(d.numStates)
 		nfaToDfa[key] = id
+		if d.numStates%100 == 0 {
+		}
 		if err := checkMem(64); err != nil { // Map entry overhead
 			errBuild = err
 			return InvalidState
@@ -1659,14 +1662,18 @@ type PathTagUpdate struct {
 }
 
 func epsilonClosureWithPathTags(paths []NFAPath, prog *syntax.Prog, context syntax.EmptyOp, nodes []*UTF8Node) ([]NFAPath, []PathTagUpdate) {
-	// Multiplex states using (NFA ID, NodeID, Priority, Tags) as a unique key
-	type key struct {
-		ID       uint32
-		NodeID   uint32
-		Priority int32
-		Tags     uint64
+	// minPriority tracks the best priority reached for each (NFA ID, NodeID).
+	type stateKey struct {
+		ID     uint32
+		NodeID uint32
 	}
-	visited := make(map[key]bool)
+	minPriority := make(map[stateKey]int32)
+	for _, p := range paths {
+		key := stateKey{p.ID, p.NodeID}
+		if prio, ok := minPriority[key]; !ok || p.Priority < prio {
+			minPriority[key] = p.Priority
+		}
+	}
 
 	type pathWithNewTags struct {
 		p          NFAPath
@@ -1679,65 +1686,104 @@ func epsilonClosureWithPathTags(paths []NFAPath, prog *syntax.Prog, context synt
 	}
 
 	var updates []PathTagUpdate
-	var resultPaths []NFAPath
+	// resultPathsMap handles multiplexing: (ID, NodeID, Tags) -> NFAPath
+	type resultMapKey struct {
+		ID     uint32
+		NodeID uint32
+		Tags   uint64
+	}
+	resultPathsMap := make(map[resultMapKey]NFAPath)
 
 	for len(stack) > 0 {
 		ph := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
 		p := ph.p
-		k := key{p.ID, p.NodeID, p.Priority, p.Tags}
+
+		key := stateKey{p.ID, p.NodeID}
+		if p.Priority > minPriority[key] {
+			// This path is a loser; it can never win against a higher priority path reaching this state.
+			continue
+		}
 
 		// Non-epsilon state or anchor that didn't match.
 		if p.NodeID != 0 || !isEpsilon(prog.Inst[p.ID].Op) {
-			// DFA priority = NFA priority * (MaxInst + 1) + NFA ID
-			// This ensures every NFA path in the DFA state has a UNIQUE priority.
-			dfaPrio := p.Priority*int32(len(prog.Inst)+1) + int32(p.ID)
+			rk := resultMapKey{p.ID, p.NodeID, p.Tags}
+			if existing, ok := resultPathsMap[rk]; !ok || p.Priority < existing.Priority {
+				resultPathsMap[rk] = p
+			}
 
 			updates = append(updates, PathTagUpdate{
 				RelativePriority: ph.sourcePrio,
-				NextPriority:     dfaPrio,
+				NextPriority:     p.Priority,
 				Tags:             ph.newTags,
 			})
-			if !visited[k] {
-				p_dfa := p
-				p_dfa.Priority = dfaPrio
-				resultPaths = append(resultPaths, p_dfa)
-			}
 		}
-
-		if visited[k] {
-			continue
-		}
-		visited[k] = true
 
 		if p.NodeID == 0 {
 			inst := prog.Inst[p.ID]
 			switch inst.Op {
 			case syntax.InstAlt, syntax.InstAltMatch:
-				nextPrio := p.Priority + 1
-				if nextPrio > 1000 {
-					nextPrio = 1000
+				nextPrio := p.Priority // In our model, Alt doesn't always increase priority, it's about path order.
+				// But to distinguish paths from the SAME start, we use the original logic if needed.
+				// However, for DFA, we only care about the winning path.
+
+				// Standard greedy: Out (loop/next) is higher priority than Arg (alternative).
+				// We keep the original order: ph.p.Out, then ph.p.Arg.
+
+				// Arg path (lower priority)
+				argPrio := nextPrio + 1
+				argKey := stateKey{inst.Arg, 0}
+				if m, ok := minPriority[argKey]; !ok || argPrio < m {
+					minPriority[argKey] = argPrio
+					stack = append(stack, pathWithNewTags{NFAPath{NFAState: NFAState{ID: inst.Arg, NodeID: 0}, Priority: argPrio, Tags: p.Tags}, ph.newTags, ph.sourcePrio})
+				} else if argPrio == m {
+					stack = append(stack, pathWithNewTags{NFAPath{NFAState: NFAState{ID: inst.Arg, NodeID: 0}, Priority: argPrio, Tags: p.Tags}, ph.newTags, ph.sourcePrio})
 				}
-				stack = append(stack, pathWithNewTags{NFAPath{NFAState: NFAState{ID: inst.Arg, NodeID: 0}, Priority: nextPrio, Tags: p.Tags}, ph.newTags, ph.sourcePrio})
-				stack = append(stack, pathWithNewTags{NFAPath{NFAState: NFAState{ID: inst.Out, NodeID: 0}, Priority: p.Priority, Tags: p.Tags}, ph.newTags, ph.sourcePrio})
+
+				// Out path (higher priority)
+				outPrio := nextPrio
+				outKey := stateKey{inst.Out, 0}
+				if m, ok := minPriority[outKey]; !ok || outPrio < m {
+					minPriority[outKey] = outPrio
+					stack = append(stack, pathWithNewTags{NFAPath{NFAState: NFAState{ID: inst.Out, NodeID: 0}, Priority: outPrio, Tags: p.Tags}, ph.newTags, ph.sourcePrio})
+				} else if outPrio == m {
+					stack = append(stack, pathWithNewTags{NFAPath{NFAState: NFAState{ID: inst.Out, NodeID: 0}, Priority: outPrio, Tags: p.Tags}, ph.newTags, ph.sourcePrio})
+				}
 				continue
 			case syntax.InstCapture:
 				tagBit := uint64(0)
 				if inst.Arg < 64 {
 					tagBit = (1 << inst.Arg)
 				}
-				stack = append(stack, pathWithNewTags{NFAPath{NFAState: NFAState{ID: inst.Out, NodeID: 0}, Priority: p.Priority, Tags: p.Tags | tagBit}, ph.newTags | tagBit, ph.sourcePrio})
+				nextKey := stateKey{inst.Out, 0}
+				if m, ok := minPriority[nextKey]; !ok || p.Priority <= m {
+					minPriority[nextKey] = p.Priority
+					stack = append(stack, pathWithNewTags{NFAPath{NFAState: NFAState{ID: inst.Out, NodeID: 0}, Priority: p.Priority, Tags: p.Tags | tagBit}, ph.newTags | tagBit, ph.sourcePrio})
+				}
 				continue
 			case syntax.InstNop:
-				stack = append(stack, pathWithNewTags{NFAPath{NFAState: NFAState{ID: inst.Out, NodeID: 0}, Priority: p.Priority, Tags: p.Tags}, ph.newTags, ph.sourcePrio})
+				nextKey := stateKey{inst.Out, 0}
+				if m, ok := minPriority[nextKey]; !ok || p.Priority <= m {
+					minPriority[nextKey] = p.Priority
+					stack = append(stack, pathWithNewTags{NFAPath{NFAState: NFAState{ID: inst.Out, NodeID: 0}, Priority: p.Priority, Tags: p.Tags}, ph.newTags, ph.sourcePrio})
+				}
 				continue
 			case syntax.InstEmptyWidth:
 				if syntax.EmptyOp(inst.Arg)&context == syntax.EmptyOp(inst.Arg) {
-					stack = append(stack, pathWithNewTags{NFAPath{NFAState: NFAState{ID: inst.Out, NodeID: 0}, Priority: p.Priority, Tags: p.Tags}, ph.newTags, ph.sourcePrio})
+					nextKey := stateKey{inst.Out, 0}
+					if m, ok := minPriority[nextKey]; !ok || p.Priority <= m {
+						minPriority[nextKey] = p.Priority
+						stack = append(stack, pathWithNewTags{NFAPath{NFAState: NFAState{ID: inst.Out, NodeID: 0}, Priority: p.Priority, Tags: p.Tags}, ph.newTags, ph.sourcePrio})
+					}
 				}
 				continue
 			}
 		}
+	}
+
+	var resultPaths []NFAPath
+	for _, p := range resultPathsMap {
+		resultPaths = append(resultPaths, p)
 	}
 
 	minTotalPrio := int32(1 << 30)
@@ -1768,17 +1814,6 @@ func epsilonClosureWithPathTags(paths []NFAPath, prog *syntax.Prog, context synt
 		}
 		return resultPaths[i].Tags < resultPaths[j].Tags
 	})
-
-	// Unique paths: for each (ID, NodeID), keep only the one with the highest priority (min Priority).
-	if len(resultPaths) > 0 {
-		unique := resultPaths[:0]
-		for i := 0; i < len(resultPaths); i++ {
-			if i == 0 || resultPaths[i].ID != resultPaths[i-1].ID || resultPaths[i].NodeID != resultPaths[i-1].NodeID {
-				unique = append(unique, resultPaths[i])
-			}
-		}
-		resultPaths = unique
-	}
 
 	if len(updates) > 1 {
 		sort.Slice(updates, func(i, j int) bool {
