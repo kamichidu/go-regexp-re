@@ -21,8 +21,8 @@ A specialized execution path for small patterns using `uint64` bit vectors to ac
 === 3. xref:algorithm/guarded-simd-warp.adoc[Anchor-Aware Guarded SIMD Warp]
 A speculative SIMD skipping logic designed to maintain high-speed scanning even in the presence of anchors.
 
-=== 4. xref:algorithm/2-pass-dfa-hybrid.adoc[DFA-First Hybrid (2-Pass Strategy)]
-A deterministic strategy that reconciles DFA scanning performance with the precise submatch extraction required by the Go standard library.
+=== 4. xref:algorithm/3-pass-sparse-tdfa.adoc[3-Pass Sparse TDFA (Next-Gen Strategy)]
+A deterministic 3-pass strategy that physically separates DFA scanning from submatch extraction to eliminate state explosion while maintaining Go-compatible precision.
 
 === 5. xref:algorithm/memory-efficient-construction.adoc[Memory-Efficient DFA Construction]
 An allocation-free and pointer-free construction algorithm designed to scale to massive pattern sets within strict memory constraints.

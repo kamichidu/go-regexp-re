@@ -31,25 +31,25 @@ To maximize throughput, the engine MUST select the most efficient execution loop
 - **Anchor-Aware Guarded SIMD Warp**: Selected for patterns with anchors. Utilizes a separate `anchorTransitions` table and **guarded warp points** to allow SIMD skipping even in the presence of anchors (e.g., `^`, `$`, `\b`).
 - **Explicit Hot-Loop Monomorphization**: To ensure zero-overhead, the engine MUST avoid Go generics (`GCShape` sharing) for the primary execution loops. Instead, it employs manually monomorphized functions (e.g., `fastExecLoop`, `extendedExecLoop`) to ensure the Go compiler can completely eliminate unreachable branches (like `if hasAnchors`) and avoid runtime dictionary lookups.
 
-### 2.5 Submatch Extraction Architecture (2-pass Sparse TDFA & 2-System BP-Recap)
-The engine follows a **2-pass Hybrid Submatch Extraction** strategy to guarantee peak performance, $O(n)$ time complexity, and 100% Go-compatible precision.
+### 2.5 Submatch Extraction Architecture (3-Pass Sparse TDFA)
+The engine follows a **3-Pass Sparse TDFA** strategy to guarantee peak performance, $O(n)$ time complexity, and 100% Go-compatible precision.
 
-- **NFA-Free Mandate**: Runtime NFA simulation, backtracking, or dynamic epsilon-closure searching is **STRICTLY PROHIBITED**. All submatch extraction logic must be deterministic and table-driven (TDFA) or bit-parallel (BP-Recap).
-- **Phase 1: High-Speed Discovery**: A single high-speed scan (DFA or BP-DFA) determines match boundaries `[start, end]` and records a history of states.
-- **Phase 2: Strategy-Specific Recap**:
-  - **BP-Recap (High-Speed)**: For compatible patterns (uniform greediness, ≤62 nodes), uses a **2-system Forward BP-Recap**. It utilizes specialized execution loops (Greedy/Non-Greedy) to deterministically follow the winning path with SIMD-accelerated literal skipping.
-  - **Deterministic Priority-Burned Recap (Table-DFA)**: For complex patterns, uses pre-calculated priority transition maps. Every submatch decision (priorities and tag updates) MUST be "burned into" the transition tables during compilation.
-- **Zero-Allocation Execution**: Both recap paths are strictly iterative and utilize stack-resident or pre-allocated buffers, ensuring zero heap allocations.
+- **NFA-Free & Calculation-Free Mandate**: Runtime NFA simulation, backtracking, or dynamic priority comparison is **STRICTLY PROHIBITED**. All submatch extraction decisions MUST be pre-calculated and "burned into" the transition tables during compilation.
+- **Pass 1: Naked Discovery**: A single high-speed scan (DFA or BP-DFA) determines match boundaries `[start, end]` and records a history of deterministic states. This pass uses a minimal DFA that excludes priority and tag information to physically block the exponential state explosion.
+- **Pass 2: Path Identity Selection**: Identifies the unique "winning NFA path" from start to end based on Go's leftmost-first rules using the recorded history.
+- **Pass 3: Group-Specific Recap**: Uses independent "burned tables" for each capturing group to determine boundaries along the winning path.
+- **Zero-Allocation Execution**: All recap paths MUST be strictly iterative and utilize stack-resident or pre-allocated buffers, ensuring zero heap allocations during execution.
 
-### 2.6 Tag-Aware Subsetting (DFA State Multiplexing)
-To achieve 100% Go compatibility without runtime NFA simulation, the DFA construction must disambiguate paths with different tag histories:
-- **State Multiplexing**: If multiple NFA paths reach the same NFA state set with the same priority but different tag update histories, the DFA builder MUST split them into distinct DFA states.
-- **Identity via State**: The resulting DFA state itself MUST uniquely identify the winning tag history for the current execution point.
+### 2.6 Physical Prevention of State Explosion (Naked State Identity)
+To achieve scalability, DFA construction (Subset Construction) employs **Naked State Identity**:
+- **Identity via NFA Set**: DFA state identity is defined purely by the NFA state set (including NodeID). Paths with different tag histories are merged into the same DFA state.
+- **Additive Memory Structure**: Limits memory usage to `O(DFA States + Σ Group Tables)`, ensuring that total memory consumption is linear relative to the number of capturing groups.
+- **Decoupled Priority**: Priority resolution is deferred to Pass 2 and is not considered during Pass 1 DFA construction.
 
-### 2.7 Static Compatibility Check
+### 2.7 Static Compatibility Check & Epsilon Cycle Rejection
 To maintain the integrity of the NFA-free architecture, the engine MUST perform a static analysis during compilation:
-- **Epsilon Cycle Rejection**: Patterns that require non-deterministic runtime logic (e.g., loops that can match empty strings like `(|a)*`) MUST be detected and rejected at compile time.
-- **Deterministic Guarantee**: Only patterns whose submatch extraction can be perfectly "burned" into a deterministic DFA are supported. If a pattern violates this, return `DFA: unsupported epsilon loop`.
+- **Epsilon Cycle Rejection**: Patterns that match empty strings in a loop (e.g., `(|a)*`), where deterministic path selection is impossible, MUST be detected and rejected at compile time.
+- **Deterministic Guarantee**: Only patterns whose submatch extraction can be perfectly "burned" into a deterministic table are supported. If a pattern violates this, return `DFA: unsupported epsilon loop`.
 
 ### 2.8 Architectural Shortcut (Compilation Efficiency)
 To minimize compilation overhead, the engine MUST use an **Architectural Shortcut** for simple patterns.
@@ -92,14 +92,7 @@ To ensure scalability to 10,000+ patterns, the DFA construction phase MUST adher
 - **Allocation-Free Minimization**: DFA minimization MUST use a hash-based approach instead of string/byte serialization to eliminate OOM risks during the final optimization phase.
 - **Aggressive Cache Eviction**: Internal build caches (e.g., `closureCache`) MUST have explicit size limits and eviction policies to prevent unbounded memory growth during complex pattern compilation.
 
-### 2.17 Zero-Overhead Execution (Manual Monomorphization Mandate)
-To achieve the goal of $O(1)$ performance per byte without hidden overhead, the engine MUST adhere to these execution principles:
-- **Avoid Runtime Generic/Interface Dispatch**: Go's current implementation of generics often uses `GCShape` sharing with runtime dictionaries, and interfaces introduce `itab` lookups. For the primary match loops (Phase 1) and submatch extraction (Phase 2), these introduce unacceptable latency. The engine MUST use specialized, non-generic, and concrete-struct-based functions for the "Literal Path", "Fast Path", and "Extended Path".
-- **Allocation-Free Rescan Strategy (Phase 2)**: For the rescan phase, the engine utilizes a stack-based approach with pre-allocated registers. By avoiding NFA thread management and heap-allocated buffers, it ensures zero GC overhead.
-- **Constant Folding of Strategy**: Branches based on pattern traits (e.g., `hasAnchors`) MUST be resolved at the function dispatch level (via `bindMatchStrategy`), ensuring the loop body itself is free of irrelevant checks.
-- **Anchor Usage Masking**: The engine MUST track `UsedAnchors` in the DFA to skip context calculation (`CalculateContext`) at positions where the specific anchors in the pattern cannot possibly match, further reducing CPU cycles.
-
-### 2.18 Proven Implementation Mandates for Maximum Throughput (Field-Proven)
+### 2.19 Proven Implementation Mandates for Maximum Throughput (Field-Proven)
 To maintain the 50%+ throughput gains achieved through empirical benchmarking, all execution logic MUST adhere to these Go-compiler-specific mandates:
 
 - **Zero-Overhead Strategy Dispatch (Switch over Closure)**: The choice of execution loop MUST be performed via a `matchStrategy (uint8)` and a flat `switch` statement in `Match` and `FindSubmatchIndex`. NEVER use function pointers or closures for the primary match loop, as indirect calls incur a 5-15% performance penalty and inhibit branch prediction.

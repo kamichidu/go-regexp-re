@@ -1,0 +1,50 @@
+= 3-Pass Sparse TDFA (Next-Gen Submatch Extraction)
+:sectnums:
+
+== Concept
+
+DFAs are traditionally poor at extracting submatches because the history of which specific NFA path was taken is lost during state merging. To achieve 100% Go standard library compatibility while maintaining extreme throughput, this project employs a **3-Pass Sparse TDFA** architecture.
+
+This strategy separates the concerns of "where is the match" (Pass 1), "which path was taken" (Pass 2), and "what is inside the match" (Pass 3) to solve the **DFA State Explosion** problem.
+
+== The Core Problem: DFA State Explosion
+In a traditional TDFA, states are split by their tag update history. For complex patterns with many capturing groups (e.g., `((a)|(b)|(c))*`), this leads to an exponential increase in the number of DFA states, often causing OOM (Out of Memory) during compilation.
+
+The 3-Pass Sparse TDFA solves this by making the memory structure **additive** (`DFA States + Group Tables`) rather than **multiplicative** (`DFA States * Tag Combinations`).
+
+== Execution Phases
+
+=== Phase 1: Naked Discovery
+* **Objective**: Find the `[start, end]` match boundaries with maximum speed.
+* **Mechanism**: Uses a **Naked DFA** where state identity is defined purely by the set of NFA states. Priority and tag information are completely ignored.
+* **Benefit**: State count is reduced from $O(2^n)$ to $O(n)$ for complex capture patterns. The DFA becomes extremely compact, leading to better L1/L2 cache hit rates.
+
+=== Phase 2: Path Identity Selection
+* **Objective**: Determine the unique "winning path" from `start` to `end` based on Go's leftmost-first rules.
+* **Mechanism**: Utilizing the `NakedState` history recorded in Phase 1, the engine performs a forward recap using NFA-set guidance to identify the priority level and path that reached the `end` position.
+* **Output**: A sequence of `PathIDs` or `Priority` transitions that guide the next phase.
+
+=== Phase 3: Group-Specific Recap
+* **Objective**: Extract capturing group registers along the confirmed winning path.
+* **Mechanism**:
+    1.  Uses **Group-Specific "Burned" Tables** that are pre-calculated during compilation.
+    2.  Each table is specialized for a single capturing group (e.g., Group 1, Group 2).
+    3.  The engine follows the `PathID` guide from Phase 2 and applies PUSH/POP commands from the tables.
+* **Efficiency**: Each group recap is a simple table-lookup loop. Because tables are separate, they don't cause state explosion in the primary DFA.
+
+== The "Additive Memory" Mandate
+A core architectural requirement of this engine is that **total memory consumption must be linear relative to the number of capturing groups**.
+
+[latexmath]
+++++
+\text{Total Memory} = \text{Size}(\text{Naked DFA}) + \sum_{i=1}^{n} \text{Size}(\text{GroupTable}_i)
+++++
+
+This ensures that even regular expressions with hundreds of capturing groups can be compiled and executed with predictable memory usage.
+
+== Advantages
+
+* **Immunity to State Explosion**: Patterns that previously caused OOM now compile in milliseconds.
+* **Strict $O(n)$ Complexity**: All three passes are linear.
+* **NFA-Free Runtime**: No runtime NFA simulation or backtracking.
+* **Priority-Burned Precision**: Maintains 100% compatibility with Go's standard matching rules.
