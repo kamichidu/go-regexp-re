@@ -329,8 +329,9 @@ func (re *Regexp) expand(dst []byte, template string, src []byte, match []int) [
 					index = re.SubexpIndex(name)
 				}
 				if index >= 0 && index*2+1 < len(match) {
-					if match[index*2] >= 0 {
-						dst = append(dst, src[match[index*2]:match[index*2+1]]...)
+					sIdx, eIdx := match[index*2], match[index*2+1]
+					if sIdx >= 0 && eIdx >= sIdx && eIdx <= len(src) {
+						dst = append(dst, src[sIdx:eIdx]...)
 					}
 				}
 			}
