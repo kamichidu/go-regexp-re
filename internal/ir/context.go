@@ -2,23 +2,19 @@ package ir
 
 import (
 	"github.com/kamichidu/go-regexp-re/syntax"
+	"unicode/utf8"
 )
 
 // CalculateContext determines the empty-width assertions (anchors) that are true at position i in byte slice b.
 func CalculateContext(b []byte, i int) syntax.EmptyOp {
 	var r1, r2 rune = -1, -1
-	if i == 0 {
-		r1 = -1
-	} else {
-		r1 = rune(b[i-1])
+	if i > 0 {
+		r1, _ = utf8.DecodeLastRune(b[:i])
 	}
-	if i == len(b) {
-		r2 = -1
-	} else {
-		r2 = rune(b[i])
+	if i < len(b) {
+		r2, _ = utf8.DecodeRune(b[i:])
 	}
-	op := CalculateContextBetween(r1, r2)
-	return op
+	return CalculateContextBetween(r1, r2)
 }
 
 // CalculateContextBetween returns the empty-width assertions that are true
@@ -47,10 +43,10 @@ func CalculateContextBetween(r1, r2 rune) syntax.EmptyOp {
 func IsWordBoundary(b []byte, i int) bool {
 	var r1, r2 rune = -1, -1
 	if i > 0 {
-		r1 = rune(b[i-1])
+		r1, _ = utf8.DecodeLastRune(b[:i])
 	}
 	if i < len(b) {
-		r2 = rune(b[i])
+		r2, _ = utf8.DecodeRune(b[i:])
 	}
 	return IsWord(r1) != IsWord(r2)
 }

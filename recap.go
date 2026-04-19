@@ -11,73 +11,41 @@ func applyTags(t uint64, pos int, regs []int) {
 	for t != 0 {
 		i := bits.TrailingZeros64(t)
 		if i < len(regs) {
-			regs[i] = pos
+			if i%2 == 0 { // Start tag: keep the FIRST one
+				if regs[i] == -1 {
+					regs[i] = pos
+				}
+			} else { // End tag: keep the LAST one
+				regs[i] = pos
+			}
 		}
 		t &= ^(uint64(1) << i)
 	}
 }
 
-func (re *Regexp) applyContextToState(d *ir.DFA, state ir.StateID, context syntax.EmptyOp, pos int, currentPrio *int, targetPrio int) ir.StateID {
-	if state == ir.InvalidState || context == 0 {
-		return state
-	}
-	s := state & ir.StateIDMask
-	flags := state & ^ir.StateIDMask
-	for iter := 0; iter < 6; iter++ {
-		changed := false
-		for bit := 0; bit < 6; bit++ {
-			if (context & (1 << uint(bit))) != 0 {
-				rawNext := d.AnchorNext(s, bit)
-				if rawNext != ir.InvalidState {
-					nextID := rawNext & ir.StateIDMask
-					if rawNext < 0 {
-						update := d.AnchorTransitionUpdate(s, bit)
-						if currentPrio != nil {
-							*currentPrio += int(update.BasePriority)
-						}
-					}
-					if nextID != s {
-						s = nextID
-						changed = true
-					}
-				}
-			}
-		}
-		if !changed {
-			break
-		}
-	}
-	return s | flags
-}
-
-func (re *Regexp) followPathAnchorsGroup(d *ir.DFA, fromState, toState ir.StateID, context syntax.EmptyOp, pos int, regs []int, p_in int32, groupIdx int) int32 {
+func (re *Regexp) followPathAnchors(d *ir.DFA, fromState, toState ir.StateID, context syntax.EmptyOp, pos int, regs []int, p_abs int32) int32 {
 	if (fromState & ir.StateIDMask) == (toState & ir.StateIDMask) {
-		return p_in
+		return p_abs
 	}
 	s := fromState & ir.StateIDMask
-	p := p_in
-	for iter := 0; iter < 6; iter++ {
+	p := p_abs
+	for iter := 0; iter < 10; iter++ {
 		changed := false
 		for bit := 0; bit < 6; bit++ {
 			if (context & (1 << uint(bit))) != 0 {
 				rawNext := d.AnchorNext(s, bit)
 				if rawNext != ir.InvalidState {
 					nextID := rawNext & ir.StateIDMask
-					if rawNext < 0 {
-						update := d.AnchorTransitionUpdate(s, bit)
-						for _, pu := range update.PreUpdates {
-							if pu.RelativePriority == p {
-								tagStart := uint32(groupIdx * 2)
-								tagEnd := tagStart + 1
-								groupTags := uint64(0)
-								if (pu.Tags & (1 << tagStart)) != 0 {
-									groupTags |= (1 << tagStart)
-								}
-								if (pu.Tags & (1 << tagEnd)) != 0 {
-									groupTags |= (1 << tagEnd)
-								}
-								applyTags(groupTags, pos, regs)
-								p = pu.NextPriority
+					idx := (int(s) << 8) | (256 + bit)
+					tables := d.RecapTables()
+					if len(tables) > 0 && idx < len(tables[0].Transitions) {
+						p_in_rel := p - d.StateMinPriority(s)
+						entries := tables[0].Transitions[idx]
+						for _, e := range entries {
+							if int32(e.InputPriority) == p_in_rel {
+								// APPLY ANCHOR TAGS AT CURRENT POSITION
+								applyTags(e.PreTags|e.PostTags, pos, regs)
+								p = int32(e.NextPriority) + d.StateMinPriority(nextID)
 								break
 							}
 						}
@@ -85,9 +53,9 @@ func (re *Regexp) followPathAnchorsGroup(d *ir.DFA, fromState, toState ir.StateI
 					if nextID != s {
 						s = nextID
 						changed = true
-						if s == (toState & ir.StateIDMask) {
-							return p
-						}
+					}
+					if s == (toState & ir.StateIDMask) {
+						return p
 					}
 				}
 			}
@@ -105,110 +73,132 @@ func (re *Regexp) sparseTDFA_Recap(mc *matchContext, b []byte, start, end, bestP
 		return
 	}
 
-	p_end := int32(bestPriority % ir.SearchRestartPenalty)
+	// Pass 2: Path Identity Selection (Backward Propagation)
+	if mc.pathHistory == nil || len(mc.pathHistory) < len(b)+1 {
+		mc.pathHistory = make([]int32, len(b)+1)
+	}
+	for j := range mc.pathHistory {
+		mc.pathHistory[j] = -1
+	}
+
+	// Absolute priority of the winning match at 'end'
+	p_abs_end := int32(bestPriority % ir.SearchRestartPenalty)
+	mc.pathHistory[end] = p_abs_end
+
 	recapTables := d.RecapTables()
 	trans := d.Transitions()
 
-	// Pass 2: Path Selection (Backward)
-	mc.pathHistory[end] = p_end
 	for i := end; i > start; {
 		charStart := i - 1
-		for charStart > start && (b[charStart]&0xC0) == 0x80 {
+		for charStart > start && (b[charStart]&0xC0) == 0x80 && mc.history[charStart] == mc.history[i-1] {
 			charStart--
 		}
-		prevState := mc.history[charStart]
 		byteVal := b[charStart]
+		prevState := mc.history[charStart]
 		idx := (int(prevState&ir.StateIDMask) << 8) | int(byteVal)
 
-		p_out := mc.pathHistory[i]
-		bestPIn := int32(1<<30 - 1)
+		p_out_abs := mc.pathHistory[i]
+		p_out_rel := p_out_abs - d.StateMinPriority(mc.history[i]&ir.StateIDMask)
 
-		for _, entry := range recapTables[0].Transitions[idx] {
-			if int32(entry.NextPriority) == p_out {
-				if int32(entry.InputPriority) < bestPIn {
-					bestPIn = int32(entry.InputPriority)
+		bestPInAbs := int32(1<<30 - 1)
+		found := false
+
+		// Attempt 1: Check recap tables
+		if len(recapTables) > 0 && idx < len(recapTables[0].Transitions) {
+			for _, entry := range recapTables[0].Transitions[idx] {
+				if int32(entry.NextPriority) == p_out_rel {
+					p_in_abs := int32(entry.InputPriority) + d.StateMinPriority(prevState&ir.StateIDMask)
+					if p_in_abs < bestPInAbs {
+						bestPInAbs = p_in_abs
+						found = true
+					}
 				}
 			}
 		}
-		mc.pathHistory[charStart] = bestPIn
-		i = charStart
-	}
-
-	// Pass 3: Forward Submatch Extraction
-	for j := 2; j < len(regs); j++ {
-		regs[j] = -1
-	}
-
-	for groupIdx := 0; groupIdx <= d.NumSubexp(); groupIdx++ {
-		p := mc.pathHistory[start]
-		for _, u := range d.StartUpdates() {
-			if u.NextPriority == p {
-				tagStart := uint32(groupIdx * 2)
-				tagEnd := tagStart + 1
-				groupTags := uint64(0)
-				if (u.Tags & (1 << tagStart)) != 0 {
-					groupTags |= (1 << tagStart)
-				}
-				if (u.Tags & (1 << tagEnd)) != 0 {
-					groupTags |= (1 << tagEnd)
-				}
-				applyTags(groupTags, start, regs)
-				break
-			}
-		}
-
-		initialState := d.SearchState()
-		if re.anchorStart {
-			initialState = d.MatchState()
-		}
-		p = re.followPathAnchorsGroup(d, initialState, mc.history[start], ir.CalculateContext(b, start), start, regs, p, groupIdx)
-
-		for i := start; i < end; {
-			byteVal := b[i]
-			prevState := mc.history[i]
-			idx := (int(prevState&ir.StateIDMask) << 8) | int(byteVal)
-
-			nextI := i + 1
-			for nextI < end && (b[nextI]&0xC0) == 0x80 {
-				nextI++
-			}
-
-			p_next_target := mc.pathHistory[nextI]
-
-			// Apply tags from recap table
-			for _, entry := range recapTables[groupIdx].Transitions[idx] {
-				if int32(entry.InputPriority) == p && int32(entry.NextPriority) == p_next_target {
-					applyTags(entry.PreTags, i, regs)
-					applyTags(entry.PostTags, nextI, regs)
-					p = int32(entry.NextPriority)
+		// Attempt 2: Comprehensive virtual search
+		if !found {
+			for p_in_rel := int32(0); p_in_rel < 2000; p_in_rel++ {
+				if d.CanReachPriority(prevState&ir.StateIDMask, mc.history[i], ir.CalculateContext(b, i), p_in_rel, p_out_rel) {
+					bestPInAbs = p_in_rel + d.StateMinPriority(prevState&ir.StateIDMask)
+					found = true
 					break
 				}
 			}
+		}
+		if found {
+			mc.pathHistory[charStart] = bestPInAbs
+		} else {
+			// If still not found, we MUST maintain connectivity.
+			// Default to state minimum priority to allow Pass 3 to continue.
+			mc.pathHistory[charStart] = d.StateMinPriority(prevState & ir.StateIDMask)
+		}
+		i = charStart
+	}
 
-			stateAfterByte := trans[idx] & ir.StateIDMask
-			p = re.followPathAnchorsGroup(d, stateAfterByte, mc.history[nextI], ir.CalculateContext(b, nextI), nextI, regs, p, groupIdx)
-			i = nextI
+	// Pass 3: Forward Submatch Extraction (Single Pass)
+	for j := 0; j < len(regs); j++ {
+		regs[j] = -1
+	}
+	regs[0], regs[1] = start, end
+
+	p := mc.pathHistory[start]
+	p_rel := p - d.StateMinPriority(mc.history[start]&ir.StateIDMask)
+	for _, u := range d.StartUpdates() {
+		if u.NextPriority == p_rel {
+			applyTags(u.Tags, start, regs)
+			break
+		}
+	}
+
+	currentState := mc.history[start]
+	p = re.followPathAnchors(d, currentState, currentState, ir.CalculateContext(b, start), start, regs, p)
+
+	for i := start; i < end; {
+		byteVal := b[i]
+		prevState := mc.history[i]
+		idx := (int(prevState&ir.StateIDMask) << 8) | int(byteVal)
+
+		// Find the true end of this character
+		nextI := i + 1
+		for nextI < end && (b[nextI]&0xC0) == 0x80 {
+			nextI++
 		}
 
-		for _, u := range d.MatchUpdates(mc.history[end]) {
-			if u.RelativePriority == mc.pathHistory[end] {
-				tagStart := uint32(groupIdx * 2)
-				tagEnd := tagStart + 1
-				groupTags := uint64(0)
-				if (u.Tags & (1 << tagStart)) != 0 {
-					groupTags |= (1 << tagStart)
+		p_next_abs := mc.pathHistory[nextI]
+		if p_next_abs == -1 {
+			p_next_abs = p
+		}
+		p_in_rel := p - d.StateMinPriority(prevState&ir.StateIDMask)
+		p_out_rel := p_next_abs - d.StateMinPriority(mc.history[nextI]&ir.StateIDMask)
+
+		if len(recapTables) > 0 && idx < len(recapTables[0].Transitions) {
+			for _, entry := range recapTables[0].Transitions[idx] {
+				if int32(entry.InputPriority) == p_in_rel && int32(entry.NextPriority) == p_out_rel {
+					// PreTags are at the START of the character transition
+					applyTags(entry.PreTags, i, regs)
+					// PostTags are at the END of the character transition
+					applyTags(entry.PostTags, nextI, regs)
+					break
 				}
-				if (u.Tags & (1 << tagEnd)) != 0 {
-					groupTags |= (1 << tagEnd)
-				}
-				applyTags(groupTags, end, regs)
-				break
 			}
+		}
+		p = p_next_abs
+
+		stateAfterByte := trans[idx] & ir.StateIDMask
+		// Anchor following from the character's END position
+		p = re.followPathAnchors(d, stateAfterByte, mc.history[nextI], ir.CalculateContext(b, nextI), nextI, regs, p)
+		i = nextI
+	}
+
+	p_final_rel := p - d.StateMinPriority(mc.history[end]&ir.StateIDMask)
+	for _, u := range d.MatchUpdates(mc.history[end]) {
+		if u.RelativePriority == p_final_rel {
+			applyTags(u.Tags, end, regs)
+			break
 		}
 	}
 }
 
 func (re *Regexp) burnedRecap(mc *matchContext, b []byte, start, end, bestPriority int, regs []int) {
-	// Fallback or legacy support
 	re.sparseTDFA_Recap(mc, b, start, end, bestPriority, regs)
 }

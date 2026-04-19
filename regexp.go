@@ -175,7 +175,6 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 		if err != nil {
 			return nil, err
 		}
-		fmt.Printf("Compiled Table-DFA: %d states\n", dfa.NumStates())
 	}
 
 	prefixState := ir.InvalidState
@@ -252,6 +251,41 @@ func isSimpleForBP(prog *syntax.Prog) bool {
 	}
 
 	return true
+}
+
+func (re *Regexp) applyContextToState(d *ir.DFA, s ir.StateID, context syntax.EmptyOp, pos int, prio *int, bestPriority int) ir.StateID {
+	for iter := 0; iter < 10; iter++ {
+		changed := false
+		currID := s & ir.StateIDMask
+		for bit := 0; bit < 6; bit++ {
+			bitMask := syntax.EmptyOp(1 << uint(bit))
+			if (context & bitMask) != 0 {
+				rawNext := d.AnchorNext(currID, bit)
+				if rawNext != ir.InvalidState {
+					nextID := rawNext & ir.StateIDMask
+					uIdx := d.AnchorTagUpdateIndices()[int(currID)*6+bit]
+					hasUpdates := false
+					if int(uIdx) < len(d.TagUpdates()) {
+						update := d.TagUpdates()[uIdx]
+						if update.BasePriority != 0 || len(update.PreUpdates) > 0 || len(update.PostUpdates) > 0 {
+							hasUpdates = true
+							*prio += int(update.BasePriority)
+						}
+					}
+					if nextID != currID || hasUpdates {
+						s = rawNext
+						currID = nextID
+						changed = true
+						context &= ^bitMask
+					}
+				}
+			}
+		}
+		if !changed {
+			break
+		}
+	}
+	return s
 }
 
 func (re *Regexp) bindMatchStrategy() {
@@ -417,14 +451,11 @@ func (re *Regexp) findSubmatchIndexInternal(b []byte, mc *matchContext, regs []i
 func submatchExecLoop[T loopTrait](trait T, re *Regexp, b []byte, mc *matchContext) (int, int, int) {
 	d := re.dfa
 	trans := d.Transitions()
-	tagUpdateIndices := d.TagUpdateIndices()
-	tagUpdates := d.TagUpdates()
 	accepting := d.Accepting()
 	numStates := d.NumStates()
 	numBytes := len(b)
 	anchorStart := re.anchorStart
 	hasAnchors := trait.HasAnchors()
-	usedAnchors := d.UsedAnchors()
 
 	bestStart, bestEnd, bestPriority := -1, -1, 1<<30-1
 
@@ -435,11 +466,7 @@ func submatchExecLoop[T loopTrait](trait T, re *Regexp, b []byte, mc *matchConte
 	prio := 0
 
 	for i := 0; i <= numBytes; {
-		if hasAnchors && ((usedAnchors&(syntax.EmptyWordBoundary|syntax.EmptyNoWordBoundary)) != 0 ||
-			(i == 0 && (usedAnchors&(syntax.EmptyBeginText|syntax.EmptyBeginLine)) != 0) ||
-			(i == numBytes && (usedAnchors&(syntax.EmptyEndText|syntax.EmptyEndLine)) != 0) ||
-			((usedAnchors&syntax.EmptyBeginLine) != 0 && i > 0 && b[i-1] == '\n') ||
-			((usedAnchors&syntax.EmptyEndLine) != 0 && i < numBytes && b[i] == '\n')) {
+		if hasAnchors {
 			state = re.applyContextToState(d, state, ir.CalculateContext(b, i), i, &prio, bestPriority)
 		}
 
@@ -468,8 +495,14 @@ func submatchExecLoop[T loopTrait](trait T, re *Regexp, b []byte, mc *matchConte
 				if rawNext != ir.InvalidState {
 					state = rawNext & (ir.StateIDMask | ir.WarpStateFlag)
 					if rawNext < 0 {
-						update := tagUpdates[tagUpdateIndices[off]]
-						prio += int(update.BasePriority)
+						uIndices := d.TagUpdateIndices()
+						uUpdates := d.TagUpdates()
+						if off < len(uIndices) {
+							uIdx := uIndices[off]
+							if int(uIdx) < len(uUpdates) {
+								prio += int(uUpdates[uIdx].BasePriority)
+							}
+						}
 					}
 					if byteVal < 0x80 || (rawNext&ir.WarpStateFlag) == 0 {
 						i++
@@ -496,6 +529,9 @@ func submatchExecLoop[T loopTrait](trait T, re *Regexp, b []byte, mc *matchConte
 			i++
 			prio = i * ir.SearchRestartPenalty
 			state = d.SearchState()
+			if hasAnchors {
+				state = re.applyContextToState(d, state, ir.CalculateContext(b, i), i, &prio, bestPriority)
+			}
 		} else {
 			break
 		}
@@ -577,7 +613,6 @@ func matchExecLoop[T loopTrait](trait T, re *Regexp, b []byte) (int, int, int) {
 	anchorStart := re.anchorStart
 	prefix := re.prefix
 	hasAnchors := trait.HasAnchors()
-	usedAnchors := d.UsedAnchors()
 
 	bestStart, bestEnd, bestPriority := -1, -1, 1<<30-1
 	prio := 0
@@ -588,11 +623,7 @@ func matchExecLoop[T loopTrait](trait T, re *Regexp, b []byte) (int, int, int) {
 	}
 
 	for i := 0; i <= numBytes; {
-		if hasAnchors && ((usedAnchors&(syntax.EmptyWordBoundary|syntax.EmptyNoWordBoundary)) != 0 ||
-			(i == 0 && (usedAnchors&(syntax.EmptyBeginText|syntax.EmptyBeginLine)) != 0) ||
-			(i == numBytes && (usedAnchors&(syntax.EmptyEndText|syntax.EmptyEndLine)) != 0) ||
-			((usedAnchors&syntax.EmptyBeginLine) != 0 && i > 0 && b[i-1] == '\n') ||
-			((usedAnchors&syntax.EmptyEndLine) != 0 && i < numBytes && b[i] == '\n')) {
+		if hasAnchors {
 			state = re.applyContextToState(d, state, ir.CalculateContext(b, i), i, &prio, bestPriority)
 		}
 
@@ -606,9 +637,9 @@ func matchExecLoop[T loopTrait](trait T, re *Regexp, b []byte) (int, int, int) {
 				} else {
 					bestStart = p / ir.SearchRestartPenalty
 				}
-			}
-			if d.IsBestMatch(state&ir.StateIDMask) || re.hasNonGreedy() {
-				return bestStart, bestEnd, bestPriority
+				if d.IsBestMatch(state & ir.StateIDMask) {
+					return bestStart, bestEnd, bestPriority
+				}
 			}
 		}
 
@@ -619,15 +650,27 @@ func matchExecLoop[T loopTrait](trait T, re *Regexp, b []byte) (int, int, int) {
 				rawNext := trans[off]
 				if rawNext != ir.InvalidState {
 					state = rawNext & (ir.StateIDMask | ir.WarpStateFlag)
+					if rawNext < 0 {
+						uIndices := d.TagUpdateIndices()
+						uUpdates := d.TagUpdates()
+						if off < len(uIndices) {
+							uIdx := uIndices[off]
+							if int(uIdx) < len(uUpdates) {
+								prio += int(uUpdates[uIdx].BasePriority)
+							}
+						}
+					}
 					if byteVal < 0x80 || (rawNext&ir.WarpStateFlag) == 0 {
 						i++
 					} else {
-						// Multi-byte Warp: Skip trailing bytes
 						skip := bits.LeadingZeros8(^byteVal) - 1
 						if skip < 0 {
 							skip = 0
 						}
 						i += 1 + skip
+					}
+					if hasAnchors {
+						state = re.applyContextToState(d, state, ir.CalculateContext(b, i), i, &prio, bestPriority)
 					}
 					continue
 				}
@@ -641,13 +684,18 @@ func matchExecLoop[T loopTrait](trait T, re *Regexp, b []byte) (int, int, int) {
 					i += skip + 1
 					prio = i * ir.SearchRestartPenalty
 					state = re.prefixState
+					if hasAnchors {
+						state = re.applyContextToState(d, state, ir.CalculateContext(b, i), i, &prio, bestPriority)
+					}
 					continue
 				}
 			}
-
 			i++
 			prio = i * ir.SearchRestartPenalty
 			state = d.SearchState()
+			if hasAnchors {
+				state = re.applyContextToState(d, state, ir.CalculateContext(b, i), i, &prio, bestPriority)
+			}
 		} else {
 			break
 		}
