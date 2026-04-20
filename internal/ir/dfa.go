@@ -223,7 +223,11 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 		isAcc, matchP := false, 1<<30-1
 		var matchTags uint64
 		var matchUpdates []PathTagUpdate
+		minP := int32(1<<30 - 1)
 		for _, s := range closure {
+			if s.Priority < minP {
+				minP = s.Priority
+			}
 			if prog.Inst[s.ID].Op == syntax.InstMatch && s.NodeID == 0 {
 				isAcc = true
 				prio := int(s.Priority)
@@ -234,19 +238,18 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 				matchUpdates = append(matchUpdates, PathTagUpdate{RelativePriority: s.Priority, NextPriority: -1, Tags: s.Tags})
 			}
 		}
+		d.stateMinPriority = append(d.stateMinPriority, minP)
 		d.stateMatchPriority = append(d.stateMatchPriority, matchP)
 		d.stateMatchTags = append(d.stateMatchTags, matchTags)
 		d.stateMatchUpdates = append(d.stateMatchUpdates, matchUpdates)
-		d.stateIsBestMatch = append(d.stateIsBestMatch, isAcc)
+		d.stateEntryTags = append(d.stateEntryTags, updates)
+
+		// 憲法 2.13: Deterministic Finality
+		// 一致優先度(MatchPriority)が、その状態で可能な最小優先度(MinPriority)に達している場合のみ BestMatch
+		d.stateIsBestMatch = append(d.stateIsBestMatch, isAcc && matchP <= int(minP))
+
 		d.accepting = append(d.accepting, isAcc)
 		d.acceptingGuards = append(d.acceptingGuards, matchAnchors)
-		minP := int32(1<<30 - 1)
-		for _, p := range closure {
-			if p.Priority < minP {
-				minP = p.Priority
-			}
-		}
-		d.stateMinPriority = append(d.stateMinPriority, minP)
 		for i := 0; i < 256; i++ {
 			d.transitions = append(d.transitions, InvalidState)
 		}
@@ -345,15 +348,25 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 				}
 			}
 
+			// 優先度の正規化に伴う差分を BasePriority として記録
+			minNextPrio := int32(1<<30 - 1)
+			for _, p := range nextRes.NextClosure {
+				if p.Priority < minNextPrio {
+					minNextPrio = p.Priority
+				}
+			}
+
 			for len(d.tagUpdateIndices) <= idx {
 				d.tagUpdateIndices = append(d.tagUpdateIndices, 0xFFFFFFFF)
 			}
-			if len(nextRes.Updates) > 0 {
-				uIdx := uint32(len(d.tagUpdates))
-				d.tagUpdates = append(d.tagUpdates, TransitionUpdate{BasePriority: 0, PreUpdates: nextRes.Updates})
-				d.tagUpdateIndices[idx] = uIdx
-				rawNext |= TaggedStateFlag
-			}
+
+			uIdx := uint32(len(d.tagUpdates))
+			d.tagUpdates = append(d.tagUpdates, TransitionUpdate{
+				BasePriority: int32(d.stateMinPriority[nextDfaID]) - d.stateMinPriority[i], // 相対的な優先度の変化
+				PreUpdates:   nextRes.Updates,
+			})
+			d.tagUpdateIndices[idx] = uIdx
+			rawNext |= TaggedStateFlag
 
 			d.transitions[idx] = rawNext
 			for len(d.recapTables[0].Transitions) <= idx {
@@ -364,7 +377,7 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 				entries = append(entries, RecapEntry{
 					InputPriority: int16(u.RelativePriority - d.stateMinPriority[i]),
 					NextPriority:  int16(u.NextPriority),
-					PreTags:       u.Tags, // 遷移時に発生するタグを記録
+					PreTags:       u.Tags,
 				})
 			}
 			d.recapTables[0].Transitions[idx] = entries
