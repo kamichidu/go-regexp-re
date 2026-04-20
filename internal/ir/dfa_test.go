@@ -70,7 +70,7 @@ func TestStateExplosion(t *testing.T) {
 				t.Fatalf("Compile(%q) failed: %v", tt.pattern, err)
 			}
 
-			dfa, err := NewDFAWithMemoryLimit(context.Background(), prog, tt.limit)
+			dfa, err := NewDFAWithMemoryLimit(context.Background(), prog, tt.limit, true)
 
 			if tt.expectErr {
 				if err == nil {

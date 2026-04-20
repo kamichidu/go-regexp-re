@@ -2,7 +2,6 @@ package regexp
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"unsafe"
 
@@ -370,28 +369,40 @@ func (re *Regexp) sparseTDFA_PathSelection(mc *matchContext, b []byte, start, en
 	d := re.dfa
 	recap := d.RecapTables()[0]
 
-	// In the Match state, the winning path's relative priority is MatchPriority.
+	// The winning path's relative priority at the end point.
+	// We MUST use the MatchPriority of the final state to find which path reached InstMatch.
 	currPrio := int16(d.MatchPriority(mc.history[end]))
 	mc.pathHistory[end] = int32(currPrio)
 
 	for i := end - 1; i >= start; i-- {
 		sidx := mc.history[i]
+		if sidx == ir.InvalidState {
+			// This index was skipped by a SIMD warp, carry over the path identity.
+			mc.pathHistory[i] = int32(currPrio)
+			continue
+		}
 		byteVal := b[i]
 		off := (int(sidx) << 8) | int(byteVal)
 
 		found := false
+		bestInputPrio := int16(32767)
 		if off < len(recap.Transitions) {
 			for _, entry := range recap.Transitions[off] {
+				// We search backward: which InputPriority leads to the current NextPriority?
+				// To ensure leftmost-first semantics, we must choose the smallest InputPriority
+				// that connects to our current (winning) path identity.
 				if int16(entry.NextPriority) == currPrio {
-					currPrio = entry.InputPriority
-					found = true
-					break
+					if entry.InputPriority < bestInputPrio {
+						bestInputPrio = entry.InputPriority
+						found = true
+					}
 				}
 			}
 		}
-		if !found {
-			// Fallback to InputPriority 0 if not found, though this shouldn't happen
-			currPrio = 0
+		if found {
+			currPrio = bestInputPrio
+		} else {
+			// Stay at current priority if no explicit transition is found (e.g. search restart)
 		}
 		mc.pathHistory[i] = int32(currPrio)
 	}
@@ -400,12 +411,15 @@ func (re *Regexp) sparseTDFA_PathSelection(mc *matchContext, b []byte, start, en
 func (re *Regexp) sparseTDFA_Recap(mc *matchContext, b []byte, start, end, prio int, regs []int) {
 	d := re.dfa
 	recap := d.RecapTables()[0]
-	re.applyEntryTags(regs, d.StartUpdates(), 0, start)
+
+	// Apply initial tags for the winning path identity at start.
+	re.applyEntryTags(regs, d.StartUpdates(), mc.pathHistory[start], start)
 
 	for i := start; i < end; {
 		sidx := mc.history[i]
 		if sidx == ir.InvalidState {
-			panic(fmt.Sprintf("Corrupt history at pos %d during Pass 3", i))
+			i++
+			continue
 		}
 		pathID := mc.pathHistory[i]
 		byteVal := b[i]
@@ -418,34 +432,54 @@ func (re *Regexp) sparseTDFA_Recap(mc *matchContext, b []byte, start, end, prio 
 		}
 
 		if off < len(recap.Transitions) {
+			// Step 2: Forward lick. Determine the next identity to select the unique edge.
+			nextPathID := int32(0)
+			if i+step <= end {
+				nextPathID = mc.pathHistory[i+step]
+			}
+
 			for _, entry := range recap.Transitions[off] {
-				if int32(entry.InputPriority) == pathID {
-					// Apply tags generated during transition (byte consumption + epsilon closure) at pos i+step
-					re.applyRawTags(regs, entry.PreTags, i+step)
+				if int32(entry.InputPriority) == pathID && int32(entry.NextPriority) == nextPathID {
+					// Purely apply delta tags on the winning path identity.
+					// PreTags belong to position i (before byte),
+					// PostTags belong to position i+step (after byte).
+					re.applyRawTags(regs, entry.PreTags, i)
+					re.applyRawTags(regs, entry.PostTags, i+step)
 					break
 				}
 			}
 		}
 		i += step
 	}
+
 }
 
 func (re *Regexp) applyRawTags(regs []int, tags uint64, pos int) {
 	if tags == 0 {
 		return
 	}
-	for bit := 0; bit < 64; bit++ {
+	for bit := 2; bit < 64; bit++ {
 		if (tags & (1 << uint(bit))) != 0 {
 			if bit < len(regs) {
-				regs[bit] = pos
+				// Go capturing semantics on the winning path:
+				// - Start tags (even bits: 2, 4, ...) are fixed once set (leftmost).
+				// - End tags (odd bits: 3, 5, ...) are updated to the latest position.
+				if (bit%2 != 0) || regs[bit] == -1 {
+					regs[bit] = pos
+				}
 			}
 		}
 	}
 }
 
 func (re *Regexp) applyEntryTags(regs []int, updates []ir.PathTagUpdate, pathID int32, pos int) {
+	// Standardize pathID for StartUpdates which are always calculated against Prio 0 or Restart Penalty
+	matchID := pathID
+	if pathID >= ir.SearchRestartPenalty {
+		matchID = pathID % ir.SearchRestartPenalty
+	}
 	for _, u := range updates {
-		if u.NextPriority == pathID || pathID == -1 {
+		if int32(u.NextPriority) == matchID {
 			re.applyRawTags(regs, u.Tags, pos)
 		}
 	}

@@ -3,85 +3,61 @@
 
 == Concept
 
-DFAs are traditionally poor at extracting submatches because the history of which specific NFA path was taken is lost during state merging. To achieve 100% Go standard library compatibility while maintaining extreme throughput, this project employs a **3-Pass Sparse TDFA** architecture.
+DFAs are traditionally poor at extracting submatches because the history of which specific NFA path was taken is lost during state merging. To achieve 100% Go-compatible submatch extraction with $O(n)$ time complexity, this engine employs a **3-Pass Sparse TDFA** architecture.
 
-This strategy separates the concerns of "where is the match" (Pass 1), "which path was taken" (Pass 2), and "what is inside the match" (Pass 3) to solve the **DFA State Explosion** problem.
+The core idea is to decouple match discovery from boundary extraction, using a **Naked DFA** for speed and a **Recap Table** for precision.
 
-== The Core Problem: DFA State Explosion
-In a traditional TDFA, states are split by their tag update history. For complex patterns with many capturing groups (e.g., `((a)|(b)|(c))*`), this leads to an exponential increase in the number of DFA states, often causing OOM (Out of Memory) during compilation.
+== The 3-Pass Workflow
 
-The 3-Pass Sparse TDFA solves this by making the memory structure **additive** (`DFA States + Group Tables`) rather than **multiplicative** (`DFA States * Tag Combinations`).
+=== Phase 1: Naked Discovery (Forward Scan)
+*   **Objective**: Determine the match boundaries `[start, end]` and record the state history.
+*   **Mechanism**: Uses a **Naked DFA** where state identity is defined purely by NFA node IDs, ignoring tags and priorities. This physically prevents the exponential state explosion typical of traditional TDFAs.
+*   **Output**: A successful match window `[start, end]`, the final `MatchPriority`, and a `history []uint32` of DFA state IDs.
 
-== Execution Phases
+=== Phase 2: Path Identity Selection (Backward Trace)
+*   **Objective**: Determine the unique "winning path" from `start` to `end` based on Go's leftmost-first rules.
+*   **Mechanism**: Utilizing the `NakedState` history recorded in Phase 1, the engine performs a **backward trace** from the `end` position. It initializes the `PathID` from the `MatchPriority` of the final accepting state and works backward to the `start` position by matching `entry.NextPriority` in the `RecapTable`. If multiple transitions lead to the same result, the one with the **minimum InputPriority** is selected to guarantee leftmost-first semantics.
+*   **SIMD Warp Handling**: If indices were skipped by a SIMD Warp jump, the path identity is carried over across the gap to maintain continuity.
+*   **Output**: A sequence of `PathIDs` (recorded in `mc.pathHistory`) that uniquely identifies the winning NFA path.
 
-=== Phase 1: Naked Discovery
-* **Objective**: Find the `[start, end]` match boundaries with maximum speed.
-* **Mechanism**: Uses a **Naked DFA** where state identity is defined purely by the set of NFA states. Priority and tag information are completely ignored.
-* **Benefit**: State count is reduced from $O(2^n)$ to $O(n)$ for complex capture patterns. The DFA becomes extremely compact, leading to better L1/L2 cache hit rates.
-
-=== Phase 2: Path Identity Selection
-* **Objective**: Determine the unique "winning path" from `start` to `end` based on Go's leftmost-first rules.
-* **Mechanism**: Utilizing the `NakedState` history recorded in Phase 1, the engine performs a **backward trace** from the `end` position. It initializes the `PathID` from the `MatchPriority` of the final accepting state and works backward to the `start` position by matching `entry.NextPriority` in the `RecapTable`.
-* **Output**: A sequence of `PathIDs` (recorded in `mc.pathHistory`) that guide the next phase.
-
-=== Phase 3: Group-Specific Recap
-* **Objective**: Extract capturing group registers along the confirmed winning path.
+=== Phase 3: Pure Forward Recap (Licking)
+*   **Objective**: Extract capturing group registers along the confirmed winning path.
 *   **Mechanism**:
-    1.  Uses **Group-Specific "Burned" Tables** that are pre-calculated during compilation.
-    2.  Each table is specialized for a single capturing group (e.g., Group 1, Group 2).
-    3.  The engine follows the `PathID` guide from Phase 2 and applies PUSH/POP commands from the tables.
-*   **Transition-Resident Tags**: Because DFA states are "Naked" (defined purely by the set of reachable NFA states), capture tags cannot be stored on the state itself without causing ambiguity. Instead, tags are associated with **Transition Edges** (`RecapEntry`). This ensures that submatch boundaries are correctly attributed to the specific NFA path taken through the deterministic state machine.
-*   **Efficiency**: Each group recap is a simple table-lookup loop. Because tables are separate, they don't cause state explosion in the primary DFA.
-
-
-== The "Additive Memory" Mandate
-A core architectural requirement of this engine is that **total memory consumption must be linear relative to the number of capturing groups**.
-
-[latexmath]
-++++
-\text{Total Memory} = \text{Size}(\text{Naked DFA}) + \sum_{i=1}^{n} \text{Size}(\text{GroupTable}_i)
-++++
-
-This ensures that even regular expressions with hundreds of capturing groups can be compiled and executed with predictable memory usage.
-
-== Advantages
-
-* **Immunity to State Explosion**: Patterns that previously caused OOM now compile in milliseconds.
-* **Strict $O(n)$ Complexity**: All three passes are linear.
-* **NFA-Free Runtime**: No runtime NFA simulation or backtracking.
-* **Priority-Burned Precision**: Maintains 100% compatibility with Go's standard matching rules.
-
-=== Phase 2: Path Identity Selection (Priority-Chain Tracking)
-Pass 2 is implemented as a **Backward Priority-Chain Tracking** loop, identifying the winning path without NFA simulation or lookahead.
-
-* **Mechanism**: Every DFA transition edge stores a set of `RecapEntry` objects, each representing an NFA path's "Input Priority" and its corresponding "Next Priority" after consuming the byte or performing a warp.
-* **Tracking**:
-    1. The loop starts at the match `end` position.
-    2. It initializes the current `PathID` using the `MatchPriority` of the DFA state at `mc.history[end]`.
-    3. It iterates backward toward `start`. At each step, it finds the `RecapEntry` for the current byte where `entry.NextPriority` matches the current `PathID`.
-    4. The current `PathID` is then updated to `entry.InputPriority` for the previous step.
-* **Warp Integration**: During a lead-byte warp, the `RecapEntry` encapsulates the cumulative priority update for the entire multi-byte sequence, allowing the backward trace to jump across the warped segments while maintaining path identity.
-
-This design ensures that Pass 2 remains a pure, linear table-lookup operation, strictly $O(n)$ in time and zero-allocation in space.
+    1.  Starts at the `start` position and applies initial tags from `StartUpdates` based on the path identity at `mc.pathHistory[start]`.
+    2.  Iterates forward from `start` to `end`. At each step $i$, it retrieves the unique transition edge from the `RecapTable` matching `(pathID, nextPathID)`.
+    3.  Applies **delta tags** from the transition:
+        *   **PreTags**: Applied at position $i$ (before byte consumption).
+        *   **PostTags**: Applied at position $i+step$ (after byte consumption).
+*   **Go-Compatible Tagging Rules**:
+    *   **Start Tags**: Recorded only on the first encounter (fixed once set).
+    *   **End Tags**: Updated on every encounter (latest value wins).
+*   **Efficiency**: This "licking" process is a pure sequential update loop with zero branching or priority comparison, maintaining $O(n)$ complexity.
 
 == Technical Implementation Details
 
-=== Canonical State ID layout
-To maximize execution speed while maintaining rich control features (anchors, SIMD warp), the `StateID` utilizes a packed bit layout.
+=== Transition-Resident Delta Tags
+To prevent submatch boundary corruption, tags are never stored within DFA states. Instead, they reside exclusively on transitions in the `RecapTable`.
 
-[cols="1,4"]
-|===
-| Bit Range | Description
-| `31` | **TaggedStateFlag**: Indicates that the transition has associated priority/tag updates.
-| `30` | **AnchorVerifyFlag**: Indicates that the transition is guarded by an anchor (e.g., `^`, `$`).
-| `29` | **WarpStateFlag**: Indicates that the transition triggers a multi-byte lead-byte jump.
-| `28-22` | **AnchorMask**: Encodes the required empty-width context bits.
-| `21-0` | **StateIndex**: The physical index into transition and property tables.
-|===
+*   **Delta-Only**: Transitions only store the tags that were **newly encountered** during that specific byte consumption and its associated epsilon closure.
+*   **Separation**:
+    *   **PreTags**: Capture epsilon transitions occurring **just before** a byte is consumed.
+    *   **PostTags**: Capture epsilon transitions occurring **immediately after** a byte is consumed, leading to the next state.
 
-=== Naked History Isolation
-To guarantee $O(1)$ table access in Phases 2 and 3, the project enforces a **Strict Purity Policy** for the execution history buffer (`mc.history`).
+=== Backward Priority-Chain Tracking
+Pass 2 recovers the path identity by following pre-calculated priority mappings:
 
-1. **Stripping on Record**: Phase 1 MUST apply the `ir.StateIDMask` to every state before writing it to the history buffer.
-2. **Naked Access**: Phases 2 and 3 MUST assume the history is pure and use the values directly for left-shift indexing (`sidx << 8`) without redundant masking.
-3. **Safety Guarantee**: This isolation prevents control flags from leaking into indexing logic, which would otherwise cause massive memory access violations (panics).
+1.  **Start**: `currPrio = d.MatchPriority(history[end])`
+2.  **Step**: For index $i$ from `end-1` down to `start`:
+    *   `off = (history[i] << 8) | input[i]`
+    *   Find `entry` where `entry.NextPriority == currPrio` AND `entry.InputPriority` is minimum.
+    *   `currPrio = entry.InputPriority`
+3.  **Result**: `pathHistory[i] = currPrio`
+
+This ensures that even when NFA paths merge into a single DFA state, the engine can "unzip" them and recover the exact priority identity that Go's standard library would have chosen.
+
+== Advantages
+
+*   **NFA-Free Execution**: No runtime NFA simulation or backtracking.
+*   **Strict $O(n)$ Complexity**: All three passes are linear relative to input length.
+*   **Zero-Allocation Submatch Extraction**: Operates entirely on pre-allocated buffers and stack-resident state.
+*   **100% Go Compatibility**: Guarantees leftmost-first match results identical to `regexp`.
