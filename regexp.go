@@ -24,14 +24,10 @@ type Regexp struct {
 	expr           string
 	numSubexp      int
 	prefix         []byte
-	prefixState    ir.StateID
 	complete       bool
 	anchorStart    bool
-	anchorEnd      bool
-	isASCII        bool
 	prog           *syntax.Prog
 	dfa            *ir.DFA
-	bpDfa          *ir.BitParallelDFA
 	literalMatcher *ir.LiteralMatcher
 	subexpNames    []string
 	strategy       matchStrategy
@@ -93,8 +89,6 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 func (re *Regexp) bindMatchStrategy() {
 	if re.literalMatcher != nil {
 		re.strategy = strategyLiteral
-	} else if re.bpDfa != nil {
-		re.strategy = strategyBitParallel
 	} else {
 		re.strategy = strategyExtended
 	}
@@ -137,7 +131,7 @@ func (re *Regexp) findSubmatchIndexInternal(b []byte, mc *matchContext, regs []i
 			return -1, -1, 0
 		}
 		return res[0], res[1], 0
-	case strategyExtended, strategyFast:
+	case strategyExtended:
 		if mc == nil {
 			return matchExecLoop(extendedMatchTrait{}, re, b)
 		}
@@ -147,10 +141,6 @@ func (re *Regexp) findSubmatchIndexInternal(b []byte, mc *matchContext, regs []i
 }
 
 type loopTrait interface{ HasAnchors() bool }
-type fastMatchTrait struct{}
-
-func (fastMatchTrait) HasAnchors() bool { return false }
-
 type extendedMatchTrait struct{}
 
 func (extendedMatchTrait) HasAnchors() bool { return true }
@@ -187,29 +177,32 @@ func submatchExecLoop[T loopTrait](trait T, re *Regexp, b []byte, mc *matchConte
 			if sidx >= 0 && sidx < numStates {
 				off := (sidx << 8) | int(byteVal)
 				rawNext := trans[off]
-				if rawNext != ir.InvalidState && (rawNext&ir.AnchorVerifyFlag) != 0 {
-					req := syntax.EmptyOp((rawNext & ir.AnchorMask) >> 24)
-					if ir.CalculateContext(b, i)&req != req {
-						rawNext = ir.InvalidState
-					}
-				}
 				if rawNext != ir.InvalidState {
-					state = rawNext & (ir.StateIDMask | ir.WarpStateFlag)
-					if byteVal < 0x80 || (rawNext&ir.WarpStateFlag) == 0 {
-						i++
-					} else {
-						skip := bits.LeadingZeros8(^byteVal) - 1
-						if skip < 0 {
-							skip = 0
+					// PURE GUARDED VERIFICATION (Mandate 2.5/2.19)
+					if (rawNext & ir.AnchorVerifyFlag) != 0 {
+						req := syntax.EmptyOp((rawNext & ir.AnchorMask) >> 24)
+						if (ir.CalculateContext(b, i) & req) != req {
+							rawNext = ir.InvalidState
 						}
-						for j := 1; j <= skip; j++ {
-							if i+j < len(mc.history) {
-								mc.history[i+j] = ir.StateID(sidx)
+					}
+					if rawNext != ir.InvalidState {
+						state = rawNext & (ir.StateIDMask | ir.WarpStateFlag)
+						if rawNext < 0 {
+							uIndices, uUpdates := d.TagUpdateIndices(), d.TagUpdates()
+							if off < len(uIndices) {
+								uIdx := uIndices[off]
+								if int(uIdx) < len(uUpdates) {
+									prio += int(uUpdates[uIdx].BasePriority)
+								}
 							}
 						}
-						i += 1 + skip
+						if byteVal < 0x80 || (rawNext&ir.WarpStateFlag) == 0 {
+							i++
+						} else {
+							i += 1 + (bits.LeadingZeros8(^byteVal) - 1)
+						}
+						continue
 					}
-					continue
 				}
 			}
 			if anchorStart {
@@ -256,24 +249,31 @@ func matchExecLoop[T loopTrait](trait T, re *Regexp, b []byte) (int, int, int) {
 			if sidx >= 0 && sidx < numStates {
 				off := (sidx << 8) | int(byteVal)
 				rawNext := trans[off]
-				if rawNext != ir.InvalidState && (rawNext&ir.AnchorVerifyFlag) != 0 {
-					req := syntax.EmptyOp((rawNext & ir.AnchorMask) >> 24)
-					if ir.CalculateContext(b, i)&req != req {
-						rawNext = ir.InvalidState
-					}
-				}
 				if rawNext != ir.InvalidState {
-					state = rawNext & (ir.StateIDMask | ir.WarpStateFlag)
-					if byteVal < 0x80 || (rawNext&ir.WarpStateFlag) == 0 {
-						i++
-					} else {
-						skip := bits.LeadingZeros8(^byteVal) - 1
-						if skip < 0 {
-							skip = 0
+					if (rawNext & ir.AnchorVerifyFlag) != 0 {
+						req := syntax.EmptyOp((rawNext & ir.AnchorMask) >> 24)
+						if (ir.CalculateContext(b, i) & req) != req {
+							rawNext = ir.InvalidState
 						}
-						i += 1 + skip
 					}
-					continue
+					if rawNext != ir.InvalidState {
+						state = rawNext & (ir.StateIDMask | ir.WarpStateFlag)
+						if rawNext < 0 {
+							uIndices, uUpdates := d.TagUpdateIndices(), d.TagUpdates()
+							if off < len(uIndices) {
+								uIdx := uIndices[off]
+								if int(uIdx) < len(uUpdates) {
+									prio += int(uUpdates[uIdx].BasePriority)
+								}
+							}
+						}
+						if byteVal < 0x80 || (rawNext&ir.WarpStateFlag) == 0 {
+							i++
+						} else {
+							i += 1 + (bits.LeadingZeros8(^byteVal) - 1)
+						}
+						continue
+					}
 				}
 			}
 			if anchorStart {
@@ -305,7 +305,7 @@ func MustCompile(expr string) *Regexp {
 func (re *Regexp) String() string { return re.expr }
 
 func (re *Regexp) LiteralPrefix() (prefix string, complete bool) {
-	return string(re.prefix), re.complete
+	return string(re.prefix), false
 }
 
 func (re *Regexp) FindStringSubmatch(s string) []string {
@@ -336,6 +336,9 @@ func (mc *matchContext) prepare(n int) {
 	} else {
 		mc.history = mc.historyBuf[:n+1]
 		mc.pathHistory = mc.pathHistoryBuf[:n+1]
+	}
+	for i := range mc.history {
+		mc.history[i] = ir.InvalidState
 	}
 }
 

@@ -18,14 +18,6 @@ const (
 	AnchorMask       StateID = 0x3F000000
 	WarpStateFlag    StateID = 0x00800000
 	StateIDMask      StateID = 0x007FFFFF
-
-	AnchorBitBeginLine = iota
-	AnchorBitEndLine
-	AnchorBitBeginText
-	AnchorBitEndText
-	AnchorBitWordBoundary
-	AnchorBitNoWordBoundary
-	numAnchors = 6
 )
 
 const MaxDFAMemory = 64 * 1024 * 1024
@@ -59,14 +51,10 @@ type GroupRecapTable struct{ Transitions [][]RecapEntry }
 
 type DFA struct {
 	transitions             []StateID
-	anchorTransitions       []StateID
 	tagUpdateIndices        []uint32
-	anchorTagUpdateIndices  []uint32
 	tagUpdates              []TransitionUpdate
 	numStates               int
 	searchState, matchState StateID
-	hasAnchors              bool
-	usedAnchors             syntax.EmptyOp
 	numSubexp               int
 	Naked                   bool
 	stateIsSearch           []bool
@@ -82,9 +70,6 @@ type DFA struct {
 	stateToMask             []uint64
 	startUpdates            []PathTagUpdate
 	stateMatchUpdates       [][]PathTagUpdate
-	warpPoints              []int16
-	warpPointState          []StateID
-	warpPointGuards         []syntax.EmptyOp
 }
 
 type NFAPathStorage interface {
@@ -151,8 +136,8 @@ func (d *DFA) IsAccepting(s StateID) bool {
 func (d *DFA) Accepting() []bool           { return d.accepting }
 func (d *DFA) SearchState() StateID        { return d.searchState }
 func (d *DFA) MatchState() StateID         { return d.matchState }
-func (d *DFA) HasAnchors() bool            { return d.hasAnchors }
-func (d *DFA) UsedAnchors() syntax.EmptyOp { return d.usedAnchors }
+func (d *DFA) HasAnchors() bool            { return true } // Rely on bit 30
+func (d *DFA) UsedAnchors() syntax.EmptyOp { return 0 }
 func (d *DFA) MaskStride() int             { return d.maskStride }
 func (d *DFA) Next(current StateID, b int) StateID {
 	id := int(current & StateIDMask)
@@ -161,15 +146,8 @@ func (d *DFA) Next(current StateID, b int) StateID {
 	}
 	return d.transitions[id*256+b] & StateIDMask
 }
-func (d *DFA) AnchorTagUpdateIndices() []uint32 { return d.anchorTagUpdateIndices }
-func (d *DFA) AnchorNext(s StateID, bit int) StateID {
-	id := int(s & StateIDMask)
-	if id < 0 || id >= d.numStates {
-		return InvalidState
-	}
-	return d.anchorTransitions[id*6+bit]
-}
-func (d *DFA) StartUpdates() []PathTagUpdate { return d.startUpdates }
+func (d *DFA) AnchorNext(s StateID, bit int) StateID { return InvalidState }
+func (d *DFA) StartUpdates() []PathTagUpdate         { return d.startUpdates }
 func (d *DFA) MatchUpdates(s StateID) []PathTagUpdate {
 	id := int(s & StateIDMask)
 	if id < 0 || id >= d.numStates {
@@ -192,7 +170,7 @@ type dfaStateKey struct {
 func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error {
 	d.maskStride = (len(prog.Inst) + 63) / 64
 	d.storage = &memoryNfaSetStorage{data: make([][]NFAPath, 1024)}
-	nfaToDfa := make(map[uint64]StateID)
+	nfaToDfa := make(map[dfaStateKey]StateID)
 	closureCache := make(map[uint64]ClosureResult)
 	getCachedClosure := func(paths []NFAPath, context syntax.EmptyOp) ClosureResult {
 		h := uint64(14695981039346656037)
@@ -215,16 +193,20 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 		return res
 	}
 	addDfaState := func(closure []NFAPath, isSearch bool) StateID {
-		h := uint64(14695981039346656037)
-		for _, p := range closure {
-			h ^= uint64(p.ID)
-			h *= 1099511628211
+		matchP := 1<<30 - 1
+		for _, s := range closure {
+			if prog.Inst[s.ID].Op == syntax.InstMatch && s.NodeID == 0 {
+				if int(s.Priority) < matchP {
+					matchP = int(s.Priority)
+				}
+			}
 		}
-		if id, ok := nfaToDfa[h]; ok {
+		key := dfaStateKey{hashSet(closure, d.Naked), matchP, isSearch}
+		if id, ok := nfaToDfa[key]; ok {
 			return id
 		}
 		id := StateID(d.numStates)
-		nfaToDfa[h] = id
+		nfaToDfa[key] = id
 		d.storage.Put(id, closure)
 		d.stateIsSearch = append(d.stateIsSearch, isSearch)
 		isAcc, matchP := false, 1<<30-1
@@ -233,8 +215,9 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 		for _, s := range closure {
 			if prog.Inst[s.ID].Op == syntax.InstMatch && s.NodeID == 0 {
 				isAcc = true
-				if int(s.Priority) < matchP {
-					matchP = int(s.Priority)
+				prio := int(s.Priority)
+				if prio < matchP {
+					matchP = prio
 					matchTags = s.Tags
 				}
 				matchUpdates = append(matchUpdates, PathTagUpdate{RelativePriority: s.Priority, NextPriority: -1, Tags: s.Tags})
@@ -256,27 +239,44 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 			d.transitions = append(d.transitions, InvalidState)
 			d.tagUpdateIndices = append(d.tagUpdateIndices, 0)
 		}
-		for i := 0; i < 6; i++ {
-			d.anchorTransitions = append(d.anchorTransitions, InvalidState)
-			d.anchorTagUpdateIndices = append(d.anchorTagUpdateIndices, 0)
-		}
 		d.numStates++
 		return id
 	}
-	startRes := getCachedClosure([]NFAPath{{ID: uint32(prog.Start), Priority: 0}}, 0)
+
+	startRes := getCachedClosure([]NFAPath{{ID: uint32(prog.Start), Priority: 0}}, 0xFF)
 	d.matchState = addDfaState(startRes.NextClosure, false)
 	d.startUpdates = startRes.Updates
 	d.searchState = addDfaState(startRes.NextClosure, true)
+
 	d.recapTables = []GroupRecapTable{{Transitions: make([][]RecapEntry, 0, 1024)}}
 	scratchBuf := make([]NFAPath, 0, 1024)
-	for i := 0; i < d.numStates; i++ {
+	nextPaths := make([]NFAPath, 0, 1024)
+	processed := 0
+	for processed < d.numStates {
+		i := processed
+		processed++
 		currentClosure, _ := d.storage.Get(StateID(i), scratchBuf)
+		scratchBuf = currentClosure
+
 		for b := 0; b < 256; b++ {
-			var nextPaths []NFAPath
+			nextPaths = nextPaths[:0]
 			for _, p := range currentClosure {
 				inst := prog.Inst[p.ID]
-				if p.NodeID == 0 && inst.MatchRune(rune(b)) {
-					nextPaths = append(nextPaths, NFAPath{ID: inst.Out, Priority: p.Priority, Tags: p.Tags})
+				if p.NodeID == 0 {
+					if inst.MatchRune(rune(b)) {
+						nextPaths = append(nextPaths, NFAPath{ID: inst.Out, Priority: p.Priority, Tags: p.Tags})
+					}
+				} else {
+					root := d.nodes[p.NodeID]
+					if root.Match(byte(b), false) {
+						if root.Next == nil {
+							nextPaths = append(nextPaths, NFAPath{ID: uint32(prog.Inst[p.ID].Out), NodeID: 0, Priority: p.Priority, Tags: p.Tags})
+						} else {
+							for _, child := range root.Next {
+								nextPaths = append(nextPaths, NFAPath{ID: p.ID, NodeID: uint32(child.ID), Priority: p.Priority, Tags: p.Tags})
+							}
+						}
+					}
 				}
 			}
 			if d.stateIsSearch[i] {
@@ -285,13 +285,19 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 			if len(nextPaths) == 0 {
 				continue
 			}
-			nextRes := getCachedClosure(nextPaths, 0)
+
+			nextRes := getCachedClosure(nextPaths, 0xFF)
 			if len(nextRes.NextClosure) == 0 {
 				continue
 			}
+
 			nextDfaID := addDfaState(nextRes.NextClosure, d.stateIsSearch[i])
 			idx := (i << 8) | b
 			rawNext := nextDfaID
+			if nextRes.Anchors != 0 {
+				rawNext |= AnchorVerifyFlag | (StateID(nextRes.Anchors) << 24)
+			}
+
 			if b >= 0x80 {
 				for _, p := range currentClosure {
 					if p.NodeID == 0 && prog.Inst[p.ID].MatchRune(rune(b)) {
