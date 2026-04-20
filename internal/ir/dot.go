@@ -6,7 +6,6 @@ import (
 	"strings"
 )
 
-// ToDOT returns the DFA in Graphviz DOT format for debugging.
 func ToDOT(d *DFA) string {
 	var sb strings.Builder
 	sb.WriteString("digraph DFA {\n")
@@ -14,145 +13,77 @@ func ToDOT(d *DFA) string {
 	sb.WriteString("  node [shape=circle];\n")
 
 	for i := 0; i < d.numStates; i++ {
-		s := StateID(i)
+		u := uint32(i)
 		shape := "circle"
-		if d.IsAccepting(s) {
+		if d.IsAccepting(u) {
 			shape = "doublecircle"
 		}
 
 		var labels []string
 		labels = append(labels, fmt.Sprintf("S%d", i))
-		if s == d.searchState {
+
+		if u == d.SearchState() {
 			labels[0] += " (search)"
 		}
-		if s == d.matchState {
+		if u == d.MatchState() {
 			labels[0] += " (match)"
 		}
 
-		// Show accepting priority
-		if d.IsAccepting(s) {
-			labels = append(labels, fmt.Sprintf("Priority: %d", d.MatchPriority(s)))
+		if d.IsAccepting(u) {
+			labels = append(labels, fmt.Sprintf("Priority: %d", d.MatchPriority(u)))
 		}
 
 		label := strings.Join(labels, "\n")
 		sb.WriteString(fmt.Sprintf("  %d [label=%q, shape=%s];\n", i, label, shape))
 
-		// Group transitions by targetState
-		type edgeKey struct {
-			target StateID
-		}
-
-		type edgeInfo struct {
-			bytes []int
-		}
-
+		type edgeKey struct{ target uint32 }
+		type edgeInfo struct{ bytes []int }
 		groupedEdges := make(map[edgeKey]*edgeInfo)
 		var keys []edgeKey
 
 		for b := 0; b < 256; b++ {
-			next := d.Next(s, b)
-			if next != InvalidState {
-				key := edgeKey{next}
-				if _, ok := groupedEdges[key]; !ok {
-					groupedEdges[key] = &edgeInfo{}
-					keys = append(keys, key)
-				}
-				groupedEdges[key].bytes = append(groupedEdges[key].bytes, b)
+			target := d.Next(u, b)
+			if target == InvalidState {
+				continue
 			}
+			ek := edgeKey{target}
+			if _, ok := groupedEdges[ek]; !ok {
+				groupedEdges[ek] = &edgeInfo{}
+				keys = append(keys, ek)
+			}
+			groupedEdges[ek].bytes = append(groupedEdges[ek].bytes, b)
 		}
 
-		for bit := 0; bit < numAnchors; bit++ {
-			next := d.AnchorNext(s, bit)
-			if next != InvalidState {
-				next &= StateIDMask
-				key := edgeKey{next}
-				if _, ok := groupedEdges[key]; !ok {
-					groupedEdges[key] = &edgeInfo{}
-					keys = append(keys, key)
-				}
-				groupedEdges[key].bytes = append(groupedEdges[key].bytes, 256+bit)
-			}
-		}
+		sort.Slice(keys, func(i, j int) bool { return keys[i].target < keys[j].target })
 
-		// Sort keys for deterministic output
-		sort.Slice(keys, func(i, j int) bool {
-			return keys[i].target < keys[j].target
-		})
-
-		for _, key := range keys {
-			info := groupedEdges[key]
-			edgeLabel := formatBytes(info.bytes)
-			sb.WriteString(fmt.Sprintf("  %d -> %d [label=%q];\n", i, key.target, edgeLabel))
+		for _, ek := range keys {
+			info := groupedEdges[ek]
+			ranges := formatByteRanges(info.bytes)
+			sb.WriteString(fmt.Sprintf("  %d -> %d [label=%q];\n", i, int(ek.target&StateIDMask), ranges))
 		}
 	}
-
 	sb.WriteString("}\n")
 	return sb.String()
 }
 
-func formatBytes(bytes []int) string {
+func formatByteRanges(bytes []int) string {
 	if len(bytes) == 0 {
 		return ""
 	}
 	sort.Ints(bytes)
-
 	var parts []string
-	start := -1
-	end := -1
-
-	flush := func() {
-		if start != -1 {
-			if start == end {
-				parts = append(parts, formatByte(start))
+	start := bytes[0]
+	for i := 1; i <= len(bytes); i++ {
+		if i == len(bytes) || bytes[i] != bytes[i-1]+1 {
+			if start == bytes[i-1] {
+				parts = append(parts, fmt.Sprintf("%02X", start))
 			} else {
-				parts = append(parts, fmt.Sprintf("%s-%s", formatByte(start), formatByte(end)))
+				parts = append(parts, fmt.Sprintf("%02X-%02X", start, bytes[i-1]))
+			}
+			if i < len(bytes) {
+				start = bytes[i]
 			}
 		}
 	}
-
-	for _, b := range bytes {
-		if start == -1 {
-			start = b
-			end = b
-		} else if b == end+1 && b < 256 {
-			end = b
-		} else {
-			flush()
-			start = b
-			end = b
-		}
-	}
-	flush()
-
 	return strings.Join(parts, ",")
-}
-
-func formatByte(b int) string {
-	if b >= 256 {
-		switch b - 256 {
-		case AnchorBitBeginLine:
-			return "^L"
-		case AnchorBitEndLine:
-			return "$L"
-		case AnchorBitBeginText:
-			return "^T"
-		case AnchorBitEndText:
-			return "$T"
-		case AnchorBitWordBoundary:
-			return "\\b"
-		case AnchorBitNoWordBoundary:
-			return "\\B"
-		default:
-			return fmt.Sprintf("V%d", b)
-		}
-	}
-
-	if b >= 32 && b <= 126 {
-		c := byte(b)
-		if c == '"' || c == '\\' {
-			return "\\" + string(c)
-		}
-		return string(c)
-	}
-	return fmt.Sprintf("0x%02X", b)
 }

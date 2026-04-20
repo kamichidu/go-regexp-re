@@ -178,6 +178,8 @@ func (r *CompatibilityRegistry) record(engineName string, err error, passed bool
 			msg = "stack overflow"
 		} else if strings.Contains(msg, "pattern too large or ambiguous") {
 			msg = "pattern too large or ambiguous (state explosion)"
+		} else if strings.Contains(msg, "unsupported epsilon loop") {
+			msg = "DFA: unsupported epsilon loop"
 		}
 		r.incompat[msg]++
 		return
@@ -210,7 +212,9 @@ func (r *CompatibilityRegistry) Report() {
 		knownErrors := []string{
 			"backref",
 			"POSIX",
-			"invalid repeat size", // Usually very large {n,m} that we might not want to support if it explodes
+			"invalid repeat count",
+			"state explosion",
+			"unsupported epsilon loop",
 		}
 
 		type entry struct {

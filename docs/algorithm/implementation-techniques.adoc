@@ -7,35 +7,35 @@ Beyond architectural algorithms, `go-regexp-re` employs advanced implementation-
 
 == Branchless State ID Packing
 
-The transition table stores "Packed State IDs" as 32-bit signed integers. These are not simple pointers; they are bit-fields containing both the target state and operational flags.
+The transition table stores "Packed State IDs" as 32-bit unsigned integers. These are not simple pointers; they are bit-fields containing both the target state and operational flags.
 
 [source]
 ----
- 32-bit Packed State ID:
- [31] [30] [29] ... [0]
-  |    |    |        |
-  |    |    +--------+--- State ID (up to 536,870,912 states)
+ 32-bit Packed State ID (Canonical Layout):
+ [31] [30] [29] [28-22] [21-0]
+  |    |    |      |      |
+  |    |    |      |      +--- State Index (up to 4,194,304 states)
+  |    |    |      |
+  |    |    |      +---------- Anchor Mask (EmptyOp requirements)
+  |    |    |
+  |    |    +----------------- WarpStateFlag (Lead-byte jump)
   |    |
-  |    +--- AnchorVerifyFlag (Bit 30)
-  |         If set, current character MUST be verified against its anchor logic.
+  |    +---------------------- AnchorVerifyFlag (Context check needed)
   |
-  +-------- TaggedStateFlag (MSB/Bit 31)
-            If set, a capture group (tag) must be updated at this transition.
-
-Hot-Loop Execution:
-
-rawNext := transitions[idx]
-
-if rawNext < 0: (MSB is set)
-   - Handle Capture Tags
-   - Handle Anchor Guards (if Bit 30 is set)
-else:
-   - FAST PATH: Directly jump to state ID
+  +--------------------------- TaggedStateFlag (Priority/Tag updates)
 ----
 
 == Key Techniques
 
-=== 1. Hot-Loop Monomorphization (Manual Inlining)
+=== 1. Early Exit Optimization (Strict Greedy Finality)
+To minimize redundant scanning, the engine employs an early-exit strategy called `IsBestMatch`. However, to remain compatible with Go's greedy matching rules (e.g., `a*` matching `aaa` rather than an empty string), this exit must be strictly guarded.
+
+*   **Logic**: A state is marked as having a "Best Match" if and only if:
+    `MatchPriority(state) <= MinPriority(state)`
+*   **Significance**: `MinPriority` represents the absolute highest priority (lowest numerical value) that can be reached from the current state through any future transitions. If the current match already meets this threshold, no further scanning can improve the result, allowing for a safe $O(1)$ exit.
+*   **Greedy Preservation**: In a loop like `a*`, the exit transition typically has a lower priority (higher value) than the loop transition. Therefore, `IsBestMatch` remains false until the loop can no longer be taken, ensuring the longest possible match.
+
+=== 2. Hot-Loop Monomorphization (Manual Inlining)
 The engine provides three physically distinct execution loops: `bitParallelExecLoop`, `fastExecLoop`, and `extendedExecLoop`.
 * **Problem**: Go generics (introduced in 1.18) can introduce runtime dictionary lookups for function shapes (`GCShape`), and standard polymorphism can prevent aggressive constant folding.
 * **Solution**: By manually duplicating and specializing these loops (Monomorphization), the engine ensures that the Go compiler can:

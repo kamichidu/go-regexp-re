@@ -21,8 +21,8 @@ A specialized execution path for small patterns using `uint64` bit vectors to ac
 === 3. xref:algorithm/guarded-simd-warp.adoc[Anchor-Aware Guarded SIMD Warp]
 A speculative SIMD skipping logic designed to maintain high-speed scanning even in the presence of anchors.
 
-=== 4. xref:algorithm/2-pass-dfa-hybrid.adoc[DFA-First Hybrid (2-Pass Strategy)]
-A deterministic strategy that reconciles DFA scanning performance with the precise submatch extraction required by the Go standard library.
+=== 4. xref:algorithm/3-pass-sparse-tdfa.adoc[3-Pass Sparse TDFA (Next-Gen Strategy)]
+A deterministic 3-pass strategy that physically separates DFA scanning from submatch extraction to eliminate state explosion while maintaining Go-compatible precision.
 
 === 5. xref:algorithm/memory-efficient-construction.adoc[Memory-Efficient DFA Construction]
 An allocation-free and pointer-free construction algorithm designed to scale to massive pattern sets within strict memory constraints.
@@ -32,6 +32,9 @@ Advanced Go-specific optimizations, including manual loop monomorphization and b
 
 === 7. xref:algorithm/ast-optimization.adoc[AST-Level Optimization & Factoring]
 Pre-compilation AST rewriting and common sub-expression factoring to minimize state divergence and memory footprint.
+
+=== 8. xref:algorithm/multibyte-warp-optimization.adoc[Multi-byte Warp Optimization & State Explosion Protection]
+A dual-purpose strategy for deterministically skipping multi-byte UTF-8 sequences and protecting against NFA path set divergence in loop structures.
 
 == Design Philosophy
 
@@ -54,7 +57,7 @@ Performance is essentially "bought" with memory. A single DFA state occupies 1KB
 DFA construction can lead to an exponential explosion of states for patterns with high ambiguity (e.g., multiple overlapping wildcards). To prevent system exhaustion (OOM), `go-regexp-re` enforces a configurable memory limit.
 - **Default Limit**: 64MiB.
 - **Failure Mode**: If a pattern exceeds the limit, the compiler returns an error: `regexp: pattern too large or ambiguous`.
-- **Mitigation**: Users must either simplify the pattern or explicitly increase the `MaxMemory` via `CompileOption`.
+- **Mitigation**: Users must either simplify the pattern or explicitly increase the `MaxMemory` via `CompileOptions`.
 
 === 4. No POSIX Semantics
 POSIX regex semantics are explicitly unsupported. Following POSIX would break the $O(n)$ guarantee and introduce complex branching that would cripple the DFA's throughput.

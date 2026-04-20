@@ -31,7 +31,7 @@ func TestMain(m *testing.M) {
 			if len(pattern) > 1000 || strings.Count(pattern, "|") > 100 {
 				limit = 512 * 1024 * 1024
 			}
-			re, err := regexp.CompileWithOption(pattern, regexp.CompileOption{MaxMemory: limit})
+			re, err := regexp.CompileWithOptions(pattern, regexp.CompileOptions{MaxMemory: limit})
 			if err != nil {
 				return nil, err
 			}

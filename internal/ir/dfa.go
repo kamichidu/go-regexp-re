@@ -3,222 +3,732 @@ package ir
 import (
 	"context"
 	"fmt"
-	"io"
-	"os"
 	"sort"
 	"sync"
+	"unicode/utf8"
 	"unsafe"
 
 	"github.com/kamichidu/go-regexp-re/syntax"
 )
 
-type StateID int32
+type StateID uint32
 
 const (
-	InvalidState StateID = -1
-	StartStateID StateID = 0
+	InvalidState uint32 = 0xFFFFFFFF
+	// Fixed Canonical Layout: [31: Tagged] [30: Anchor] [29: Warp] [28-22: AnchorMask] [21-0: StateIndex]
+	TaggedStateFlag  uint32 = 0x80000000
+	AnchorVerifyFlag uint32 = 0x40000000
+	WarpStateFlag    uint32 = 0x20000000
+	AnchorMask       uint32 = 0x1FC00000
+	StateIDMask      uint32 = 0x003FFFFF
 )
 
-// nfaState represents a state in the NFA.
-type nfaState struct {
-	ID     uint32
-	NodeID uint32 // 0 means nil
+const MaxDFAMemory = 64 * 1024 * 1024
+const SearchRestartPenalty = 1000000
+
+type NFAPath struct {
+	ID, NodeID uint32
+	Priority   int32
+	Anchors    syntax.EmptyOp
+	Tags       uint64
 }
 
-// nfaPath represents a state in the NFA with its priority and tags.
-type nfaPath struct {
-	nfaState
-	Priority int32
-	_        int32 // padding
-	Tags     uint64
-}
-
-const nfaPathSize = int(unsafe.Sizeof(nfaPath{}))
-
-type PathTagUpdate struct {
-	RelativePriority int32
-	Tags             uint64
-}
+const NFAPathSize = int(unsafe.Sizeof(NFAPath{}))
 
 type TransitionUpdate struct {
-	BasePriority int32
-	PreUpdates   []PathTagUpdate
-	PostUpdates  []PathTagUpdate
+	BasePriority            int32
+	PreUpdates, PostUpdates []PathTagUpdate
 }
 
-// NfaSetStorage defines how to store and retrieve NFA path sets during DFA construction.
-type NfaSetStorage interface {
-	Put(id StateID, paths []nfaPath) error
-	Get(id StateID, buf []nfaPath) ([]nfaPath, error)
+type PathTagUpdate struct {
+	RelativePriority, NextPriority int32
+	Tags                           uint64
+}
+
+type RecapEntry struct {
+	InputPriority, NextPriority int16
+	PreTags, PostTags           uint64
+}
+
+type GroupRecapTable struct{ Transitions [][]RecapEntry }
+
+type DFA struct {
+	transitions             []uint32
+	tagUpdateIndices        []uint32
+	tagUpdates              []TransitionUpdate
+	numStates               int
+	searchState, matchState uint32
+	numSubexp               int
+	Naked                   bool
+	stateIsSearch           []bool
+	accepting               []bool
+	acceptingGuards         []syntax.EmptyOp
+	stateMatchPriority      []int
+	stateIsBestMatch        []bool
+	stateMinPriority        []int32
+	recapTables             []GroupRecapTable
+	storage                 NFAPathStorage
+	nodes                   []*UTF8Node
+	maskStride              int
+	stateToMask             []uint64
+	startUpdates            []PathTagUpdate
+	stateEntryTags          [][]PathTagUpdate
+	hasAnchors              bool
+}
+
+type NFAPathStorage interface {
+	Put(id uint32, paths []NFAPath) error
+	Get(id uint32, buf []NFAPath) ([]NFAPath, error)
 	Close() error
 }
 
-// memoryNfaSetStorage keeps everything in a slice.
 type memoryNfaSetStorage struct {
-	data [][]nfaPath
+	data [][]NFAPath
+	mu   sync.RWMutex
 }
 
-func (s *memoryNfaSetStorage) Put(id StateID, paths []nfaPath) error {
-	if int(id) >= len(s.data) {
-		newSize := int(id) + 1024
-		if newSize < len(s.data)*2 {
-			newSize = len(s.data) * 2
-		}
-		newData := make([][]nfaPath, newSize)
-		copy(newData, s.data)
-		s.data = newData
-	}
-	cp := make([]nfaPath, len(paths))
-	copy(cp, paths)
-	s.data[id] = cp
-	return nil
-}
-
-func (s *memoryNfaSetStorage) Get(id StateID, buf []nfaPath) ([]nfaPath, error) {
-	if int(id) >= len(s.data) {
-		return nil, fmt.Errorf("state not found")
-	}
-	src := s.data[id]
-	if len(buf) < len(src) {
-		buf = make([]nfaPath, len(src))
-	}
-	copy(buf, src)
-	return buf[:len(src)], nil
-}
-
-func (s *memoryNfaSetStorage) Close() error { return nil }
-
-// fileNfaSetStorage offloads NFA path sets to a temporary file using raw binary dump.
-type fileNfaSetStorage struct {
-	file    *os.File
-	offsets []int64
-	lengths []int32
-	mu      sync.Mutex
-}
-
-func newFileNfaSetStorage() (*fileNfaSetStorage, error) {
-	f, err := os.CreateTemp("", "go-regexp-re-nfa-*")
-	if err != nil {
-		return nil, err
-	}
-	return &fileNfaSetStorage{file: f}, nil
-}
-
-func (s *fileNfaSetStorage) Put(id StateID, paths []nfaPath) error {
+func (s *memoryNfaSetStorage) Put(id uint32, paths []NFAPath) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	offset, err := s.file.Seek(0, io.SeekEnd)
-	if err != nil {
-		return err
+	idx := int(id & StateIDMask)
+	if idx >= len(s.data) {
+		s.data = append(s.data, make([][]NFAPath, 1024)...)
 	}
-
-	var b []byte
-	if len(paths) > 0 {
-		b = unsafe.Slice((*byte)(unsafe.Pointer(&paths[0])), len(paths)*nfaPathSize)
-	}
-
-	if _, err := s.file.Write(b); err != nil {
-		return err
-	}
-
-	if int(id) >= len(s.offsets) {
-		newSize := int(id) + 4096
-		newOffsets := make([]int64, newSize)
-		newLengths := make([]int32, newSize)
-		copy(newOffsets, s.offsets)
-		copy(newLengths, s.lengths)
-		s.offsets = newOffsets
-		s.lengths = newLengths
-	}
-	s.offsets[id] = offset
-	s.lengths[id] = int32(len(paths))
+	s.data[idx] = append([]NFAPath(nil), paths...)
 	return nil
 }
-
-func (s *fileNfaSetStorage) Get(id StateID, buf []nfaPath) ([]nfaPath, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if int(id) >= len(s.offsets) || (id > 0 && s.lengths[id] == 0 && s.offsets[id] == 0) {
-		return nil, fmt.Errorf("state %d not found on disk", id)
-	}
-
-	length := int(s.lengths[id])
-	if length == 0 {
+func (s *memoryNfaSetStorage) Get(id uint32, buf []NFAPath) ([]NFAPath, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	idx := int(id & StateIDMask)
+	if idx >= len(s.data) {
 		return nil, nil
 	}
+	return s.data[idx], nil
+}
+func (s *memoryNfaSetStorage) Close() error { return nil }
 
-	if len(buf) < length {
-		buf = make([]nfaPath, length)
+func (d *DFA) IsNaked() bool                  { return d.Naked }
+func (d *DFA) NumStates() int                 { return d.numStates }
+func (d *DFA) RecapTables() []GroupRecapTable { return d.recapTables }
+func (d *DFA) StateMinPriority(id uint32) int32 {
+	idx := int(id & StateIDMask)
+	if idx >= d.numStates {
+		return 0
+	}
+	return d.stateMinPriority[idx]
+}
+func (d *DFA) Transitions() []uint32          { return d.transitions }
+func (d *DFA) TagUpdateIndices() []uint32     { return d.tagUpdateIndices }
+func (d *DFA) TagUpdates() []TransitionUpdate { return d.tagUpdates }
+func (d *DFA) MatchPriority(id uint32) int {
+	idx := int(id & StateIDMask)
+	if idx >= d.numStates {
+		return 1<<30 - 1
+	}
+	return d.stateMatchPriority[idx]
+}
+func (d *DFA) IsBestMatch(id uint32) bool {
+	idx := int(id & StateIDMask)
+	if idx >= d.numStates {
+		return false
+	}
+	return d.stateIsBestMatch[idx]
+}
+func (d *DFA) IsAccepting(id uint32) bool {
+	idx := int(id & StateIDMask)
+	if idx >= d.numStates {
+		return false
+	}
+	return d.accepting[idx]
+}
+func (d *DFA) Accepting() []bool                 { return d.accepting }
+func (d *DFA) AcceptingGuards() []syntax.EmptyOp { return d.acceptingGuards }
+func (d *DFA) SearchState() uint32               { return d.searchState }
+func (d *DFA) MatchState() uint32                { return d.matchState }
+func (d *DFA) HasAnchors() bool                  { return d.hasAnchors }
+func (d *DFA) UsedAnchors() syntax.EmptyOp       { return 0 }
+func (d *DFA) MaskStride() int                   { return d.maskStride }
+func (d *DFA) Next(currentID uint32, b int) uint32 {
+	idx := int(currentID & StateIDMask)
+	if idx >= d.numStates || b < 0 || b >= 256 {
+		return InvalidState
+	}
+	return d.transitions[idx*256+b]
+}
+func (d *DFA) AnchorNext(id uint32, bit int) uint32 { return InvalidState }
+func (d *DFA) StartUpdates() []PathTagUpdate        { return d.startUpdates }
+
+type ClosureResult struct {
+	NextClosure  []NFAPath
+	Updates      []PathTagUpdate
+	MatchAnchors syntax.EmptyOp
+}
+type dfaStateKey struct {
+	hash          [2]uint64
+	matchPriority int
+	isSearch      bool
+}
+
+func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			if s, ok := r.(string); ok && s == "regexp: pattern too large or ambiguous" {
+				err = fmt.Errorf("%s", s)
+			} else {
+				panic(r)
+			}
+		}
+	}()
+	if err := checkEpsilonLoop(prog); err != nil {
+		return err
+	}
+	for _, inst := range prog.Inst {
+		if inst.Op == syntax.InstEmptyWidth {
+			d.hasAnchors = true
+			break
+		}
+	}
+	d.maskStride = (len(prog.Inst) + 63) / 64
+	d.storage = &memoryNfaSetStorage{data: make([][]NFAPath, 1024)}
+	nfaToDfa := make(map[dfaStateKey]uint32)
+	closureCache := make(map[uint64]ClosureResult)
+	getCachedClosure := func(paths []NFAPath) ClosureResult {
+		if len(paths) == 0 {
+			return ClosureResult{}
+		}
+		// Calculate the minimum priority to make the hash invariant to absolute offsets
+		minP := paths[0].Priority
+		for _, p := range paths {
+			if p.Priority < minP {
+				minP = p.Priority
+			}
+		}
+
+		h := uint64(14695981039346656037)
+		for _, p := range paths {
+			h = (h ^ uint64(p.ID)) * 1099511628211
+			h = (h ^ uint64(p.NodeID)) * 1099511628211
+			// Use normalized priority for the hash
+			h = (h ^ uint64(p.Priority-minP)) * 1099511628211
+			h = (h ^ uint64(p.Tags)) * 1099511628211
+			h = (h ^ uint64(p.Anchors)) * 1099511628211
+		}
+		if res, ok := closureCache[h]; ok {
+			// Return a copy of Updates to prevent callers from corrupting the cache
+			updatesCopy := make([]PathTagUpdate, len(res.Updates))
+			copy(updatesCopy, res.Updates)
+			resCopy := res
+			resCopy.Updates = updatesCopy
+			return resCopy
+		}
+
+		// Create a normalized copy of paths for epsilonClosure
+		normPaths := make([]NFAPath, len(paths))
+		copy(normPaths, paths)
+		for i := range normPaths {
+			normPaths[i].Priority -= minP
+		}
+
+		res := epsilonClosureWithAnchorWall(prog, normPaths)
+		closureCache[h] = res
+
+		// Return a copy to prevent accidental corruption
+		updatesCopy := make([]PathTagUpdate, len(res.Updates))
+		copy(updatesCopy, res.Updates)
+		resCopy := res
+		resCopy.Updates = updatesCopy
+		return resCopy
+	}
+	maxStates := maxMemory / 2048
+	if maxStates < 100 {
+		maxStates = 100
 	}
 
-	targetBuf := unsafe.Slice((*byte)(unsafe.Pointer(&buf[0])), length*nfaPathSize)
-	if _, err := s.file.ReadAt(targetBuf, s.offsets[id]); err != nil {
+	addDfaState := func(closure []NFAPath, updates []PathTagUpdate, matchAnchors syntax.EmptyOp, isSearch bool) uint32 {
+		matchP := 1<<30 - 1
+		for _, s := range closure {
+			if prog.Inst[s.ID].Op == syntax.InstMatch && s.NodeID == 0 {
+				if int(s.Priority) < matchP {
+					matchP = int(s.Priority)
+				}
+			}
+		}
+		keyPrio := matchP
+		if d.Naked {
+			keyPrio = 0
+		}
+		key := dfaStateKey{hashSet(closure, d.Naked), keyPrio, isSearch}
+		if id, ok := nfaToDfa[key]; ok {
+			return id
+		}
+		if d.numStates >= maxStates {
+			panic("regexp: pattern too large or ambiguous")
+		}
+		id := uint32(d.numStates)
+		nfaToDfa[key] = id
+		d.storage.Put(id, closure)
+		d.stateIsSearch = append(d.stateIsSearch, isSearch)
+		isAcc, matchP := false, 1<<30-1
+		minP := int32(1<<30 - 1)
+		if len(closure) > 0 {
+			minP = closure[0].Priority
+			for _, s := range closure {
+				if s.Priority < minP {
+					minP = s.Priority
+				}
+			}
+		}
+		for _, s := range closure {
+			if prog.Inst[s.ID].Op == syntax.InstMatch && s.NodeID == 0 {
+				isAcc = true
+				prio := int(s.Priority - minP)
+				if prio < matchP {
+					matchP = prio
+				}
+			}
+		}
+		d.stateMinPriority = append(d.stateMinPriority, minP)
+		d.stateMatchPriority = append(d.stateMatchPriority, matchP)
+		d.stateEntryTags = append(d.stateEntryTags, updates)
+		d.stateIsBestMatch = append(d.stateIsBestMatch, isAcc && matchP <= int(minP))
+
+		d.accepting = append(d.accepting, isAcc)
+		d.acceptingGuards = append(d.acceptingGuards, matchAnchors)
+		for i := 0; i < 256; i++ {
+			d.transitions = append(d.transitions, InvalidState)
+		}
+		d.numStates++
+		return id
+	}
+
+	startRes := getCachedClosure([]NFAPath{{ID: uint32(prog.Start), Priority: 0}})
+	d.matchState = addDfaState(startRes.NextClosure, startRes.Updates, startRes.MatchAnchors, false)
+	d.startUpdates = startRes.Updates
+	d.searchState = addDfaState(startRes.NextClosure, startRes.Updates, startRes.MatchAnchors, true)
+
+	d.recapTables = []GroupRecapTable{{Transitions: make([][]RecapEntry, 0, 1024)}}
+	d.tagUpdateIndices = make([]uint32, 0, 1024)
+	d.tagUpdates = make([]TransitionUpdate, 0, 1024)
+	scratchBuf := make([]NFAPath, 0, 1024)
+	nextPaths := make([]NFAPath, 0, 1024)
+	processed := 0
+	for processed < d.numStates {
+		i := uint32(processed)
+		processed++
+		currentClosure, _ := d.storage.Get(i, scratchBuf)
+		scratchBuf = currentClosure
+
+		for b := 0; b < 256; b++ {
+			nextPaths = nextPaths[:0]
+			var preGuard syntax.EmptyOp
+			foundEdge := false
+			for _, p := range currentClosure {
+				inst := prog.Inst[p.ID]
+				match := false
+				if p.NodeID == 0 {
+					if inst.Op == syntax.InstRune || inst.Op == syntax.InstRune1 || inst.Op == syntax.InstRuneAny || inst.Op == syntax.InstRuneAnyNotNL {
+						if inst.MatchRune(rune(b)) {
+							match = true
+						} else if b >= 0x80 {
+							for _, r := range inst.Rune {
+								var buf [4]byte
+								n := utf8.EncodeRune(buf[:], r)
+								if n > 1 && buf[0] == byte(b) {
+									match = true
+									break
+								}
+							}
+						}
+					}
+				}
+				if match {
+					if !foundEdge {
+						preGuard = p.Anchors
+						foundEdge = true
+					} else {
+						preGuard |= p.Anchors
+					}
+
+					// Merge with existing path in nextPaths if ID/Priority/Anchors match
+					found := false
+					for j := range nextPaths {
+						if nextPaths[j].ID == inst.Out && nextPaths[j].NodeID == 0 && nextPaths[j].Priority == p.Priority && nextPaths[j].Anchors == p.Anchors {
+							nextPaths[j].Tags |= p.Tags
+							found = true
+							break
+						}
+					}
+					if !found {
+						nextPaths = append(nextPaths, NFAPath{ID: inst.Out, Priority: p.Priority, Tags: p.Tags})
+					}
+				}
+			}
+			if d.stateIsSearch[i] {
+				nextPaths = append(nextPaths, NFAPath{ID: uint32(prog.Start), Priority: SearchRestartPenalty})
+			}
+			if len(nextPaths) == 0 {
+				continue
+			}
+
+			nextRes := getCachedClosure(nextPaths)
+			if len(nextRes.NextClosure) == 0 {
+				continue
+			}
+
+			nextDfaID := addDfaState(nextRes.NextClosure, nextRes.Updates, nextRes.MatchAnchors, d.stateIsSearch[i])
+			idx := (int(i) << 8) | b
+			rawNext := nextDfaID
+			if preGuard != 0 {
+				rawNext |= AnchorVerifyFlag | (uint32(preGuard) << 22)
+			}
+			if b >= 0x80 {
+				isLead := false
+				for _, p := range currentClosure {
+					if p.NodeID == 0 {
+						inst := prog.Inst[p.ID]
+						for _, r := range inst.Rune {
+							var buf [4]byte
+							n := utf8.EncodeRune(buf[:], r)
+							if n > 1 && buf[0] == byte(b) {
+								isLead = true
+								break
+							}
+						}
+					}
+					if isLead {
+						break
+					}
+				}
+				if isLead {
+					rawNext |= WarpStateFlag
+				}
+			}
+
+			// The penalty/priority shift incurred during normalization of the next state.
+			minNextPrio := int32(1<<30 - 1)
+			for _, p := range nextPaths {
+				if p.Priority < minNextPrio {
+					minNextPrio = p.Priority
+				}
+			}
+
+			for len(d.tagUpdateIndices) <= idx {
+				d.tagUpdateIndices = append(d.tagUpdateIndices, 0xFFFFFFFF)
+			}
+
+			// Always record updates in RecapTable to ensure Pass 2 can trace the path
+			if len(nextRes.Updates) > 0 {
+				uIdx := uint32(len(d.tagUpdates))
+				d.tagUpdates = append(d.tagUpdates, TransitionUpdate{
+					BasePriority: minNextPrio,
+					PreUpdates:   nextRes.Updates,
+				})
+				d.tagUpdateIndices[idx] = uIdx
+				rawNext |= TaggedStateFlag
+			}
+
+			d.transitions[idx] = rawNext
+			for len(d.recapTables[0].Transitions) <= idx {
+				d.recapTables[0].Transitions = append(d.recapTables[0].Transitions, nil)
+			}
+
+			// Entry updates for the CURRENT state (delta tags from the closure that reached here)
+			currentEntryUpdates := d.stateEntryTags[i]
+
+			var entries []RecapEntry
+			for _, u := range nextRes.Updates {
+				// Find delta tags generated just before consuming this byte.
+				var preByteTags uint64
+				for _, eu := range currentEntryUpdates {
+					if eu.NextPriority == u.RelativePriority {
+						preByteTags = eu.Tags
+						break
+					}
+				}
+
+				entries = append(entries, RecapEntry{
+					InputPriority: int16(u.RelativePriority),
+					NextPriority:  int16(u.NextPriority),
+					PreTags:       preByteTags,
+					PostTags:      u.Tags,
+				})
+			}
+			d.recapTables[0].Transitions[idx] = entries
+
+		}
+	}
+	return nil
+}
+
+func epsilonClosureWithAnchorWall(prog *syntax.Prog, paths []NFAPath) ClosureResult {
+	type stateKey struct {
+		ID, NodeID uint32
+		Anchors    syntax.EmptyOp
+	}
+	// Track min priority reached per state PER source priority.
+	minPriority := make(map[int32]map[stateKey]int32)
+
+	type pathWithMeta struct {
+		p          NFAPath
+		newTags    uint64
+		sourcePrio int32
+		sourceTags uint64
+	}
+	stack := make([]pathWithMeta, 0, len(paths))
+	var updates []PathTagUpdate
+	for _, p := range paths {
+		if minPriority[p.Priority] == nil {
+			minPriority[p.Priority] = make(map[stateKey]int32)
+		}
+		minPriority[p.Priority][stateKey{p.ID, p.NodeID, p.Anchors}] = p.Priority
+		stack = append(stack, pathWithMeta{p, 0, p.Priority, p.Tags})
+
+		// Initial path identity must be recorded as a potential transition target.
+		inst := prog.Inst[p.ID]
+		if p.NodeID != 0 || !isEpsilon(inst.Op) {
+			updates = append(updates, PathTagUpdate{
+				RelativePriority: p.Priority,
+				NextPriority:     p.Priority,
+				Tags:             0,
+			})
+		}
+	}
+
+	var resultPathsMap = make(map[stateKey]NFAPath)
+	var matchAnchors syntax.EmptyOp
+	for len(stack) > 0 {
+		ph := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		p := ph.p
+
+		sk := stateKey{p.ID, p.NodeID, p.Anchors}
+		if p.Priority > minPriority[ph.sourcePrio][sk] {
+			continue
+		}
+
+		inst := prog.Inst[p.ID]
+		if p.NodeID != 0 || !isEpsilon(inst.Op) {
+			rk := stateKey{p.ID, p.NodeID, p.Anchors}
+			p.Tags |= ph.newTags
+
+			// Always record the update for this specific source priority.
+			// RECORD ONLY delta tags (ph.newTags) for the RecapTable.
+			updates = append(updates, PathTagUpdate{
+				RelativePriority: ph.sourcePrio,
+				NextPriority:     p.Priority,
+				Tags:             ph.newTags,
+			})
+
+			if existing, ok := resultPathsMap[rk]; !ok || p.Priority < existing.Priority {
+				resultPathsMap[rk] = p
+			} else if p.Priority == existing.Priority {
+				existing.Tags |= p.Tags
+				resultPathsMap[rk] = existing
+			}
+			if p.NodeID == 0 && inst.Op == syntax.InstMatch {
+				matchAnchors |= p.Anchors
+			}
+			continue
+		}
+
+		// Epsilon transition
+		switch inst.Op {
+		case syntax.InstAlt, syntax.InstAltMatch:
+			for _, next := range []struct {
+				id uint32
+				p  int32
+			}{{inst.Arg, p.Priority + 1}, {inst.Out, p.Priority}} {
+				nsk := stateKey{next.id, 0, p.Anchors}
+				if minPriority[ph.sourcePrio] == nil {
+					minPriority[ph.sourcePrio] = make(map[stateKey]int32)
+				}
+				if m, ok := minPriority[ph.sourcePrio][nsk]; !ok || next.p <= m {
+					minPriority[ph.sourcePrio][nsk] = next.p
+					stack = append(stack, pathWithMeta{
+						p:          NFAPath{ID: next.id, Priority: next.p, Anchors: p.Anchors, Tags: p.Tags},
+						newTags:    ph.newTags,
+						sourcePrio: ph.sourcePrio,
+						sourceTags: ph.sourceTags,
+					})
+				}
+			}
+		case syntax.InstCapture:
+			tagBit := uint64(1 << inst.Arg)
+			nsk := stateKey{inst.Out, 0, p.Anchors}
+			if minPriority[ph.sourcePrio] == nil {
+				minPriority[ph.sourcePrio] = make(map[stateKey]int32)
+			}
+			if m, ok := minPriority[ph.sourcePrio][nsk]; !ok || p.Priority <= m {
+				minPriority[ph.sourcePrio][nsk] = p.Priority
+
+				// Standard TDFA logic for capturing groups in loops:
+				// If a tag is already set in the cumulative path (p.Tags),
+				// do NOT add it to newTags for the current transition.
+				nextNewTags := ph.newTags
+				if (p.Tags & tagBit) == 0 {
+					nextNewTags |= tagBit
+				}
+
+				stack = append(stack, pathWithMeta{
+					p:          NFAPath{ID: inst.Out, Priority: p.Priority, Anchors: p.Anchors, Tags: p.Tags | tagBit},
+					newTags:    nextNewTags,
+					sourcePrio: ph.sourcePrio,
+					sourceTags: ph.sourceTags,
+				})
+			}
+		case syntax.InstEmptyWidth:
+			newAnchors := p.Anchors | syntax.EmptyOp(inst.Arg)
+			nsk := stateKey{inst.Out, 0, newAnchors}
+			if minPriority[ph.sourcePrio] == nil {
+				minPriority[ph.sourcePrio] = make(map[stateKey]int32)
+			}
+			if m, ok := minPriority[ph.sourcePrio][nsk]; !ok || p.Priority <= m {
+				minPriority[ph.sourcePrio][nsk] = p.Priority
+				stack = append(stack, pathWithMeta{
+					p:          NFAPath{ID: inst.Out, Priority: p.Priority, Anchors: newAnchors, Tags: p.Tags},
+					newTags:    ph.newTags,
+					sourcePrio: ph.sourcePrio,
+					sourceTags: ph.sourceTags,
+				})
+			}
+		case syntax.InstNop:
+			nsk := stateKey{inst.Out, 0, p.Anchors}
+			if minPriority[ph.sourcePrio] == nil {
+				minPriority[ph.sourcePrio] = make(map[stateKey]int32)
+			}
+			if m, ok := minPriority[ph.sourcePrio][nsk]; !ok || p.Priority <= m {
+				minPriority[ph.sourcePrio][nsk] = p.Priority
+				stack = append(stack, pathWithMeta{
+					p:          NFAPath{ID: inst.Out, Priority: p.Priority, Anchors: p.Anchors, Tags: p.Tags},
+					newTags:    ph.newTags,
+					sourcePrio: ph.sourcePrio,
+					sourceTags: ph.sourceTags,
+				})
+			}
+		}
+	}
+
+	var resPaths []NFAPath
+	for _, p := range resultPathsMap {
+		resPaths = append(resPaths, p)
+	}
+	minTotalPrio := int32(1 << 30)
+	if len(resPaths) > 0 {
+		minTotalPrio = resPaths[0].Priority
+		for _, p := range resPaths {
+			if p.Priority < minTotalPrio {
+				minTotalPrio = p.Priority
+			}
+		}
+		for i := range resPaths {
+			resPaths[i].Priority -= minTotalPrio
+		}
+		for i := range updates {
+			updates[i].NextPriority -= minTotalPrio
+		}
+	}
+	sort.Slice(resPaths, func(i, j int) bool {
+		if resPaths[i].ID != resPaths[j].ID {
+			return resPaths[i].ID < resPaths[j].ID
+		}
+		if resPaths[i].NodeID != resPaths[j].NodeID {
+			return resPaths[i].NodeID < resPaths[j].NodeID
+		}
+		if resPaths[i].Priority != resPaths[j].Priority {
+			return resPaths[i].Priority < resPaths[j].Priority
+		}
+		if resPaths[i].Anchors != resPaths[j].Anchors {
+			return resPaths[i].Anchors < resPaths[j].Anchors
+		}
+		return resPaths[i].Tags < resPaths[j].Tags
+	})
+	return ClosureResult{resPaths, updates, matchAnchors}
+}
+
+func isEpsilon(op syntax.InstOp) bool {
+	switch op {
+	case syntax.InstAlt, syntax.InstAltMatch, syntax.InstCapture, syntax.InstNop, syntax.InstEmptyWidth:
+		return true
+	}
+	return false
+}
+
+func checkEpsilonLoop(prog *syntax.Prog) error {
+	visited := make([]bool, len(prog.Inst))
+	onStack := make([]bool, len(prog.Inst))
+
+	var dfs func(int) error
+	dfs = func(id int) error {
+		if onStack[id] {
+			return fmt.Errorf("DFA: unsupported epsilon loop")
+		}
+		if visited[id] {
+			return nil
+		}
+
+		visited[id] = true
+		onStack[id] = true
+		defer func() { onStack[id] = false }()
+
+		inst := prog.Inst[id]
+		if isEpsilon(inst.Op) {
+			if err := dfs(int(inst.Out)); err != nil {
+				return err
+			}
+			if inst.Op == syntax.InstAlt || inst.Op == syntax.InstAltMatch {
+				if err := dfs(int(inst.Arg)); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+
+	for i := range prog.Inst {
+		if !visited[i] {
+			if err := dfs(i); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func hashSet(paths []NFAPath, naked bool) [2]uint64 {
+	var h1 uint64 = 14695981039346656037
+	for _, p := range paths {
+		h1 ^= uint64(p.ID)
+		h1 *= 1099511628211
+	}
+	return [2]uint64{h1, 0}
+}
+
+func NewDFAWithMemoryLimit(ctx context.Context, prog *syntax.Prog, maxMemory int, naked bool) (*DFA, error) {
+	d := &DFA{Naked: naked, numSubexp: prog.NumCap / 2}
+	if err := d.build(ctx, prog, maxMemory); err != nil {
 		return nil, err
 	}
-
-	return buf[:length], nil
-}
-
-func (s *fileNfaSetStorage) Close() error {
-	name := s.file.Name()
-	s.file.Close()
-	return os.Remove(name)
-}
-
-const (
-	AnchorBitBeginLine = iota
-	AnchorBitEndLine
-	AnchorBitBeginText
-	AnchorBitEndText
-	AnchorBitWordBoundary
-	AnchorBitNoWordBoundary
-	numAnchors = 6
-)
-
-const (
-	TaggedStateFlag StateID = -2147483648 // Bit 31
-
-	AnchorVerifyFlag StateID = 0x40000000 // Bit 30
-	AnchorMask       StateID = 0x3F000000 // Bits 24-29 (6 bits for syntax.EmptyOp)
-	StateIDMask      StateID = 0x00FFFFFF // Bits 0-23 (up to 16M states)
-)
-
-type DFA struct {
-	transitions            []StateID
-	anchorTransitions      []StateID // numStates * 6
-	tagUpdateIndices       []uint32
-	anchorTagUpdateIndices []uint32 // numStates * 6
-	tagUpdates             []TransitionUpdate
-	startUpdates           []PathTagUpdate
-	stride                 int
-	numStates              int
-	searchState            StateID
-	matchState             StateID
-	hasAnchors             bool
-	usedAnchors            syntax.EmptyOp
-	numSubexp              int
-	stateIsSearch          []bool
-	trieRoots              [][]*utf8Node
-	accepting              []bool
-	stateMatchPriority     []int
-	stateMatchTags         []uint64
-	stateIsBestMatch       []bool
-	isAlwaysTrue           []bool
-	warpPoints             []int16
-	warpPointState         []StateID
-	warpPointGuards        []syntax.EmptyOp
-	nodes                  []*utf8Node
+	return d, nil
 }
 
 type BitParallelDFA struct {
-	CharMasks      [256]uint64
-	AnchorMasks    [6]uint64
-	ContextMasks   [64]uint64
-	SuccessorTable [8][256]uint64
-	MatchMask      uint64
-	StartMask      uint64
+	CharMasks         [256]uint64
+	AnchorMasks       [6]uint64
+	ContextMasks      [64]uint64
+	SuccessorTable    [8][256]uint64
+	MatchMask         uint64
+	MatchMasks        [64]uint64
+	StartMasks        [64]uint64
+	CaptureMasks      [128]uint64
+	IsNonGreedy       bool
+	AltMatchMasks     uint64
+	EpsilonMasks      [64]uint64
+	PreEpsilonMasks   [64]uint64
+	ContextEpsMask    [64]uint64
+	ReachableToMatch  uint64
+	ReverseSuccessors [64]uint64
+	IsGreedy          bool
 }
 
 func (bp *BitParallelDFA) HasAnchors() bool {
@@ -229,1088 +739,17 @@ func (bp *BitParallelDFA) HasAnchors() bool {
 	}
 	return false
 }
-
-func (d *DFA) Next(current StateID, b int) StateID {
-	if current < 0 || int(current) >= d.numStates || b < 0 || b >= 256 {
-		return InvalidState
-	}
-	offset := int(current)*256 + b
-	if offset >= len(d.transitions) {
-		return InvalidState
-	}
-	raw := d.transitions[offset]
-	if raw == InvalidState {
-		return InvalidState
-	}
-	return raw & StateIDMask
-}
-func (d *DFA) AnchorNext(current StateID, bit int) StateID {
-	if current < 0 || int(current) >= d.numStates || bit < 0 || bit >= 6 {
-		return InvalidState
-	}
-	return d.anchorTransitions[int(current)*6+bit]
-}
-func (d *DFA) NumStates() int                   { return d.numStates }
-func (d *DFA) TotalStates() int                 { return d.numStates }
-func (d *DFA) Transitions() []StateID           { return d.transitions }
-func (d *DFA) AnchorTransitions() []StateID     { return d.anchorTransitions }
-func (d *DFA) TagUpdateIndices() []uint32       { return d.tagUpdateIndices }
-func (d *DFA) AnchorTagUpdateIndices() []uint32 { return d.anchorTagUpdateIndices }
-func (d *DFA) TagUpdates() []TransitionUpdate   { return d.tagUpdates }
-func (d *DFA) Stride() int                      { return 256 }
-func (d *DFA) IsAccepting(s StateID) bool {
-	if s < 0 || int(s) >= d.numStates {
-		return false
-	}
-	return d.accepting[s]
-}
-func (d *DFA) IsBestMatch(s StateID) bool {
-	if s < 0 || int(s) >= d.numStates {
-		return false
-	}
-	return d.stateIsBestMatch[s]
-}
-func (d *DFA) Accepting() []bool { return d.accepting }
-func (d *DFA) MatchPriority(s StateID) int {
-	if s < 0 || int(s) >= d.numStates {
-		return 1<<30 - 1
-	}
-	return d.stateMatchPriority[s]
-}
-func (d *DFA) MatchTags(s StateID) uint64 {
-	if s < 0 || int(s) >= d.numStates {
-		return 0
-	}
-	return d.stateMatchTags[s]
-}
-func (d *DFA) SearchState() StateID          { return d.searchState }
-func (d *DFA) MatchState() StateID           { return d.matchState }
-func (d *DFA) StartUpdates() []PathTagUpdate { return d.startUpdates }
-func (d *DFA) HasAnchors() bool              { return d.hasAnchors }
-func (d *DFA) UsedAnchors() syntax.EmptyOp   { return d.usedAnchors }
-func (d *DFA) TrieRoots() [][]*utf8Node      { return d.trieRoots }
-
-func (d *DFA) WarpPoint(s StateID) int {
-	if s < 0 || int(s) >= d.numStates {
-		return -1
-	}
-	return int(d.warpPoints[s])
-}
-func (d *DFA) WarpPointState(s StateID) StateID {
-	if s < 0 || int(s) >= d.numStates {
-		return InvalidState
-	}
-	return d.warpPointState[s]
-}
-func (d *DFA) WarpPointGuard(s StateID) syntax.EmptyOp {
-	if s < 0 || int(s) >= d.numStates {
-		return 0
-	}
-	return d.warpPointGuards[s]
-}
-
-var ErrStateExplosion = fmt.Errorf("regexp: pattern too large or ambiguous")
-
-const MaxDFAMemory = 64 * 1024 * 1024
-
-type dfaStateKey struct {
-	hash     [2]uint64
-	isSearch bool
-}
-
-const SearchRestartPenalty = 1000000
-
-func NewDFA(prog *syntax.Prog) (*DFA, error) {
-	return NewDFAWithMemoryLimit(context.Background(), prog, MaxDFAMemory)
-}
-func NewDFAWithMemoryLimit(ctx context.Context, prog *syntax.Prog, maxMemory int) (*DFA, error) {
-	d := &DFA{numSubexp: prog.NumCap / 2}
-	if err := d.build(ctx, prog, maxMemory); err != nil {
-		return nil, err
-	}
-	return d, nil
-}
-
-func NewBitParallelDFA(prog *syntax.Prog) *BitParallelDFA {
-	if len(prog.Inst) > 62 { // Reserve bit 63
-		return nil
-	}
-	bp := &BitParallelDFA{}
-
-	// epsilonClosure returns a bitmask of states reachable from i via epsilons.
-	epsilonClosure := func(start int) uint64 {
-		var visited uint64
-		var dfs func(int)
-		dfs = func(curr int) {
-			if (visited & (1 << uint(curr))) != 0 {
-				return
-			}
-			visited |= (1 << uint(curr))
-			inst := prog.Inst[curr]
-			switch inst.Op {
-			case syntax.InstAlt, syntax.InstAltMatch:
-				dfs(int(inst.Out))
-				dfs(int(inst.Arg))
-			case syntax.InstCapture, syntax.InstNop:
-				dfs(int(inst.Out))
-			}
-		}
-		dfs(start)
-		return visited
-	}
-
-	matchID := -1
-	for i, inst := range prog.Inst {
-		if inst.Op == syntax.InstMatch {
-			matchID = i
-			break
-		}
-	}
-
-	// 1. Initial State
-	bp.StartMask = epsilonClosure(prog.Start)
-	if matchID >= 0 && (bp.StartMask&(1<<uint(matchID))) != 0 {
-		bp.MatchMask |= (1 << 63)
-	}
-
-	// 2. Instruction Properties
-	for i, inst := range prog.Inst {
-		switch inst.Op {
-		case syntax.InstRune, syntax.InstRune1, syntax.InstRuneAny, syntax.InstRuneAnyNotNL:
-			for b := 0; b < 256; b++ {
-				if inst.MatchRune(rune(b)) {
-					bp.CharMasks[b] |= (1 << uint(i))
-				}
-			}
-			// If this instruction's Out leads to Match, it means MATCH happens after matching THIS rune.
-			if matchID >= 0 && (epsilonClosure(int(inst.Out))&(1<<uint(matchID))) != 0 {
-				bp.MatchMask |= (1 << uint(i))
-			}
-		case syntax.InstEmptyWidth:
-			for bit := 0; bit < 6; bit++ {
-				if (inst.Arg & (1 << uint(bit))) != 0 {
-					bp.AnchorMasks[bit] |= (1 << uint(i))
-				}
-			}
-			// If this instruction's Out leads to Match, it means MATCH happens after matching THIS anchor.
-			if matchID >= 0 && (epsilonClosure(int(inst.Out))&(1<<uint(matchID))) != 0 {
-				bp.MatchMask |= (1 << uint(i))
-			}
-		}
-	}
-
-	// 3. Successor Table
-	successors := make([]uint64, len(prog.Inst))
-	for i, inst := range prog.Inst {
-		switch inst.Op {
-		case syntax.InstRune, syntax.InstRune1, syntax.InstRuneAny, syntax.InstRuneAnyNotNL, syntax.InstEmptyWidth:
-			successors[i] = epsilonClosure(int(inst.Out))
-		}
-	}
-
-	for t := 0; t < 8; t++ {
-		for byteVal := 0; byteVal < 256; byteVal++ {
-			var union uint64
-			for bit := 0; bit < 8; bit++ {
-				if (byteVal & (1 << uint(bit))) != 0 {
-					idx := t*8 + bit
-					if idx < len(successors) {
-						union |= successors[idx]
-					}
-				}
-			}
-			bp.SuccessorTable[t][byteVal] = union
-		}
-	}
-
-	for c := 0; c < 64; c++ {
-		var m uint64
-		for bit := 0; bit < 6; bit++ {
-			if (c & (1 << uint(bit))) != 0 {
-				m |= bp.AnchorMasks[bit]
-			}
-		}
-		bp.ContextMasks[c] = m
-	}
-
-	return bp
-}
-
-type closureCacheKey struct {
-	hash    [2]uint64
-	context syntax.EmptyOp
-}
-type closureResult struct {
-	nextClosure []nfaPath
-	updates     []PathTagUpdate
-}
-
-func hashSet(set []nfaPath) [2]uint64 {
-	if len(set) == 0 {
-		return [2]uint64{0, 0}
-	}
-	minP := set[0].Priority
-	for i := 1; i < len(set); i++ {
-		if set[i].Priority < minP {
-			minP = set[i].Priority
-		}
-	}
-
-	h1 := uint64(14695981039346656037)
-	h2 := uint64(1000000000000000003)
-
-	for _, s := range set {
-		h1 ^= uint64(s.ID)
-		h1 *= 1099511628211
-		h2 ^= uint64(s.ID)
-		h2 *= 1000003
-
-		h1 ^= uint64(s.NodeID)
-		h1 *= 1099511628211
-		h2 ^= uint64(s.NodeID)
-		h2 *= 1000003
-
-		prio := uint64(uint32(s.Priority - minP))
-		h1 ^= prio
-		h1 *= 1099511628211
-		h2 ^= prio
-		h2 *= 1000003
-
-		h1 ^= s.Tags
-		h1 *= 1099511628211
-		h2 ^= s.Tags
-		h2 *= 1000003
-	}
-	return [2]uint64{h1, h2}
-}
-
-func hashUpdate(u TransitionUpdate) [2]uint64 {
-	h1 := uint64(14695981039346656037)
-	h2 := uint64(1000000000000000003)
-
-	h1 ^= uint64(uint32(u.BasePriority))
-	h1 *= 1099511628211
-	h2 ^= uint64(uint32(u.BasePriority))
-	h2 *= 1000003
-
-	for _, p := range u.PreUpdates {
-		h1 ^= uint64(uint32(p.RelativePriority))
-		h1 *= 1099511628211
-		h1 ^= p.Tags
-		h1 *= 1099511628211
-
-		h2 ^= uint64(uint32(p.RelativePriority))
-		h2 *= 1000003
-		h2 ^= p.Tags
-		h2 *= 1000003
-	}
-	for _, p := range u.PostUpdates {
-		h1 ^= uint64(uint32(p.RelativePriority))
-		h1 *= 1099511628211
-		h1 ^= p.Tags
-		h1 *= 1099511628211
-
-		h2 ^= uint64(uint32(p.RelativePriority))
-		h2 *= 1000003
-		h2 ^= p.Tags
-		h2 *= 1000003
-	}
-	return [2]uint64{h1, h2}
-}
-
-func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error {
-	cache := newUTF8NodeCache()
-	d.hasAnchors = false
-	d.usedAnchors = 0
-	for _, inst := range prog.Inst {
-		if inst.Op == syntax.InstEmptyWidth {
-			d.hasAnchors = true
-			d.usedAnchors |= syntax.EmptyOp(inst.Arg)
-		}
-	}
-	d.stride = 256
-
-	d.trieRoots = make([][]*utf8Node, len(prog.Inst))
-	var nodes []*utf8Node
-	nodes = append(nodes, nil) // ID 0 is nil
-
-	getTrie := func(ID uint32) []*utf8Node {
-		if roots := d.trieRoots[ID]; roots != nil {
-			return roots
-		}
-		inst := prog.Inst[ID]
-		var roots []*utf8Node
-		switch inst.Op {
-		case syntax.InstRune, syntax.InstRune1:
-			fold := inst.Op == syntax.InstRune && (inst.Arg&uint32(syntax.FoldCase) != 0)
-			roots = cache.runeRangesToUTF8Trie(inst.Rune, fold)
-		case syntax.InstRuneAny:
-			roots = cache.anyRuneTrie(true)
-		case syntax.InstRuneAnyNotNL:
-			roots = cache.anyRuneTrie(false)
-		}
-		d.trieRoots[ID] = roots
-		for _, root := range roots {
-			d.registerNodes(root, &nodes)
-		}
-		return roots
-	}
-	d.nodes = nodes
-
-	var storage NfaSetStorage
-	isFileMode := maxMemory > 1024*1024*1024
-	if isFileMode {
-		var err error
-		storage, err = newFileNfaSetStorage()
-		if err != nil {
-			return err
-		}
-	} else {
-		storage = &memoryNfaSetStorage{data: make([][]nfaPath, 0)}
-	}
-	defer storage.Close()
-
-	nfaToDfa := make(map[dfaStateKey]StateID)
-	updateToIdx := make(map[[2]uint64]uint32) // Use hash key
-	addUpdate := func(u TransitionUpdate) uint32 {
-		key := hashUpdate(u)
-		if idx, ok := updateToIdx[key]; ok {
-			return idx
-		}
-		idx := uint32(len(d.tagUpdates))
-		d.tagUpdates = append(d.tagUpdates, u)
-		updateToIdx[key] = idx
-		return idx
-	}
-	closureCache := make(map[closureCacheKey]closureResult)
-	getCachedClosure := func(paths []nfaPath, context syntax.EmptyOp) closureResult {
-		if len(paths) == 0 {
-			return closureResult{}
-		}
-		minP := paths[0].Priority
-		for i := 1; i < len(paths); i++ {
-			if paths[i].Priority < minP {
-				minP = paths[i].Priority
-			}
-		}
-		key := closureCacheKey{hashSet(paths), context}
-		if res, ok := closureCache[key]; ok {
-			if minP == 0 {
-				return res
-			}
-			newClosure := make([]nfaPath, len(res.nextClosure))
-			for i, p := range res.nextClosure {
-				newClosure[i] = nfaPath{nfaState: nfaState{ID: p.ID, NodeID: p.NodeID}, Priority: p.Priority + minP, Tags: p.Tags}
-			}
-			newUpdates := make([]PathTagUpdate, len(res.updates))
-			for i, u := range res.updates {
-				newUpdates[i] = PathTagUpdate{RelativePriority: u.RelativePriority + int32(minP), Tags: u.Tags}
-			}
-			return closureResult{newClosure, newUpdates}
-		}
-
-		normPaths := make([]nfaPath, len(paths))
-		for i, p := range paths {
-			normPaths[i] = nfaPath{nfaState: nfaState{ID: p.ID, NodeID: p.NodeID}, Priority: p.Priority - minP, Tags: p.Tags}
-		}
-		nextClosure, updates := epsilonClosureWithPathTags(normPaths, prog, context, d.nodes)
-		res := closureResult{nextClosure, updates}
-
-		limit := 100000
-		if isFileMode {
-			limit = 10000
-		} // Aggressive clearing in file mode
-		if len(closureCache) > limit {
-			closureCache = make(map[closureCacheKey]closureResult)
-		}
-		closureCache[key] = res
-
-		if minP == 0 {
-			return res
-		}
-		denormClosure := make([]nfaPath, len(nextClosure))
-		for i, p := range nextClosure {
-			denormClosure[i] = nfaPath{nfaState: nfaState{ID: p.ID, NodeID: p.NodeID}, Priority: p.Priority + minP, Tags: p.Tags}
-		}
-		denormUpdates := make([]PathTagUpdate, len(updates))
-		for i, u := range updates {
-			denormUpdates[i] = PathTagUpdate{RelativePriority: u.RelativePriority + int32(minP), Tags: u.Tags}
-		}
-		return closureResult{denormClosure, denormUpdates}
-	}
-
-	var errBuild error
-	addDfaState := func(closure []nfaPath, isSearch bool) StateID {
-		if errBuild != nil {
-			return InvalidState
-		}
-		if (d.numStates+1)*256*8 > maxMemory {
-			errBuild = ErrStateExplosion
-			return InvalidState
-		}
-		if len(closure) > 0 {
-			minP := closure[0].Priority
-			for i := 1; i < len(closure); i++ {
-				if closure[i].Priority < minP {
-					minP = closure[i].Priority
-				}
-			}
-			if minP > 0 {
-				for i := range closure {
-					closure[i].Priority -= minP
-				}
-			}
-		}
-		sort.Slice(closure, func(i, j int) bool {
-			if closure[i].ID != closure[j].ID {
-				return closure[i].ID < closure[j].ID
-			}
-			if closure[i].NodeID != closure[j].NodeID {
-				return closure[i].NodeID < closure[j].NodeID
-			}
-			if closure[i].Priority != closure[j].Priority {
-				return closure[i].Priority < closure[j].Priority
-			}
-			return closure[i].Tags < closure[j].Tags
-		})
-		key := dfaStateKey{hashSet(closure), isSearch}
-		if id, ok := nfaToDfa[key]; ok {
-			return id
-		}
-		id := StateID(d.numStates)
-		nfaToDfa[key] = id
-
-		if err := storage.Put(id, closure); err != nil {
-			errBuild = err
-			return InvalidState
-		}
-
-		d.stateIsSearch = append(d.stateIsSearch, isSearch)
-		isAcc, matchP := false, 1<<30-1
-		var matchTags uint64
-		minPathP := 1<<30 - 1
-		for _, s := range closure {
-			if int(s.Priority) < minPathP {
-				minPathP = int(s.Priority)
-			}
-			if prog.Inst[s.ID].Op == syntax.InstMatch && s.NodeID == 0 {
-				isAcc = true
-				if int(s.Priority) < matchP {
-					matchP = int(s.Priority)
-					matchTags = s.Tags
-				}
-			}
-		}
-		d.accepting = append(d.accepting, isAcc)
-		d.stateMatchPriority = append(d.stateMatchPriority, matchP)
-		d.stateMatchTags = append(d.stateMatchTags, matchTags)
-		d.stateIsBestMatch = append(d.stateIsBestMatch, isAcc && (matchP == minPathP))
-		for i := 0; i < 256; i++ {
-			d.transitions = append(d.transitions, InvalidState)
-			d.tagUpdateIndices = append(d.tagUpdateIndices, 0)
-		}
-		for i := 0; i < 6; i++ {
-			d.anchorTransitions = append(d.anchorTransitions, InvalidState)
-			d.anchorTagUpdateIndices = append(d.anchorTagUpdateIndices, 0)
-		}
-		d.numStates++
-		return id
-	}
-
-	defaultStartRes := getCachedClosure([]nfaPath{{nfaState: nfaState{ID: uint32(prog.Start), NodeID: 0}}}, 0)
-	d.matchState = addDfaState(defaultStartRes.nextClosure, false)
-	d.startUpdates = defaultStartRes.updates
-	d.searchState = addDfaState(defaultStartRes.nextClosure, true)
-
-	scratchBuf := make([]nfaPath, 0, 1024)
-	nextPaths := make([]nfaPath, 0, 1024)
-
-	for i := 0; i < d.numStates; i++ {
-		if i%100 == 0 {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			default:
-			}
-		}
-		currentDfaID := StateID(i)
-		currentIsSearch := d.stateIsSearch[i]
-
-		currentClosure, err := storage.Get(currentDfaID, scratchBuf)
-		if err != nil {
-			return err
-		}
-		scratchBuf = currentClosure
-
-		var initialPaths []nfaPath
-		if currentIsSearch {
-			initialPaths = nextPaths[:0]
-			initialPaths = append(initialPaths, currentClosure...)
-			initialPaths = append(initialPaths, nfaPath{nfaState: nfaState{ID: uint32(prog.Start), NodeID: 0}, Priority: SearchRestartPenalty})
-		} else {
-			initialPaths = currentClosure
-		}
-		searchRes := getCachedClosure(initialPaths, 0)
-		for b := 0; b < 256; b++ {
-			nextPaths = nextPaths[:0]
-			foundMatch := false
-			for _, p := range searchRes.nextClosure {
-				s := p.nfaState
-				inst := prog.Inst[s.ID]
-				var matchedOut []uint32
-				var matchedNodeIDs []uint32
-				if s.NodeID == 0 {
-					switch inst.Op {
-					case syntax.InstRune, syntax.InstRune1, syntax.InstRuneAny, syntax.InstRuneAnyNotNL:
-						roots := getTrie(s.ID)
-						d.nodes = nodes
-						fold := inst.Op == syntax.InstRune && (inst.Arg&uint32(syntax.FoldCase) != 0)
-						for _, root := range roots {
-							match := matchesByte
-							if fold {
-								match = matchesByteFold
-							}
-							if match(root, byte(b)) {
-								if root.next == nil {
-									matchedOut = append(matchedOut, inst.Out)
-								} else {
-									for _, child := range root.next {
-										matchedNodeIDs = append(matchedNodeIDs, uint32(child.ID))
-									}
-								}
-							}
-						}
-					}
-				} else {
-					node := d.nodes[s.NodeID]
-					fold := inst.Op == syntax.InstRune && (inst.Arg&uint32(syntax.FoldCase) != 0)
-					match := matchesByte
-					if fold {
-						match = matchesByteFold
-					}
-					if match(node, byte(b)) {
-						if node.next == nil {
-							matchedOut = append(matchedOut, inst.Out)
-						} else {
-							for _, child := range node.next {
-								matchedNodeIDs = append(matchedNodeIDs, uint32(child.ID))
-							}
-						}
-					}
-				}
-				if len(matchedOut) > 0 || len(matchedNodeIDs) > 0 {
-					foundMatch = true
-					for _, out := range matchedOut {
-						nextPaths = append(nextPaths, nfaPath{nfaState: nfaState{ID: out, NodeID: 0}, Priority: p.Priority, Tags: p.Tags})
-					}
-					for _, nodeID := range matchedNodeIDs {
-						nextPaths = append(nextPaths, nfaPath{nfaState: nfaState{ID: s.ID, NodeID: nodeID}, Priority: p.Priority, Tags: p.Tags})
-					}
-				}
-			}
-			if foundMatch {
-				nextRes := getCachedClosure(nextPaths, 0)
-				if len(nextRes.nextClosure) == 0 {
-					continue
-				}
-				minP := nextRes.nextClosure[0].Priority
-				for _, p := range nextRes.nextClosure {
-					if p.Priority < minP {
-						minP = p.Priority
-					}
-				}
-				nextDfaID := addDfaState(nextRes.nextClosure, currentIsSearch)
-				if errBuild != nil {
-					return errBuild
-				}
-				idx := int(currentDfaID)*256 + b
-
-				var postUpdates []PathTagUpdate
-				if len(nextRes.updates) > 0 {
-					postUpdates = make([]PathTagUpdate, len(nextRes.updates))
-					for j, u := range nextRes.updates {
-						postUpdates[j] = PathTagUpdate{RelativePriority: u.RelativePriority - int32(minP), Tags: u.Tags}
-					}
-				}
-
-				if minP != 0 || len(searchRes.updates) > 0 || len(postUpdates) > 0 {
-					d.transitions[idx] = nextDfaID | TaggedStateFlag
-					d.tagUpdateIndices[idx] = addUpdate(TransitionUpdate{BasePriority: int32(minP), PreUpdates: searchRes.updates, PostUpdates: postUpdates})
-				} else {
-					d.transitions[idx] = nextDfaID
-				}
-			}
-		}
-		if d.hasAnchors {
-			for bit := 0; bit < 6; bit++ {
-				op := syntax.EmptyOp(1 << bit)
-				var anchorPaths []nfaPath
-				if currentIsSearch {
-					anchorPaths = nextPaths[:0]
-					anchorPaths = append(anchorPaths, currentClosure...)
-					anchorPaths = append(anchorPaths, nfaPath{nfaState: nfaState{ID: uint32(prog.Start), NodeID: 0}, Priority: SearchRestartPenalty})
-				} else {
-					anchorPaths = currentClosure
-				}
-				nextRes := getCachedClosure(anchorPaths, op)
-				if len(nextRes.nextClosure) == 0 || hashSet(nextRes.nextClosure) == hashSet(currentClosure) {
-					continue
-				}
-				minP := nextRes.nextClosure[0].Priority
-				for _, p := range nextRes.nextClosure {
-					if p.Priority < minP {
-						minP = p.Priority
-					}
-				}
-				nextDfaID := addDfaState(nextRes.nextClosure, currentIsSearch)
-				if errBuild != nil {
-					return errBuild
-				}
-				idx := int(currentDfaID)*6 + bit
-
-				var postUpdates []PathTagUpdate
-				if len(nextRes.updates) > 0 {
-					postUpdates = make([]PathTagUpdate, len(nextRes.updates))
-					for j, u := range nextRes.updates {
-						postUpdates[j] = PathTagUpdate{RelativePriority: u.RelativePriority - int32(minP), Tags: u.Tags}
-					}
-				}
-
-				if minP != 0 || len(postUpdates) > 0 {
-					d.anchorTransitions[idx] = nextDfaID | TaggedStateFlag
-					d.anchorTagUpdateIndices[idx] = addUpdate(TransitionUpdate{BasePriority: int32(minP), PreUpdates: postUpdates})
-				} else {
-					d.anchorTransitions[idx] = nextDfaID
-				}
-			}
-		}
-	}
-	d.minimize()
-	d.computePhase2Metadata()
-
-	// HELP GC: Clear local maps before returning
-	nfaToDfa = nil
-	updateToIdx = nil
-	closureCache = nil
-	scratchBuf = nil
-	nextPaths = nil
-
-	return nil
-}
-
-func (d *DFA) registerNodes(node *utf8Node, nodes *[]*utf8Node) {
-	if node == nil {
-		return
-	}
-	for len(*nodes) <= node.ID {
-		*nodes = append(*nodes, nil)
-	}
-	(*nodes)[node.ID] = node
-	for _, child := range node.next {
-		d.registerNodes(child, nodes)
-	}
-}
-
-func (d *DFA) minimize() {
-	if d.numStates <= 1 {
-		return
-	}
-	stateToGroup := make([]int32, d.numStates)
-	type groupSig struct {
-		acc       bool
-		prio      int
-		bestMatch bool
-		isSearch  bool
-	}
-	sigToGroup := make(map[groupSig]int32)
-	numGroups := int32(0)
-	for i := 0; i < d.numStates; i++ {
-		sig := groupSig{d.accepting[i], d.stateMatchPriority[i], d.stateIsBestMatch[i], d.stateIsSearch[i]}
-		g, ok := sigToGroup[sig]
-		if !ok {
-			g = numGroups
-			numGroups++
-			sigToGroup[sig] = g
-		}
-		stateToGroup[i] = g
-	}
-	for {
-		type splitKey struct {
-			oldGroup int32
-			hash     [2]uint64
-		}
-		newGroups := make(map[splitKey]int32)
-		nextStateToGroup := make([]int32, d.numStates)
-		nextNumGroups := int32(0)
-		for i := 0; i < d.numStates; i++ {
-			h1 := uint64(14695981039346656037)
-			h2 := uint64(1000000000000000003)
-			for b := 0; b < 256; b++ {
-				idx := i*256 + b
-				target := d.transitions[idx]
-				var tg int32 = -1
-				var updateIdx uint32 = 0
-				if target != InvalidState {
-					tg = stateToGroup[target&StateIDMask]
-					if target < 0 {
-						updateIdx = d.tagUpdateIndices[idx] + 1
-					}
-				}
-				h1 ^= uint64(uint32(tg))
-				h1 *= 1099511628211
-				h1 ^= uint64(updateIdx)
-				h1 *= 1099511628211
-				h2 ^= uint64(uint32(tg))
-				h2 *= 1000003
-				h2 ^= uint64(updateIdx)
-				h2 *= 1000003
-			}
-			for bit := 0; bit < 6; bit++ {
-				idx := i*6 + bit
-				target := d.anchorTransitions[idx]
-				var tg int32 = -1
-				var updateIdx uint32 = 0
-				if target != InvalidState {
-					tg = stateToGroup[target&StateIDMask]
-					if target < 0 {
-						updateIdx = d.anchorTagUpdateIndices[idx] + 1
-					}
-				}
-				h1 ^= uint64(uint32(tg))
-				h1 *= 1099511628211
-				h1 ^= uint64(updateIdx)
-				h1 *= 1099511628211
-				h2 ^= uint64(uint32(tg))
-				h2 *= 1000003
-				h2 ^= uint64(updateIdx)
-				h2 *= 1000003
-			}
-			key := splitKey{stateToGroup[i], [2]uint64{h1, h2}}
-			g, ok := newGroups[key]
-			if !ok {
-				g = nextNumGroups
-				nextNumGroups++
-				newGroups[key] = g
-			}
-			nextStateToGroup[i] = g
-		}
-		if nextNumGroups == numGroups {
-			break
-		}
-		stateToGroup = nextStateToGroup
-		numGroups = nextNumGroups
-	}
-	groupToFirstState := make([]int, numGroups)
-	for i, g := range stateToGroup {
-		groupToFirstState[g] = i
-	}
-	newTransitions := make([]StateID, int(numGroups)*256)
-	newAnchorTransitions := make([]StateID, int(numGroups)*6)
-	newUpdateIndices := make([]uint32, int(numGroups)*256)
-	newAnchorUpdateIndices := make([]uint32, int(numGroups)*6)
-	newAccepting, newPrio, newMatchTags, newBest, newIsSearch := make([]bool, numGroups), make([]int, numGroups), make([]uint64, numGroups), make([]bool, numGroups), make([]bool, numGroups)
-	for g := int32(0); g < numGroups; g++ {
-		oldS := groupToFirstState[g]
-		newAccepting[g] = d.accepting[oldS]
-		newPrio[g] = d.stateMatchPriority[oldS]
-		newMatchTags[g] = d.stateMatchTags[oldS]
-		newBest[g] = d.stateIsBestMatch[oldS]
-		newIsSearch[g] = d.stateIsSearch[oldS]
-		for b := 0; b < 256; b++ {
-			oldIdx := oldS*256 + b
-			target := d.transitions[oldIdx]
-			if target != InvalidState {
-				newID := StateID(stateToGroup[target&StateIDMask])
-				if target < 0 {
-					newTransitions[int(g)*256+b] = newID | TaggedStateFlag
-					newUpdateIndices[int(g)*256+b] = d.tagUpdateIndices[oldIdx]
-				} else {
-					newTransitions[int(g)*256+b] = newID
-				}
-			} else {
-				newTransitions[int(g)*256+b] = InvalidState
-			}
-		}
-		for bit := 0; bit < 6; bit++ {
-			oldIdx := oldS*6 + bit
-			target := d.anchorTransitions[oldIdx]
-			if target != InvalidState {
-				newID := StateID(stateToGroup[target&StateIDMask])
-				if target < 0 {
-					newAnchorTransitions[int(g)*6+bit] = newID | TaggedStateFlag
-					newAnchorUpdateIndices[int(g)*6+bit] = d.anchorTagUpdateIndices[oldIdx]
-				} else {
-					newAnchorTransitions[int(g)*6+bit] = newID
-				}
-			} else {
-				newAnchorTransitions[int(g)*6+bit] = InvalidState
-			}
-		}
-	}
-	d.transitions, d.anchorTransitions, d.tagUpdateIndices, d.anchorTagUpdateIndices, d.accepting, d.stateMatchPriority, d.stateMatchTags, d.stateIsBestMatch, d.stateIsSearch, d.numStates, d.searchState, d.matchState = newTransitions, newAnchorTransitions, newUpdateIndices, newAnchorUpdateIndices, newAccepting, newPrio, newMatchTags, newBest, newIsSearch, int(numGroups), StateID(stateToGroup[d.searchState]), StateID(stateToGroup[d.matchState])
-}
-
-func (d *DFA) computePhase2Metadata() {
-	d.isAlwaysTrue, d.warpPoints, d.warpPointState, d.warpPointGuards = make([]bool, d.numStates), make([]int16, d.numStates), make([]StateID, d.numStates), make([]syntax.EmptyOp, d.numStates)
-	for i := range d.warpPoints {
-		d.warpPoints[i] = -1
-		d.warpPointState[i] = InvalidState
-	}
-	d.findWarpPoints()
-	d.findSCCs()
-}
-func (d *DFA) findWarpPoints() {
-	for i := 0; i < d.numStates; i++ {
-		currState := StateID(i)
-		if d.accepting[i] {
-			continue
-		}
-		// 1. Check direct character transitions
-		progressByte, targetState, possible := -1, InvalidState, true
-		for b := 0; b < 256; b++ {
-			nextRaw := d.transitions[i*256+b]
-			if nextRaw == InvalidState {
-				continue
-			}
-			next := nextRaw & StateIDMask
-			if next == currState {
-				continue
-			}
-			if progressByte == -1 {
-				progressByte = b
-				targetState = next
-			} else {
-				possible = false
-				break
-			}
-		}
-		if possible && progressByte != -1 {
-			d.warpPoints[i] = int16(progressByte)
-			d.warpPointState[i] = targetState
-			continue
-		}
-
-		// 2. Check guarded transitions (e.g., \bH)
-		// Try to find a context where a unique character transition exists.
-		for bit := 0; bit < 6; bit++ {
-			s_ctx := d.anchorTransitions[i*6+bit]
-			if s_ctx == InvalidState {
-				continue
-			}
-			s_ctx &= StateIDMask
-			if s_ctx == currState {
-				continue
-			}
-			pByte, tState, ok := -1, InvalidState, true
-			for b := 0; b < 256; b++ {
-				nextRaw := d.transitions[int(s_ctx)*256+b]
-				if nextRaw == InvalidState {
-					continue
-				}
-				next := nextRaw & StateIDMask
-				if next == s_ctx || next == currState {
-					continue
-				}
-				if pByte == -1 {
-					pByte = b
-					tState = next
-				} else {
-					ok = false
-					break
-				}
-			}
-			if ok && pByte != -1 {
-				d.warpPoints[i] = int16(pByte)
-				d.warpPointState[i] = tState
-				d.warpPointGuards[i] = syntax.EmptyOp(1 << bit)
-				break
-			}
-		}
-	}
-}
-func (d *DFA) findSCCs() {
-	num := 0
-	index, lowlink, onStack, stack := make([]int, d.numStates), make([]int, d.numStates), make([]bool, d.numStates), []int{}
-	for i := range index {
-		index[i] = -1
-	}
-	var strongconnect func(v int)
-	strongconnect = func(v int) {
-		index[v] = num
-		lowlink[v] = num
-		num++
-		stack = append(stack, v)
-		onStack[v] = true
-		for b := 0; b < 256; b++ {
-			nextRaw := d.transitions[v*256+b]
-			if nextRaw == -1 {
-				continue
-			}
-			w := int(nextRaw & StateIDMask)
-			if index[w] == -1 {
-				strongconnect(w)
-				if lowlink[w] < lowlink[v] {
-					lowlink[v] = lowlink[w]
-				}
-			} else if onStack[w] {
-				if index[w] < lowlink[v] {
-					lowlink[v] = index[w]
-				}
-			}
-		}
-		if lowlink[v] == index[v] {
-			var component []int
-			for {
-				w := stack[len(stack)-1]
-				stack = stack[:len(stack)-1]
-				onStack[w] = false
-				component = append(component, w)
-				if w == v {
-					break
-				}
-			}
-			allAcc := true
-			for _, s := range component {
-				if !d.accepting[s] {
-					allAcc = false
-					break
-				}
-			}
-			if allAcc {
-				allTrans := true
-				for _, s := range component {
-					for b := 0; b < 256; b++ {
-						nextRaw := d.transitions[s*256+b]
-						if nextRaw == -1 {
-							allTrans = false
-							break
-						}
-						next := int(nextRaw & StateIDMask)
-						in := false
-						for _, cs := range component {
-							if cs == next {
-								in = true
-								break
-							}
-						}
-						if !in && !d.isAlwaysTrue[next] {
-							allTrans = false
-							break
-						}
-					}
-					if !allTrans {
-						break
-					}
-				}
-				if allTrans {
-					for _, s := range component {
-						d.isAlwaysTrue[s] = true
-					}
-				}
-			}
-		}
-	}
-	for i := 0; i < d.numStates; i++ {
-		if index[i] == -1 {
-			strongconnect(i)
-		}
-	}
-}
-func matchesByte(node *utf8Node, b byte) bool {
-	for _, r := range node.ranges {
-		if b >= r.lo && b <= r.hi {
-			return true
-		}
-	}
+func NewBitParallelDFA(prog *syntax.Prog) *BitParallelDFA { return nil }
+func (d *DFA) CanReachPriority(fromState, toState uint32, context syntax.EmptyOp, p_in, p_out int32) bool {
 	return false
 }
-func matchesByteFold(node *utf8Node, b byte) bool { return matchesByte(node, b) }
-
-func epsilonClosureWithPathTags(paths []nfaPath, prog *syntax.Prog, context syntax.EmptyOp, nodes []*utf8Node) ([]nfaPath, []PathTagUpdate) {
-	type key struct {
-		ID     uint32
-		NodeID uint32
-		Tags   uint64
-	}
-	best := make(map[key]int32)
-	type pathWithNewTags struct {
-		p    nfaPath
-		tags uint64
-	}
-	stack := make([]pathWithNewTags, len(paths))
-	for i, p := range paths {
-		stack[i] = pathWithNewTags{p, 0}
-	}
-
-	pathTags := make(map[int32]*PathTagUpdate)
-	for len(stack) > 0 {
-		ph := stack[len(stack)-1]
-		stack = stack[:len(stack)-1]
-		p, k := ph.p, key{ph.p.ID, ph.p.NodeID, ph.p.Tags}
-		if prio, ok := best[k]; ok && p.Priority >= prio {
-			continue
-		}
-		best[k] = p.Priority
-
-		if ph.tags != 0 {
-			update := pathTags[p.Priority]
-			if update == nil {
-				update = &PathTagUpdate{RelativePriority: p.Priority}
-				pathTags[p.Priority] = update
-			}
-			update.Tags |= ph.tags
-		}
-
-		if p.NodeID == 0 {
-			inst := prog.Inst[p.ID]
-			if inst.Op == syntax.InstMatch {
-				continue
-			}
-			switch inst.Op {
-			case syntax.InstAlt, syntax.InstAltMatch:
-				stack = append(stack, pathWithNewTags{nfaPath{nfaState: nfaState{ID: inst.Arg, NodeID: 0}, Priority: p.Priority + 1, Tags: p.Tags}, ph.tags})
-				stack = append(stack, pathWithNewTags{nfaPath{nfaState: nfaState{ID: inst.Out, NodeID: 0}, Priority: p.Priority, Tags: p.Tags}, ph.tags})
-			case syntax.InstCapture:
-				tagBit := uint64(0)
-				if inst.Arg < 64 {
-					tagBit = (1 << inst.Arg)
-				}
-				stack = append(stack, pathWithNewTags{nfaPath{nfaState: nfaState{ID: inst.Out, NodeID: 0}, Priority: p.Priority, Tags: p.Tags | tagBit}, ph.tags | tagBit})
-			case syntax.InstNop:
-				stack = append(stack, pathWithNewTags{nfaPath{nfaState: nfaState{ID: inst.Out, NodeID: 0}, Priority: p.Priority, Tags: p.Tags}, ph.tags})
-			case syntax.InstEmptyWidth:
-				if syntax.EmptyOp(inst.Arg)&context == syntax.EmptyOp(inst.Arg) {
-					stack = append(stack, pathWithNewTags{nfaPath{nfaState: nfaState{ID: inst.Out, NodeID: 0}, Priority: p.Priority, Tags: p.Tags}, ph.tags})
-				}
-			}
-		}
-	}
-	var result []nfaPath
-	for k, prio := range best {
-		if k.NodeID != 0 {
-			result = append(result, nfaPath{nfaState: nfaState{ID: k.ID, NodeID: k.NodeID}, Priority: prio, Tags: k.Tags})
-			continue
-		}
-		inst := prog.Inst[k.ID]
-		switch inst.Op {
-		case syntax.InstRune, syntax.InstRune1, syntax.InstRuneAny, syntax.InstRuneAnyNotNL, syntax.InstMatch, syntax.InstEmptyWidth:
-			result = append(result, nfaPath{nfaState: nfaState{ID: k.ID, NodeID: k.NodeID}, Priority: prio, Tags: k.Tags})
-		}
-	}
-	sort.Slice(result, func(i, j int) bool {
-		if result[i].Priority != result[j].Priority {
-			return result[i].Priority < result[j].Priority
-		}
-		if result[i].ID != result[j].ID {
-			return result[i].ID < result[j].ID
-		}
-		return result[i].Tags < result[j].Tags
-	})
-
-	var updates []PathTagUpdate
-	for _, u := range pathTags {
-		updates = append(updates, *u)
-	}
-	sort.Slice(updates, func(i, j int) bool { return updates[i].RelativePriority < updates[j].RelativePriority })
-	return result, updates
-}
+func (d *DFA) registerNodes(node *UTF8Node, nodes *[]*UTF8Node) {}
+func (d *DFA) computePhase2Metadata(prog *syntax.Prog)          {}
+func (d *DFA) ReachableToMatch(s uint32) uint64                 { return 0 }
+func (d *DFA) StateToMasks(s uint32) []uint64                   { return nil }
+func (d *DFA) StateToMask(s uint32) uint64                      { return 0 }
+func (d *DFA) WarpPoint(s uint32) int                           { return -1 }
+func (d *DFA) WarpPointState(s uint32) uint32                   { return InvalidState }
+func (d *DFA) WarpPointGuard(s uint32) syntax.EmptyOp           { return 0 }
+func (d *DFA) MaxInst() int                                     { return 0 }
+func (d *DFA) minimize()                                        {}

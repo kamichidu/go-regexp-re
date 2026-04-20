@@ -197,15 +197,16 @@ func (re *Regexp) allSubmatch(b []byte, n int, deliver func([]int)) {
 	if n < 0 {
 		n = len(b) + 1
 	}
+	numRegs := (re.numSubexp + 1) * 2
 	offset := 0
 	for i := 0; i < n; i++ {
 		loc := re.FindSubmatchIndex(b)
 		if loc == nil {
 			break
 		}
-		locCopy := make([]int, len(loc))
-		for j := range loc {
-			if loc[j] >= 0 {
+		locCopy := make([]int, numRegs)
+		for j := range locCopy {
+			if j < len(loc) && loc[j] >= 0 {
 				locCopy[j] = loc[j] + offset
 			} else {
 				locCopy[j] = -1
@@ -268,7 +269,7 @@ func (re *Regexp) SubexpIndex(name string) int {
 		return -1
 	}
 	for i, n := range re.SubexpNames() {
-		if name == n {
+		if i > 0 && name == n {
 			return i
 		}
 	}
@@ -327,8 +328,11 @@ func (re *Regexp) expand(dst []byte, template string, src []byte, match []int) [
 				} else {
 					index = re.SubexpIndex(name)
 				}
-				if index >= 0 && index*2+1 < len(match) && match[index*2] >= 0 {
-					dst = append(dst, src[match[index*2]:match[index*2+1]]...)
+				if index >= 0 && index*2+1 < len(match) {
+					sIdx, eIdx := match[index*2], match[index*2+1]
+					if sIdx >= 0 && eIdx >= sIdx && eIdx <= len(src) {
+						dst = append(dst, src[sIdx:eIdx]...)
+					}
 				}
 			}
 		} else {

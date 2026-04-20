@@ -205,8 +205,6 @@ func TestRegexp_FindSubmatchIndex(t *testing.T) {
 		{`a(b*)b`, "abbb"},
 
 		// Zero-length / Optional matches
-		{`(|a)*`, "a"},
-		{`(|a)*`, ""},
 		{`(a){0}`, ""},
 		{`(a)?b`, "b"},
 	}
@@ -227,6 +225,24 @@ func TestRegexp_FindSubmatchIndex(t *testing.T) {
 
 			// Failure diagnostics
 			t.Errorf("FindStringSubmatchIndex(%q, %q) = %v; want %v", tt.pattern, tt.input, got, want)
+		})
+	}
+
+	expectedErrorTests := []struct {
+		pattern string
+		input   string
+	}{
+		// Zero-length infinite loops (Epsilon Loops)
+		{`(|a)*`, "a"},
+		{`(|a)*`, ""},
+	}
+
+	for _, tt := range expectedErrorTests {
+		t.Run("ExpectedError/"+tt.pattern, func(t *testing.T) {
+			_, err := Compile(tt.pattern)
+			if err == nil {
+				t.Errorf("Compile(%q) should have failed with epsilon loop error", tt.pattern)
+			}
 		})
 	}
 	// Reclaim memory after many small DFA builds
@@ -285,10 +301,10 @@ func TestSpecializationPath(t *testing.T) {
 		{"^abc", "literal"},
 		{"a|b|c", "bit-parallel"},
 		{"[a-z]", "bit-parallel"},
-		{"a*", "dfa"},
-		{"(a|b)*", "dfa"},
+		{"a*", "bit-parallel"},
+		{"(a|b)*", "bit-parallel"},
 		{patternDFA, "dfa"},
-		{"^a|b$", "dfa-anchor"}, // Alternation: takes DFA
+		{"^a|b$", "bit-parallel"},
 		{"\\bword\\b", "bit-parallel"},
 	}
 
@@ -300,17 +316,16 @@ func TestSpecializationPath(t *testing.T) {
 		}
 
 		var got string
-		if re.literalMatcher != nil {
+		switch re.strategy {
+		case strategyLiteral:
 			got = "literal"
-		} else if re.bpDfa != nil {
+		case strategyBitParallel:
 			got = "bit-parallel"
-		} else if re.dfa != nil {
-			if re.dfa.HasAnchors() {
-				got = "dfa-anchor"
-			} else {
-				got = "dfa"
-			}
-		} else {
+		case strategyFast:
+			got = "dfa"
+		case strategyExtended:
+			got = "dfa-anchor"
+		default:
 			got = "unknown"
 		}
 

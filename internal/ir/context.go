@@ -2,40 +2,56 @@ package ir
 
 import (
 	"github.com/kamichidu/go-regexp-re/syntax"
+	"math/bits"
 )
 
-// CalculateContext determines the empty-width assertions (anchors) that are true at position i in byte slice b.
-func CalculateContext(b []byte, i int) syntax.EmptyOp {
-	var r1, r2 rune = -1, -1
-	if i == 0 {
-		r1 = -1
-	} else {
-		r1 = rune(b[i-1])
+type RuneClass uint8
+
+const (
+	RuneClassOther RuneClass = iota
+	RuneClassWord
+	RuneClassNL
+	RuneClassStart
+)
+
+func GetRuneClass(r rune) RuneClass {
+	if r < 0 {
+		return RuneClassStart
 	}
-	if i == len(b) {
-		r2 = -1
-	} else {
-		r2 = rune(b[i])
+	if r == '\n' {
+		return RuneClassNL
 	}
-	op := CalculateContextBetween(r1, r2)
-	return op
+	if IsWord(r) {
+		return RuneClassWord
+	}
+	return RuneClassOther
 }
 
-// CalculateContextBetween returns the empty-width assertions that are true
-// between two runes r1 and r2. Use -1 to represent the start or end of text.
-func CalculateContextBetween(r1, r2 rune) syntax.EmptyOp {
+func GetByteClass(b byte) RuneClass {
+	if b == '\n' {
+		return RuneClassNL
+	}
+	if b < 0x80 {
+		if syntax.IsWordChar(rune(b)) {
+			return RuneClassWord
+		}
+		return RuneClassOther
+	}
+	return RuneClassOther
+}
+
+func CalculateContextBetween(c1, c2 RuneClass) syntax.EmptyOp {
 	var op syntax.EmptyOp
-	if r1 < 0 {
+	if c1 == RuneClassStart {
 		op |= syntax.EmptyBeginText | syntax.EmptyBeginLine
-	} else if r1 == '\n' {
+	}
+	if c1 == RuneClassNL {
 		op |= syntax.EmptyBeginLine
 	}
-	if r2 < 0 {
-		op |= syntax.EmptyEndText | syntax.EmptyEndLine
-	} else if r2 == '\n' {
-		op |= syntax.EmptyEndLine
-	}
-	if IsWord(r1) != IsWord(r2) {
+
+	isWord1 := (c1 == RuneClassWord)
+	isWord2 := (c2 == RuneClassWord)
+	if isWord1 != isWord2 {
 		op |= syntax.EmptyWordBoundary
 	} else {
 		op |= syntax.EmptyNoWordBoundary
@@ -43,19 +59,77 @@ func CalculateContextBetween(r1, r2 rune) syntax.EmptyOp {
 	return op
 }
 
-// IsWordBoundary reports whether position i in byte slice b is a word boundary.
-func IsWordBoundary(b []byte, i int) bool {
-	var r1, r2 rune = -1, -1
-	if i > 0 {
-		r1 = rune(b[i-1])
+func CalculateContextByClass(c1, c2 RuneClass) syntax.EmptyOp {
+	var op syntax.EmptyOp
+	if c1 == RuneClassStart {
+		op |= syntax.EmptyBeginText | syntax.EmptyBeginLine
 	}
-	if i < len(b) {
-		r2 = rune(b[i])
+	if c1 == RuneClassNL {
+		op |= syntax.EmptyBeginLine
 	}
-	return IsWord(r1) != IsWord(r2)
+
+	isWord1 := (c1 == RuneClassWord)
+	isWord2 := (c2 == RuneClassWord)
+	if isWord1 != isWord2 {
+		op |= syntax.EmptyWordBoundary
+	} else {
+		op |= syntax.EmptyNoWordBoundary
+	}
+	return op
 }
 
-// IsWord reports whether rune r is considered a "word" character.
+// CalculateContext determines the empty-width assertions at junction i.
+// Strictly Byte-Oriented: No rune decoding, no loops.
+func CalculateContext(b []byte, i int) syntax.EmptyOp {
+	var op syntax.EmptyOp
+	var wordLeft, wordRight bool
+
+	// Junction Left Analysis
+	if i == 0 {
+		op |= syntax.EmptyBeginText | syntax.EmptyBeginLine
+	} else {
+		prev := b[i-1]
+		if prev == '\n' {
+			op |= syntax.EmptyBeginLine
+		}
+		// ASCII Word Char check: 0x80+ are always Non-Word.
+		if prev < 0x80 && syntax.IsWordChar(rune(prev)) {
+			wordLeft = true
+		}
+	}
+
+	// Junction Right Analysis
+	if i == len(b) {
+		op |= syntax.EmptyEndText | syntax.EmptyEndLine
+	} else {
+		curr := b[i]
+		if curr == '\n' {
+			op |= syntax.EmptyEndLine
+		}
+		// ASCII Word Char check: 0x80+ are always Non-Word.
+		if curr < 0x80 && syntax.IsWordChar(rune(curr)) {
+			wordRight = true
+		}
+	}
+
+	if wordLeft != wordRight {
+		op |= syntax.EmptyWordBoundary
+	} else {
+		op |= syntax.EmptyNoWordBoundary
+	}
+	return op
+}
+
 func IsWord(r rune) bool {
+	if r < 0 || r >= 0x80 {
+		return false
+	}
 	return syntax.IsWordChar(r)
+}
+
+func GetTrailingByteCount(lead byte) int {
+	if lead < 0x80 {
+		return 0
+	}
+	return bits.LeadingZeros8(^lead) - 1
 }

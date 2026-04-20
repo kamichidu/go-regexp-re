@@ -1,4 +1,4 @@
-= go-regexp-re: Pure Go High-Performance DFA Regular Expression Engine
+= go-regexp-re: Pure Go Byte-Oriented DFA Regex Engine
 :linkattrs:
 
 image:https://pkg.go.dev/badge/github.com/kamichidu/go-regexp-re.svg["Go Reference", link="https://pkg.go.dev/github.com/kamichidu/go-regexp-re"]
@@ -8,92 +8,100 @@ image:https://img.shields.io/github/license/kamichidu/go-regexp-re["License", li
 
 [IMPORTANT]
 ====
-This project is currently in **Beta**. While it aims for high performance and standard library compatibility, it may still contain bugs or undergo significant architectural changes. Please use with caution in production environments.
+This project is in **Beta**. Architectural changes and bug fixes are ongoing. Use in production environments should be evaluated accordingly.
 ====
 
-go-regexp-re is a high-performance regular expression engine for Go,
-designed to surpass the throughput limits of the standard `regexp` package while maintaining $O(n)$ time complexity.
+go-regexp-re is a pure Go byte-oriented DFA regex engine. It is designed for extreme throughput and drop-in compatibility with the standard `regexp` package while maintaining $O(n)$ time complexity.
 
-== Core Philosophy
+== Technical Characteristics
 
-* **Pure Go (Zero CGO)**: Achieving maximum performance without sacrificing portability or introducing the overhead of C-interop.
-* **Deterministic Finite Automaton (DFA)**: Patterns are compiled into a deterministic transition table for constant-time processing per byte.
-* **Byte-Oriented Scanning**: Direct scanning of `[]byte` without runtime UTF-8 decoding to maximize CPU pipeline efficiency.
-* **Drop-in Compatibility**: Designed as a near-identical replacement for Go's standard `regexp` package.
+* **Pure Go**: Implementation is written entirely in Go without CGO dependencies.
+* **Byte-Oriented Scanning**: Input is processed as a raw byte sequence (`[]byte`) to avoid the overhead of UTF-8 rune decoding and maximize CPU pipeline efficiency.
+* **Deterministic Finite Automaton (DFA)**: Patterns are converted into deterministic transition tables to ensure constant-time processing per input byte.
+* **Drop-in Compatibility**: The exported API follows the patterns established by the Go standard `regexp` package.
 
-== Performance
+== Performance Model
 
-`go-regexp-re` is designed to provide significantly higher throughput than the standard library for common patterns by maximizing hardware utilization and minimizing runtime overhead. By moving computation to the compilation phase and leveraging SIMD/bit-parallel execution, it explores the physical limits of string matching in Go.
+The engine achieves high throughput by offloading computation to the compilation phase and utilizing SIMD/bit-parallel execution paths. This performance model is optimized for long-lived regex objects where the construction cost is amortized over many execution cycles.
 
-== Architectural Trade-offs
+== Architectural Implementation
 
-`go-regexp-re` achieves its performance through deliberate engineering choices:
+1. **Compilation Cost**: The `Compile` phase involves state space exploration and transition table construction. For complex patterns, compilation time and memory usage are higher than the standard NFA-based implementation.
+2. **Memory Requirements**: The resulting DFA transition tables occupy memory proportional to the number of states and the alphabet size.
+3. **Memory Limits**: A configurable `MaxMemory` parameter is enforced during compilation to prevent unbounded memory allocation.
+4. **Byte-Level Semantics**: The engine matches physical bytes. It does not support standard `\uFFFD` semantics for invalid UTF-8 sequences.
 
-1. **Shift to Compilation Time**: Complexity is pushed into the `Compile` phase. Compilation involves heavy state exploration and optimization, making it slower than the standard library for complex patterns.
-2. **Memory for Performance**: High throughput is achieved by expanding patterns into large DFA transition tables. This leads to higher memory consumption compared to standard NFA engines.
-3. **State Explosion Protection**: Complex patterns can lead to an exponential explosion of DFA states. To prevent OOM crashes, a configurable memory limit (`MaxMemory`) is enforced during compilation.
-4. **Byte-Oriented Trade-off**: By scanning raw bytes and skipping runtime UTF-8 decoding, we cannot match invalid UTF-8 sequences with `\uFFFD`.
+== Usage
 
-== Usage & Best Practices
-
-=== Basic Usage
-
-The default memory limit for DFA construction is **64MiB**. For complex patterns, use `CompileWithOption`.
+The default memory limit for DFA construction is **64MiB**. For patterns requiring larger state spaces, use `CompileWithOptions`.
 
 [source,go]
 ----
-import "github.com/kamichidu/go-regexp-re"
+import (
+    regexp "github.com/kamichidu/go-regexp-re"
+)
 
 func main() {
-    // Basic compilation
-    re := goregexpre.MustCompile(`[a-zA-Z_][a-zA-Z0-9_]*`)
+    // Basic usage
+    re := regexp.MustCompile(`[a-zA-Z_][a-zA-Z0-9_]*`)
 
-    // Compilation with custom options
-    reComplex, err := goregexpre.CompileWithOption(`your-complex-pattern`, goregexpre.CompileOption{
-        MaxMemory: 256 * 1024 * 1024, // 256MiB
+    // Custom options
+    reComplex, err := regexp.CompileWithOptions(`pattern`, regexp.CompileOptions{
+        MaxMemory: 256 * 1024 * 1024,
     })
 }
 ----
 
 === Best Practice: Long-lived Objects
 
-Because compilation is expensive, **always compile your patterns once and reuse them.**
+Regex compilation in this engine is computationally expensive. To amortize the construction cost, it is recommended to compile patterns once and reuse the resulting objects across multiple execution cycles.
 
-* **Recommendation**: Use **package-level variables** or singletons. Avoid compiling patterns within hot loops or frequently called functions.
+* **Recommendation**: Utilize package-level variables or singletons to store compiled regex objects. Avoid invoking `Compile` or `MustCompile` within hot loops or performance-critical paths.
 
 [source,go]
 ----
-var identRe = goregexpre.MustCompile(`[a-zA-Z_][a-zA-Z0-9_]*`)
+var identRe = regexp.MustCompile(`[a-zA-Z_][a-zA-Z0-9_]*`)
 
 func IsIdentifier(s string) bool {
     return identRe.MatchString(s)
 }
 ----
 
-== Compatibility & Limitations
+== Compatibility & Constraints
 
-`go-regexp-re` aims for high compatibility with standard Go syntax, with specific omissions for performance:
+The following constraints apply to maintain $O(n)$ time complexity and DFA determinism:
 
-1. **API Omission**: Features that cannot be efficiently implemented in DFA (e.g., specific backreferences) are **omitted at the API level**.
-2. **No Backreferences**: Backreferences (e.g., `(a)\1`) are not supported to guarantee $O(n)$ time complexity.
-3. **No POSIX Semantics**: POSIX regex semantics are unsupported to avoid non-deterministic overhead.
-4. **UTF-8 Replacement Character**: `\uFFFD` matches only its specific UTF-8 sequence, not invalid bytes, due to byte-oriented scanning.
+1. **No Backreferences**: Backreferences (e.g., `(a)\1`) are not supported.
+2. **No POSIX Semantics**: Standard Go (leftmost-first) semantics are used; POSIX matching is unsupported.
+3. **API Subset**: Functions that require features incompatible with DFA execution are omitted.
 
-== Architecture & Algorithms
+=== Known Issues: Submatch Precision
 
-For a deep dive into the engineering behind the engine, please refer to our technical documentation:
+Submatch extraction is implemented via a 3-pass strategy. The following cases may exhibit boundary offsets of $\pm 1$ byte compared to the standard library:
 
-* **xref:docs/algorithm.adoc[Technical Deep Dive: go-regexp-re Algorithms]**
+* **Greedy Loop Boundaries**: Patterns such as `a*(a)` or `(.*)a` when matching repeated characters.
+* **Complex Nested Groups**: Certain configurations of nested optional groups like `a*(|(b))c*`.
 
-Key innovations include:
-- **0-Pass (Literal Bypass)**: $O(1)$ submatch extraction for fixed strings.
-- **Bit-parallel DFA**: Branchless state transitions for small patterns.
-- **Guarded SIMD Warp**: Speculative skipping with anchor-aware post-verification.
-- **DFA-First Hybrid**: Deterministic 2-pass strategy for precise submatch extraction.
+Refinements to the priority resolution logic are ongoing to address these edge cases.
+
+== Implementation Details
+
+Refer to the internal documentation for details on the algorithms used:
+
+* **xref:docs/algorithm.adoc[Technical Documentation: Algorithms]**
+
+Summary of components:
+- **0-Pass (Literal Bypass)**: SIMD-based matching for fixed-string patterns.
+- **Bit-parallel DFA**: Bitwise state transitions for small instruction sets.
+- **Guarded SIMD Warp**: Accelerated skipping for patterns with fixed prefixes.
+- **3-Pass Sparse TDFA**: Deterministic submatch extraction consisting of:
+    1. **Naked Discovery**: Identifies match boundaries.
+    2. **Backward Trace**: Reconstructs the NFA path from final priority.
+    3. **Forward Licking**: Applies register updates using transition-resident delta tags.
 
 == Testing & Benchmarking
 
-To run functional tests and the compatibility suite:
+Functional and compatibility tests:
 
 [source,bash]
 ----
@@ -101,7 +109,7 @@ go test -v .
 go test -v ./internal/compat
 ----
 
-To run comprehensive engine-to-engine benchmarks (Hyperscan, PCRE2, etc.):
+Performance benchmarks:
 
 [source,bash]
 ----
@@ -109,22 +117,16 @@ cd internal/benchmark
 go test -v -bench . -benchmem -tags goregexp,goregexpre,hyperscan,pcre2cgo
 ----
 
-*Note*: `-tags` are required. Some engines may require `libpcre2` or `libhs` to be installed.
+== Roadmap
 
-== TODO & Roadmap
-
-`go-regexp-re` is an ongoing research project with the following prioritized milestones:
-
-1. **Enhanced Standard Compatibility**: Continuously resolve edge cases to improve functional alignment with `regexp`.
-2. **Broadened High Performance**: Ensure superior throughput across a wider range of real-world use cases.
-3. **Optimization of Construction Phase**: Reduce compilation time and memory consumption during DFA generation.
-4. **Wait-free Concurrent Scan**: Enable lock-free concurrent scans across multiple goroutines.
-5. **The Ultimate Stress Test**: Consolidate all Japanese postal codes (~125,000 patterns) into one engine.
-6. **Lookahead/Lookbehind Support**: Implement support for fixed-length assertions.
-7. **Competitive Benchmarking**: Establish clear positioning against Hyperscan, RE2, and PCRE2.
+1. **Repetition Priority Resolution**: Alignment of greedy loop submatch boundaries.
+2. **Construction Phase Optimization**: Reduction of compilation time and memory footprint.
+3. **Concurrent Scan Support**: Verification of concurrent execution across goroutines.
+4. **Postal Code Stress Test**: Scaling to large pattern sets (100,000+ patterns).
+5. **Fixed-length Assertions**: Support for lookahead/lookbehind.
 
 == Acknowledgments
 
-`go-regexp-re` owes its core concept and inspiration to the legendary Perl module **`Regexp::Assemble`**. 
+`go-regexp-re` owes its core concept and inspiration to the legendary Perl module **`Regexp::Assemble`**.
 
 Years ago, the profound elegance and power of `Regexp::Assemble` left a lasting impression on me. This project is an attempt to evolve that same spirit within the modern Go ecosystem, pushing the boundaries of DFA-based matching to its physical limits.

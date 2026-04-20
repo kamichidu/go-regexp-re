@@ -1,0 +1,81 @@
+= Multi-byte Warp Optimization & State Explosion Protection
+
+This document describes the design and implementation of two synergistic optimizations: the **Multi-byte Warp** for $O(1)$ character throughput, and **Priority-based Uniquing** for state explosion protection.
+
+== 1. Objective
+
+* **Prevent State Explosion**: Avoid the combinatorial explosion of DFA states caused by loop structures (`.*`, `a*`) where redundant NFA paths with different priorities diverge.
+* **Maximize Throughput**: Achieve near-constant time per UTF-8 character by "warping" (skipping) trailing bytes after processing only the Lead Byte.
+* **Maintain Precision**: Ensure that capture groups and anchors remain accurate even when byte-level scanning is partially bypassed.
+
+== 2. Multi-byte Warp (External Delegation Skip)
+
+The Warp strategy treats a multi-byte UTF-8 sequence as a single logical transition in the DFA hot loop.
+
+=== 2.1 Lead-Byte Detection & Length Calculation
+
+The total length $L$ of a UTF-8 character can be determined solely from its first byte (Lead Byte).
+
+[cols="1,1,1"]
+|===
+| Bit Pattern | $L$ (Total Bytes) | $N$ (Trailing Bytes to Skip)
+| `0xxxxxxx`  | 1                 | 0 (ASCII)
+| `110xxxxx`  | 2                 | 1
+| `1110xxxx`  | 3                 | 2
+| `11110xxx`  | 4                 | 3
+|===
+
+The execution engine uses `math/bits.LeadingZeros8(^byteVal) - 1` to calculate the skip distance $N$ without branching.
+
+=== 2.2 Execution Engine Logic (`matchExecLoop` / `submatchExecLoop`)
+
+When the engine encounters a Lead Byte with `WarpStateFlag` (Bit 23) set in the transition table:
+
+[source,go]
+----
+// Logic inside DFA execution loop
+if (rawNext & ir.WarpStateFlag) != 0 {
+    skip := bits.LeadingZeros8(^byteVal) - 1
+    if skip < 0 { skip = 0 }
+
+    // For submatch extraction, we fill the history for intermediate bytes
+    for j := 1; j <= skip; j++ {
+        mc.history[i+j] = state // triggered Lead-Byte state
+    }
+    i += 1 + skip
+}
+----
+
+=== 2.3 Warp-Aware Tag Bundling
+
+During DFA construction, if a transition corresponds to a shortcut (warp), all tags encountered on the skipped NFA path are bundled:
+
+1. **Shortcutting**: In `internal/ir/utf8.go`, the `anyRuneTrie` directly links Lead Byte ranges to the completion state.
+2. **Collection**: `DFA.build` follows the epsilon closure from the shortcut destination to collect tags.
+3. **Encoding**: These tags are merged into the transition's `PostUpdates`.
+
+== 3. State Explosion Protection (Priority Uniquing)
+
+State explosion occurs when loop structures create a vast set of NFA paths with diverging priorities.
+
+=== 3.1 Winner-Takes-All Policy
+
+In `epsilonClosureWithPathTags`, the engine enforces a strict uniquing rule based on the **Leftmost-First** principle:
+
+* For each NFA state `(StateID, NodeID)`, only the **highest priority (minimum Priority value)** path is retained.
+* Any lower-priority path reaching the same NFA state is discarded immediately, as it can never "win" the match.
+* This convergence prevents the creation of thousands of DFA states for simple patterns like `.*` or `a*`.
+
+=== 3.2 isBestMatch Optimization
+
+A match is only finalized (`isBestMatch = true`) if **no other active NFA path** with equal or better priority can still reach a match. This ensures the engine correctly identifies the longest match in greedy repetitions.
+
+== 4. Implementation Details
+
+* **WarpStateFlag (Bit 23)**: Marks transitions that cover a full UTF-8 character.
+* **StateIDMask (0x007FFFFF)**: Reserves bits for flags while allowing 8M states.
+* **Minimization Preservation**: The `minimize` function uses bitwise operations to ensure `WarpStateFlag` and `TaggedStateFlag` are carried over to the minimized transition table.
+* **Memory Tracking**: Construction caches (`nfaToDfa`, `closureCache`) are tracked against `MaxMemory` to prevent OOM.
+
+=== Ambiguous Dot Junctions
+Lead-Byte Warp (Jump Optimization) relies on the following bytes being part of a known multi-byte sequence. When a dot `.` is placed between multi-byte characters, the warp pointer calculation may conflict with physical byte boundaries, making deterministic transitions impossible without backtracking. In such cases, the engine prioritizes performance and DFA purity, returning false (InvalidState) for transitions that would require context-dependent consumption logic.

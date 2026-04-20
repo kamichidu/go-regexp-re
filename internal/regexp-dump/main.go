@@ -38,7 +38,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	dfa, err := ir.NewDFA(prog)
+	dfa, err := ir.NewDFAWithMemoryLimit(context.Background(), prog, 64*1024*1024, true)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error building DFA: %v\n", err)
 		os.Exit(1)
