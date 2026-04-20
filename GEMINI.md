@@ -38,6 +38,9 @@ The engine follows a **3-Pass Sparse TDFA** strategy to guarantee peak performan
 - **Pass 1: Naked Discovery**: A single high-speed scan (DFA or BP-DFA) determines match boundaries `[start, end]` and records a history of deterministic states. This pass uses a minimal DFA that excludes priority and tag information to physically block the exponential state explosion.
 - **Pass 2: Path Identity Selection**: Identifies the unique "winning NFA path" from start to end based on Go's leftmost-first rules using the recorded history.
 - **Pass 3: Group-Specific Recap**: Uses independent "burned tables" for each capturing group to determine boundaries along the winning path.
+
+#### 2.5.1 NFA-Free Path Selection Mandate (Pass 2)
+Path selection in Pass 2 MUST NOT employ runtime NFA simulation or dynamic priority comparisons. The identity of the winning path must be reconstructed solely by following pre-calculated priority transitions (`InputPriority` -> `NextPriority`) stored within the `RecapTable`. Pass 2 must operate as a strictly linear, table-driven loop that updates the current priority identity based on the `StateID` history from Pass 1, ensuring total compliance with the engine's calculation-free philosophy.
 - **Zero-Allocation Execution**: All recap paths MUST be strictly iterative and utilize stack-resident or pre-allocated buffers, ensuring zero heap allocations during execution.
 
 ### 2.6 Physical Prevention of State Explosion (Naked State Identity)

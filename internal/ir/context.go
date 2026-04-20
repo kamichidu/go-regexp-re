@@ -2,6 +2,7 @@ package ir
 
 import (
 	"github.com/kamichidu/go-regexp-re/syntax"
+	"math/bits"
 )
 
 type RuneClass uint8
@@ -36,7 +37,6 @@ func GetByteClass(b byte) RuneClass {
 		}
 		return RuneClassOther
 	}
-	// Under ASCII Word Boundary mandate, all multi-byte bytes belong to Non-Word class.
 	return RuneClassOther
 }
 
@@ -125,4 +125,11 @@ func IsWord(r rune) bool {
 		return false
 	}
 	return syntax.IsWordChar(r)
+}
+
+func GetTrailingByteCount(lead byte) int {
+	if lead < 0x80 {
+		return 0
+	}
+	return bits.LeadingZeros8(^lead) - 1
 }

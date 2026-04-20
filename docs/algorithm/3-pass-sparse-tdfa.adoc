@@ -48,3 +48,12 @@ This ensures that even regular expressions with hundreds of capturing groups can
 * **Strict $O(n)$ Complexity**: All three passes are linear.
 * **NFA-Free Runtime**: No runtime NFA simulation or backtracking.
 * **Priority-Burned Precision**: Maintains 100% compatibility with Go's standard matching rules.
+
+=== Phase 2: Path Identity Selection (Priority-Chain Tracking)
+Pass 2 is implemented as a "Priority-Chain Tracking" loop, identifying the winning path without NFA simulation.
+
+* **Mechanism**: Every DFA transition edge stores a set of `RecapEntry` objects, each representing an NFA path's "Input Priority" (relative to the state minimum) and its corresponding "Next Priority" after consuming the byte or performing a warp.
+* **Tracking**: Starting from Priority 0 at the match start position, the engine follows the recorded `StateID` history. At each step, it lookups the `NextPriority` mapped to the current `InputPriority` for the given byte.
+* **Warp Integration**: During a lead-byte warp, the `RecapEntry` encapsulates the cumulative priority update for the entire multi-byte sequence, allowing the path identity to stay synchronized with the pointer jumps.
+
+This design ensures that Pass 2 remains a pure table-lookup operation, strictly (n)$ in time and zero-allocation in space.

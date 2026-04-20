@@ -118,6 +118,7 @@ func (re *Regexp) FindSubmatchIndex(b []byte) []int {
 	}
 	regs[0], regs[1] = start, end
 	if re.numSubexp > 0 {
+		re.sparseTDFA_PathSelection(mc, b, start, end, prio)
 		re.sparseTDFA_Recap(mc, b, start, end, prio, regs)
 	}
 	return regs
@@ -158,8 +159,6 @@ func submatchExecLoop[T loopTrait](trait T, re *Regexp, b []byte, mc *matchConte
 	for i := 0; i <= numBytes; {
 		mc.history[i] = state
 		sidx := int(state & ir.StateIDMask)
-
-		// 1. Post-Junction Accept Guard
 		if sidx >= 0 && sidx < len(accepting) && accepting[sidx] {
 			req := guards[sidx]
 			if (ir.CalculateContext(b, i) & req) == req {
@@ -177,14 +176,12 @@ func submatchExecLoop[T loopTrait](trait T, re *Regexp, b []byte, mc *matchConte
 				}
 			}
 		}
-
 		if i < numBytes {
 			byteVal := b[i]
 			if sidx >= 0 && sidx < numStates {
 				off := (sidx << 8) | int(byteVal)
 				rawNext := trans[off]
 				if rawNext != ir.InvalidState {
-					// 2. Pre-Junction Transition Guard
 					if (rawNext & ir.AnchorVerifyFlag) != 0 {
 						req := syntax.EmptyOp((rawNext & ir.AnchorMask) >> 24)
 						if (ir.CalculateContext(b, i) & req) != req {
@@ -296,6 +293,41 @@ func matchExecLoop[T loopTrait](trait T, re *Regexp, b []byte) (int, int, int) {
 		}
 	}
 	return bestStart, bestEnd, bestPriority
+}
+
+// Pass 2: Identifies the unique "winning NFA path" from start to end.
+func (re *Regexp) sparseTDFA_PathSelection(mc *matchContext, b []byte, start, end, prio int) {
+	d := re.dfa
+	recap := d.RecapTables()[0]
+	currPrio := int16(0) // Start priority for winning path at start position
+	for i := start; i < end; {
+		state := mc.history[i]
+		sidx := int(state & ir.StateIDMask)
+		byteVal := b[i]
+		off := (sidx << 8) | int(byteVal)
+		mc.pathHistory[i] = int32(currPrio)
+
+		entries := recap.Transitions[off]
+		found := false
+		for _, entry := range entries {
+			if entry.InputPriority == currPrio {
+				currPrio = entry.NextPriority
+				found = true
+				break
+			}
+		}
+		if !found {
+			break
+		}
+
+		rawNext := d.Transitions()[off]
+		if byteVal < 0x80 || (rawNext&ir.WarpStateFlag) == 0 {
+			i++
+		} else {
+			i += 1 + ir.GetTrailingByteCount(byteVal)
+		}
+	}
+	mc.pathHistory[end] = int32(currPrio)
 }
 
 func (re *Regexp) FindStringSubmatchIndex(s string) []int {
