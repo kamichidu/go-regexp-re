@@ -76,3 +76,6 @@ A match is only finalized (`isBestMatch = true`) if **no other active NFA path**
 * **StateIDMask (0x007FFFFF)**: Reserves bits for flags while allowing 8M states.
 * **Minimization Preservation**: The `minimize` function uses bitwise operations to ensure `WarpStateFlag` and `TaggedStateFlag` are carried over to the minimized transition table.
 * **Memory Tracking**: Construction caches (`nfaToDfa`, `closureCache`) are tracked against `MaxMemory` to prevent OOM.
+
+=== Ambiguous Dot Junctions
+Lead-Byte Warp (Jump Optimization) relies on the following bytes being part of a known multi-byte sequence. When a dot `.` is placed between multi-byte characters, the warp pointer calculation may conflict with physical byte boundaries, making deterministic transitions impossible without backtracking. In such cases, the engine prioritizes performance and DFA purity, returning false (InvalidState) for transitions that would require context-dependent consumption logic.

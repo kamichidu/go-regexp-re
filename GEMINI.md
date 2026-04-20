@@ -108,6 +108,9 @@ To maintain constant-time throughput and sub-linear memory growth for complex pa
 - **Priority-based NFA Path Uniquing**: During DFA construction (Subset Construction), the builder MUST strictly unique the NFA path set by `(StateID, NodeID)`. If multiple paths reach the same NFA state, only the path with the **highest priority (minimum value)** MUST be retained. This is the primary defense against state explosion in loop structures (e.g., `.*`, `a*`).
 - **Warp Flag Preservation**: The `WarpStateFlag` (Bit 23) MUST be preserved during DFA minimization to ensure that optimized transitions are not reverted to byte-by-byte scanning in the final engine.
 
+#### 2.19.1 Multi-byte Dot ('.') Determinism Mandate
+To ensure DFA determinism and $O(1)$ transitions, the behavior of `.` (dot) is strictly defined as matching a single byte or a static lead-byte unit. Standard library behavior involving complex grapheme clusters or context-dependent consumption is excluded as it requires NFA-like backtracking (violating Mandate 2.5). Patterns like `^あ.う$` matching `あいう` may return false if the dot junction conflicts with lead-byte warp boundaries; this is a conscious architectural trade-off for performance.
+
 ## 3. Feature Selection Policy
 
 ### 3.1 Supported Features
