@@ -246,7 +246,7 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 					matchP = prio
 					matchTags = s.Tags
 				}
-				matchUpdates = append(matchUpdates, PathTagUpdate{RelativePriority: s.Priority, NextPriority: -1, Tags: s.Tags})
+				matchUpdates = append(matchUpdates, PathTagUpdate{RelativePriority: s.Priority, NextPriority: s.Priority, Tags: s.Tags})
 			}
 		}
 		d.stateMinPriority = append(d.stateMinPriority, minP)
@@ -383,7 +383,7 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 			var entries []RecapEntry
 			for _, u := range nextRes.Updates {
 				entries = append(entries, RecapEntry{
-					InputPriority: int16(u.RelativePriority - d.stateMinPriority[i]),
+					InputPriority: int16(u.RelativePriority),
 					NextPriority:  int16(u.NextPriority),
 					PreTags:       u.Tags,
 				})
@@ -487,17 +487,7 @@ func epsilonClosureWithAnchorWall(prog *syntax.Prog, paths []NFAPath) ClosureRes
 		for i := range resPaths {
 			resPaths[i].Priority -= minTotalPrio
 		}
-		minSourcePrio := int32(1 << 30)
-		if len(paths) > 0 {
-			minSourcePrio = paths[0].Priority
-			for _, p := range paths {
-				if p.Priority < minSourcePrio {
-					minSourcePrio = p.Priority
-				}
-			}
-		}
 		for i := range updates {
-			updates[i].RelativePriority -= minSourcePrio
 			updates[i].NextPriority -= minTotalPrio
 		}
 	}

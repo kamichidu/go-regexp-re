@@ -11,10 +11,10 @@ func TestPass2PathIdentity(t *testing.T) {
 		input             string
 		expectedPrioChain []int16
 	}{
-		{`a|b`, "a", []int16{0, 0}},
-		{`a|b`, "b", []int16{1, 0}},
-		{`a(b|c)d`, "abd", []int16{0, 0, 0, 0}},
-		{`a(b|c)d`, "acd", []int16{0, 1, 0, 0}},
+		{`(a)|(b)`, "a", []int16{0, 0}},
+		{`(a)|(b)`, "b", []int16{1, 0}},
+		{`a((b)|(c))d`, "abd", []int16{0, 0, 0, 0}},
+		{`a((b)|(c))d`, "acd", []int16{0, 1, 0, 0}},
 	}
 
 	for _, tt := range tests {

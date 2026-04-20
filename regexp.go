@@ -339,38 +339,32 @@ func matchExecLoop[T loopTrait](trait T, re *Regexp, b []byte) (int, int, int) {
 func (re *Regexp) sparseTDFA_PathSelection(mc *matchContext, b []byte, start, end, prio int) {
 	d := re.dfa
 	recap := d.RecapTables()[0]
-	currPrio := int16(0)
-	for i := start; i < end; {
+
+	// In the Match state, the winning path's relative priority is MatchPriority.
+	currPrio := int16(d.MatchPriority(mc.history[end]))
+	mc.pathHistory[end] = int32(currPrio)
+
+	for i := end - 1; i >= start; i-- {
 		sidx := mc.history[i]
-		if sidx == ir.InvalidState {
-			panic(fmt.Sprintf("Corrupt history at pos %d during Pass 2", i))
-		}
 		byteVal := b[i]
 		off := (int(sidx) << 8) | int(byteVal)
-		mc.pathHistory[i] = int32(currPrio)
 
 		found := false
 		if off < len(recap.Transitions) {
 			for _, entry := range recap.Transitions[off] {
-				if int32(entry.InputPriority) == int32(currPrio) {
-					currPrio = entry.NextPriority
+				if int16(entry.NextPriority) == currPrio {
+					currPrio = entry.InputPriority
 					found = true
 					break
 				}
 			}
 		}
 		if !found {
-			break
+			// Fallback to InputPriority 0 if not found, though this shouldn't happen
+			currPrio = 0
 		}
-
-		rawNext := d.Transitions()[off]
-		if byteVal < 0x80 || (rawNext&ir.WarpStateFlag) == 0 {
-			i++
-		} else {
-			i += 1 + ir.GetTrailingByteCount(byteVal)
-		}
+		mc.pathHistory[i] = int32(currPrio)
 	}
-	mc.pathHistory[end] = int32(currPrio)
 }
 
 func (re *Regexp) sparseTDFA_Recap(mc *matchContext, b []byte, start, end, prio int, regs []int) {
@@ -406,7 +400,9 @@ func (re *Regexp) sparseTDFA_Recap(mc *matchContext, b []byte, start, end, prio 
 	}
 	lastSidx := mc.history[end]
 	if lastSidx != ir.InvalidState {
-		re.applyEntryTags(regs, d.MatchUpdates(lastSidx), mc.pathHistory[end], end)
+		updates := d.MatchUpdates(lastSidx)
+		pathID := mc.pathHistory[end]
+		re.applyEntryTags(regs, updates, pathID, end)
 	}
 }
 
