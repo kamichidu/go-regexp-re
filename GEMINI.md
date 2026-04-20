@@ -29,7 +29,7 @@ To maximize throughput, the engine MUST select the most efficient execution loop
 - **Bit-parallel Path (Glushkov BP-DFA)**: The **"Express Pass"** for small, simple patterns. Utilizes ultra-fast `uint64` bitwise operations to eliminate memory loads.
 - **Fast Path (Pure DFA)**: Automatically selected for larger patterns. It utilizes a minimalist table-based execution loop with **manual restarts and SIMD-accelerated prefix skipping**.
 - **Anchor-Aware Guarded SIMD Warp**: Selected for patterns with anchors. Utilizes a separate `anchorTransitions` table and **guarded warp points** to allow SIMD skipping even in the presence of anchors (e.g., `^`, `$`, `\b`).
-- **Explicit Hot-Loop Monomorphization**: To ensure zero-overhead, the engine MUST avoid Go generics (`GCShape` sharing) for the primary execution loops. Instead, it employs manually monomorphized functions (e.g., `fastExecLoop`, `extendedExecLoop`) to ensure the Go compiler can completely eliminate unreachable branches (like `if hasAnchors`) and avoid runtime dictionary lookups.
+- **Explicit Hot-Loop Monomorphization**: To ensure zero-overhead, the engine MUST avoid Go generics (`GCShape` sharing) for the primary execution loops. Instead, it employs manually monomorphized functions (e.g., `fastMatchExecLoop`, `extendedMatchExecLoop`, `extendedSubmatchExecLoop`) to ensure the Go compiler can completely eliminate unreachable branches (like `if hasAnchors`) and avoid runtime dictionary lookups.
 
 ### 2.5 Submatch Extraction Architecture (3-Pass Sparse TDFA)
 The engine follows a **3-Pass Sparse TDFA** strategy to guarantee peak performance, $O(n)$ time complexity, and 100% Go-compatible precision.
@@ -85,8 +85,8 @@ To maintain maximum throughput for small patterns, the BP-DFA MUST avoid all run
 
 ### 2.14 State Explosion Protection (Configurable & Scalable)
 - **Default Memory Threshold**: The DFA transition table is typically limited to **64MiB**.
-- **Dynamic Offloading**: When `MaxMemory` exceeds 1GiB, the engine MUST switch the NFA path set storage from memory to a **File-based backend** to prevent OOM during massive state explorations.
-- **Graceful Failure**: If a pattern exceeds the configured `MaxMemory`, return `regexp: pattern too large or ambiguous`.
+- **Graceful Failure**: If a pattern exceeds the configured `MaxMemory`, the engine MUST return `regexp: pattern too large or ambiguous`. This is enforced by calculating a maximum state count (approx. 2KiB per state) and terminating the build loop if the limit is reached.
+- **Dynamic Offloading**: When `MaxMemory` exceeds 1GiB, the engine SHOULD switch the NFA path set storage from memory to a **File-based backend** to prevent OOM during massive state explorations.
 
 ### 2.15 Syntax-Level Optimization & AST Rewriting
 - **Factoring**: Identical AST nodes MUST be factored out (e.g., `a*c|b*c` -> `(?:a*|b*)c`) to reduce state divergence.
