@@ -60,6 +60,14 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 	}
 
 	literalMatcher := ir.AnalyzeLiteralPattern(s, numSubexp+1)
+	var prefix []byte
+	complete := false
+	if literalMatcher != nil {
+		prefix = literalMatcher.Literal
+		if literalMatcher.Strategy == ir.LiteralStrategyExact {
+			complete = true
+		}
+	}
 
 	anchorStart := false
 	if s.Op == syntax.OpConcat && len(s.Sub) > 0 && s.Sub[0].Op == syntax.OpBeginText {
@@ -76,6 +84,8 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 	res := &Regexp{
 		expr:           expr,
 		numSubexp:      numSubexp,
+		prefix:         prefix,
+		complete:       complete,
 		anchorStart:    anchorStart,
 		prog:           prog,
 		dfa:            dfa,
@@ -89,8 +99,19 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 func (re *Regexp) bindMatchStrategy() {
 	if re.literalMatcher != nil {
 		re.strategy = strategyLiteral
-	} else {
+		return
+	}
+
+	// Threshold for bit-parallel is 62 instructions (Mandate 2.8)
+	if len(re.prog.Inst) <= 62 {
+		re.strategy = strategyBitParallel
+		return
+	}
+
+	if re.dfa.HasAnchors() {
 		re.strategy = strategyExtended
+	} else {
+		re.strategy = strategyFast
 	}
 }
 
@@ -139,11 +160,15 @@ func (re *Regexp) findSubmatchIndexInternal(b []byte, mc *matchContext, regs []i
 			return -1, -1, 0
 		}
 		return res[0], res[1], 0
-	case strategyExtended:
-		if mc == nil {
-			return matchExecLoop(extendedMatchTrait{}, re, b)
+	case strategyBitParallel, strategyFast, strategyExtended:
+		trait := extendedMatchTrait{}
+		if re.strategy == strategyFast {
+			return matchExecLoop(fastMatchTrait{}, re, b)
 		}
-		return submatchExecLoop(extendedMatchTrait{}, re, b, mc)
+		if mc == nil {
+			return matchExecLoop(trait, re, b)
+		}
+		return submatchExecLoop(trait, re, b, mc)
 	}
 	return -1, -1, 0
 }
@@ -152,6 +177,10 @@ type loopTrait interface{ HasAnchors() bool }
 type extendedMatchTrait struct{}
 
 func (extendedMatchTrait) HasAnchors() bool { return true }
+
+type fastMatchTrait struct{}
+
+func (fastMatchTrait) HasAnchors() bool { return false }
 
 func submatchExecLoop[T loopTrait](trait T, re *Regexp, b []byte, mc *matchContext) (int, int, int) {
 	d := re.dfa
@@ -418,7 +447,7 @@ func MustCompile(expr string) *Regexp {
 func (re *Regexp) String() string { return re.expr }
 
 func (re *Regexp) LiteralPrefix() (prefix string, complete bool) {
-	return string(re.prefix), false
+	return string(re.prefix), re.complete
 }
 
 func (re *Regexp) FindStringSubmatch(s string) []string {

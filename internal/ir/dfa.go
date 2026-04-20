@@ -74,6 +74,7 @@ type DFA struct {
 	startUpdates            []PathTagUpdate
 	stateMatchUpdates       [][]PathTagUpdate
 	stateEntryTags          [][]PathTagUpdate
+	hasAnchors              bool
 }
 
 type NFAPathStorage interface {
@@ -146,7 +147,7 @@ func (d *DFA) Accepting() []bool                 { return d.accepting }
 func (d *DFA) AcceptingGuards() []syntax.EmptyOp { return d.acceptingGuards }
 func (d *DFA) SearchState() uint32               { return d.searchState }
 func (d *DFA) MatchState() uint32                { return d.matchState }
-func (d *DFA) HasAnchors() bool                  { return true }
+func (d *DFA) HasAnchors() bool                  { return d.hasAnchors }
 func (d *DFA) UsedAnchors() syntax.EmptyOp       { return 0 }
 func (d *DFA) MaskStride() int                   { return d.maskStride }
 func (d *DFA) Next(currentID uint32, b int) uint32 {
@@ -178,6 +179,12 @@ type dfaStateKey struct {
 }
 
 func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error {
+	for _, inst := range prog.Inst {
+		if inst.Op == syntax.InstEmptyWidth {
+			d.hasAnchors = true
+			break
+		}
+	}
 	d.maskStride = (len(prog.Inst) + 63) / 64
 	d.storage = &memoryNfaSetStorage{data: make([][]NFAPath, 1024)}
 	nfaToDfa := make(map[dfaStateKey]uint32)
@@ -243,7 +250,9 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 		d.stateMatchTags = append(d.stateMatchTags, matchTags)
 		d.stateMatchUpdates = append(d.stateMatchUpdates, matchUpdates)
 		d.stateEntryTags = append(d.stateEntryTags, updates)
+
 		d.stateIsBestMatch = append(d.stateIsBestMatch, isAcc && matchP <= int(minP))
+
 		d.accepting = append(d.accepting, isAcc)
 		d.acceptingGuards = append(d.acceptingGuards, matchAnchors)
 		for i := 0; i < 256; i++ {
@@ -344,18 +353,24 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 				}
 			}
 
+			// The penalty/priority shift incurred during normalization of the next state.
+			minNextPrio := int32(1<<30 - 1)
+			for _, p := range nextPaths {
+				if p.Priority < minNextPrio {
+					minNextPrio = p.Priority
+				}
+			}
+
 			for len(d.tagUpdateIndices) <= idx {
 				d.tagUpdateIndices = append(d.tagUpdateIndices, 0xFFFFFFFF)
 			}
-			if len(nextRes.Updates) > 0 {
-				uIdx := uint32(len(d.tagUpdates))
-				d.tagUpdates = append(d.tagUpdates, TransitionUpdate{
-					BasePriority: int32(d.stateMinPriority[nextDfaID]) - d.stateMinPriority[i],
-					PreUpdates:   nextRes.Updates,
-				})
-				d.tagUpdateIndices[idx] = uIdx
-				rawNext |= TaggedStateFlag
-			}
+			uIdx := uint32(len(d.tagUpdates))
+			d.tagUpdates = append(d.tagUpdates, TransitionUpdate{
+				BasePriority: minNextPrio,
+				PreUpdates:   nextRes.Updates,
+			})
+			d.tagUpdateIndices[idx] = uIdx
+			rawNext |= TaggedStateFlag
 
 			d.transitions[idx] = rawNext
 			for len(d.recapTables[0].Transitions) <= idx {
