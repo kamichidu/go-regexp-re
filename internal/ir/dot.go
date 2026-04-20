@@ -13,36 +13,36 @@ func ToDOT(d *DFA) string {
 	sb.WriteString("  node [shape=circle];\n")
 
 	for i := 0; i < d.numStates; i++ {
-		s := StateID(i)
+		u := uint32(i)
 		shape := "circle"
-		if d.IsAccepting(s) {
+		if d.IsAccepting(u) {
 			shape = "doublecircle"
 		}
 
 		var labels []string
 		labels = append(labels, fmt.Sprintf("S%d", i))
 
-		if s == d.SearchState() {
+		if u == d.SearchState() {
 			labels[0] += " (search)"
 		}
-		if s == d.MatchState() {
+		if u == d.MatchState() {
 			labels[0] += " (match)"
 		}
 
-		if d.IsAccepting(s) {
-			labels = append(labels, fmt.Sprintf("Priority: %d", d.MatchPriority(s)))
+		if d.IsAccepting(u) {
+			labels = append(labels, fmt.Sprintf("Priority: %d", d.MatchPriority(u)))
 		}
 
 		label := strings.Join(labels, "\n")
 		sb.WriteString(fmt.Sprintf("  %d [label=%q, shape=%s];\n", i, label, shape))
 
-		type edgeKey struct{ target StateID }
+		type edgeKey struct{ target uint32 }
 		type edgeInfo struct{ bytes []int }
 		groupedEdges := make(map[edgeKey]*edgeInfo)
 		var keys []edgeKey
 
 		for b := 0; b < 256; b++ {
-			target := d.Next(s, b)
+			target := d.Next(u, b)
 			if target == InvalidState {
 				continue
 			}

@@ -1,28 +1,20 @@
-# TODO: Achieving 100% Go Compatibility (Deterministic 2-pass TDFA)
+# TDFA Pipeline Stabilization TODO
 
-The goal is to fix submatch extraction and anchor matching failures while strictly prohibiting runtime NFA simulation.
+## 1. Naked Indexing Isolation (Pass 1)
+- [ ] `internal/ir/dfa.go`: ビットレイアウトを固定し、外部への公開定数を定義する。
+  - レイアウト: `[31: Tagged] [30: Anchor] [29: Warp] [28-22: AnchorMask] [21-0: StateIndex]`
+  - `StateIDMask = 0x003FFFFF`
+- [ ] `regexp.go`: `submatchExecLoop` において、`mc.history[i]` に書き込む直前に必ず `state & ir.StateIDMask` を実行し、フラグを物理的に除去する。
+- [ ] **Validation (White-box)**: `repro_test.go` 等で、走査完了後の `mc.history` の全要素が `ir.StateIDMask` の範囲内に収まっている（不純物がない）ことをアサーションで確認する。
 
-## 1. Execution Loop Synchronization (Critical)
-- [ ] **Unified Anchor Resolution**: Ensure `matchExecLoop` and `submatchExecLoop` use the exact same logic for resolving chained anchors at each position `i`.
-- [ ] **Finalized State Recording**: Fix `mc.history[i]` to always record the state *after* all anchors at position `i` have been resolved but *before* the byte at `i` is consumed.
-- [ ] **Atomic Priority Tracking**: Verify that `currentPriority` updates in Phase 1 (via `update.BasePriority`) are mathematically identical to the `NextPriority` transitions followed in Phase 2's `burnedRecap`.
+## 2. Streamlined Reconstruction (Pass 2 & 3)
+- [ ] `regexp.go`: Pass 2 (`sparseTDFA_PathSelection`) および Pass 3 (`sparseTDFA_Recap`) から、履歴取り出し時のマスク処理をすべて削除する。
+- [ ] **Constraints**: Pass 1 での隔離を信頼し、二重のチェックロジックを入れない。
 
-## 2. Anchor Match Fixes
-- [ ] **End-of-String Matching**: Fix `TestHTTP11Anchor` and `TestRegexp_Multiline`. The failure of `(?m)HTTP/1.1$` indicates that the `$` anchor at `i = numBytes` is not triggering a match accept or is being recorded incorrectly.
-- [ ] **Word Boundary Precision**: Investigate why `\babc\b` fails. Ensure `CalculateContext` and `anchorTransitions` are perfectly aligned.
+## 3. Precision Refinement
+- [ ] `internal/ir/dfa.go`: `a(b)c` 等のサブマッチ境界を正しく捉えるため、エポキシ closure のタグ情報を `TransitionUpdate.PreUpdates` に同期させる。
+- [ ] `pass3_test.go` の全ケース合格を確認する。
 
-## 3. Submatch Precision & Burn-in Logic
-- [x] **BP-DFA 2-System Recap**: Implement 2-system Forward BP-Recap for simple patterns (Step 1, 2, 3).
-  - [x] Memory explosion fixed (Architectural Shortcut, state limit, priority cap).
-  - [x] History-guided forward winning path tracking.
-  - [x] **BP-DFA Boundary Refinement**: Fix the remaining 1-byte offsets and -1 results for nested/complex captures (e.g., (a*)b, a*(a)). Refine `PreEpsilonMasks` and `PostEpsilonMasks` synchronization with byte consumption.
-- [ ] **Strict Multiplexing (Step 4)**: Fix the 1-byte offset in Table-DFA by including cumulative priority in `dfaStateKey` to force state separation for greedy/non-greedy ambiguities.
-- [ ] **Multiplexing Verification**: Ensure `epsilonClosureWithPathTags` in `dfa.go` correctly separates paths with identical NFA state sets but different tag histories into distinct DFA states.
-
-## 4. Code Cleanup & Safety
-- [ ] **Deduplicate Loops**: Remove redundant match/submatch loop variations in `regexp.go` introduced during refactoring.
-- [ ] **Static Compatibility Check**: Enhance `checkCompatibility` to detect and reject complex nested captures that would cause state explosion if fully multiplexed.
-- [ ] **State Explosion Protection**: Ensure the engine gracefully falls back or errors out if the number of multiplexed states exceeds `MaxDFAMemory`.
-
-## 5. Documentation
-- [ ] Update `docs/algorithm/2-pass-dfa-hybrid.adoc` to include the finalized synchronization logic.
+## 4. Final Validation
+- [ ] `go test ./...`
+- [ ] `benchmark-full.sh` によるスループット検証。

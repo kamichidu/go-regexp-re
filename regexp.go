@@ -2,7 +2,7 @@ package regexp
 
 import (
 	"context"
-	"math/bits"
+	"fmt"
 	"sync"
 	"unsafe"
 
@@ -105,17 +105,24 @@ func (re *Regexp) MatchString(s string) bool {
 }
 
 func (re *Regexp) FindSubmatchIndex(b []byte) []int {
+	if re.strategy == strategyLiteral {
+		return re.literalMatcher.FindSubmatchIndex(b)
+	}
+
 	mc := matchContextPool.Get().(*matchContext)
 	defer matchContextPool.Put(mc)
 	mc.prepare(len(b))
+
 	regs := make([]int, (re.numSubexp+1)*2)
 	for i := range regs {
 		regs[i] = -1
 	}
-	start, end, prio := re.findSubmatchIndexInternal(b, mc, regs)
+
+	start, end, prio := submatchExecLoop(extendedMatchTrait{}, re, b, mc)
 	if start < 0 {
 		return nil
 	}
+
 	regs[0], regs[1] = start, end
 	if re.numSubexp > 0 {
 		re.sparseTDFA_PathSelection(mc, b, start, end, prio)
@@ -151,18 +158,19 @@ func submatchExecLoop[T loopTrait](trait T, re *Regexp, b []byte, mc *matchConte
 	trans, accepting, guards, numStates, numBytes := d.Transitions(), d.Accepting(), d.AcceptingGuards(), d.NumStates(), len(b)
 	anchorStart := re.anchorStart
 	bestStart, bestEnd, bestPriority := -1, -1, 1<<30-1
-	state, prio := d.SearchState(), 0
+	state, prio := uint32(d.SearchState()), 0
 	if anchorStart {
-		state = d.MatchState()
+		state = uint32(d.MatchState())
 	}
 
 	for i := 0; i <= numBytes; {
-		mc.history[i] = state
-		sidx := int(state & ir.StateIDMask)
-		if sidx >= 0 && sidx < len(accepting) && accepting[sidx] {
+		sidx := state & ir.StateIDMask
+		mc.history[i] = sidx
+
+		if int(sidx) < len(accepting) && accepting[sidx] {
 			req := guards[sidx]
 			if (ir.CalculateContext(b, i) & req) == req {
-				p := prio + d.MatchPriority(state)
+				p := prio + d.MatchPriority(sidx)
 				if p <= bestPriority {
 					bestPriority, bestEnd = p, i
 					if anchorStart {
@@ -170,7 +178,7 @@ func submatchExecLoop[T loopTrait](trait T, re *Regexp, b []byte, mc *matchConte
 					} else {
 						bestStart = p / ir.SearchRestartPenalty
 					}
-					if d.IsBestMatch(state) {
+					if d.IsBestMatch(sidx) {
 						return bestStart, bestEnd, bestPriority
 					}
 				}
@@ -178,19 +186,18 @@ func submatchExecLoop[T loopTrait](trait T, re *Regexp, b []byte, mc *matchConte
 		}
 		if i < numBytes {
 			byteVal := b[i]
-			if sidx >= 0 && sidx < numStates {
-				off := (sidx << 8) | int(byteVal)
+			if int(sidx) < numStates {
+				off := (int(sidx) << 8) | int(byteVal)
 				rawNext := trans[off]
 				if rawNext != ir.InvalidState {
 					if (rawNext & ir.AnchorVerifyFlag) != 0 {
-						req := syntax.EmptyOp((rawNext & ir.AnchorMask) >> 24)
+						req := syntax.EmptyOp((rawNext & ir.AnchorMask) >> 22)
 						if (ir.CalculateContext(b, i) & req) != req {
 							rawNext = ir.InvalidState
 						}
 					}
 					if rawNext != ir.InvalidState {
-						state = rawNext & (ir.StateIDMask | ir.WarpStateFlag)
-						if rawNext < 0 {
+						if (rawNext & ir.TaggedStateFlag) != 0 {
 							uIndices, uUpdates := d.TagUpdateIndices(), d.TagUpdates()
 							if off < len(uIndices) {
 								uIdx := uIndices[off]
@@ -199,10 +206,15 @@ func submatchExecLoop[T loopTrait](trait T, re *Regexp, b []byte, mc *matchConte
 								}
 							}
 						}
+						state = rawNext
 						if byteVal < 0x80 || (rawNext&ir.WarpStateFlag) == 0 {
 							i++
 						} else {
-							i += 1 + (bits.LeadingZeros8(^byteVal) - 1)
+							step := 1 + ir.GetTrailingByteCount(byteVal)
+							for k := 1; k < step; k++ {
+								mc.history[i+k] = state & ir.StateIDMask
+							}
+							i += step
 						}
 						continue
 					}
@@ -213,7 +225,7 @@ func submatchExecLoop[T loopTrait](trait T, re *Regexp, b []byte, mc *matchConte
 			}
 			i++
 			prio = i * ir.SearchRestartPenalty
-			state = d.SearchState()
+			state = uint32(d.SearchState())
 		} else {
 			break
 		}
@@ -226,17 +238,17 @@ func matchExecLoop[T loopTrait](trait T, re *Regexp, b []byte) (int, int, int) {
 	trans, accepting, guards, numStates, numBytes := d.Transitions(), d.Accepting(), d.AcceptingGuards(), d.NumStates(), len(b)
 	anchorStart := re.anchorStart
 	bestStart, bestEnd, bestPriority := -1, -1, 1<<30-1
-	state, prio := d.SearchState(), 0
+	state, prio := uint32(d.SearchState()), 0
 	if anchorStart {
-		state = d.MatchState()
+		state = uint32(d.MatchState())
 	}
 
 	for i := 0; i <= numBytes; {
-		sidx := int(state & ir.StateIDMask)
-		if sidx >= 0 && sidx < len(accepting) && accepting[sidx] {
+		sidx := state & ir.StateIDMask
+		if int(sidx) < len(accepting) && accepting[sidx] {
 			req := guards[sidx]
 			if (ir.CalculateContext(b, i) & req) == req {
-				p := prio + d.MatchPriority(state)
+				p := prio + d.MatchPriority(sidx)
 				if p <= bestPriority {
 					bestPriority, bestEnd = p, i
 					if anchorStart {
@@ -244,7 +256,7 @@ func matchExecLoop[T loopTrait](trait T, re *Regexp, b []byte) (int, int, int) {
 					} else {
 						bestStart = p / ir.SearchRestartPenalty
 					}
-					if d.IsBestMatch(state) {
+					if d.IsBestMatch(sidx) {
 						return bestStart, bestEnd, bestPriority
 					}
 				}
@@ -252,19 +264,18 @@ func matchExecLoop[T loopTrait](trait T, re *Regexp, b []byte) (int, int, int) {
 		}
 		if i < numBytes {
 			byteVal := b[i]
-			if sidx >= 0 && sidx < numStates {
-				off := (sidx << 8) | int(byteVal)
+			if int(sidx) < numStates {
+				off := (int(sidx) << 8) | int(byteVal)
 				rawNext := trans[off]
 				if rawNext != ir.InvalidState {
 					if (rawNext & ir.AnchorVerifyFlag) != 0 {
-						req := syntax.EmptyOp((rawNext & ir.AnchorMask) >> 24)
+						req := syntax.EmptyOp((rawNext & ir.AnchorMask) >> 22)
 						if (ir.CalculateContext(b, i) & req) != req {
 							rawNext = ir.InvalidState
 						}
 					}
 					if rawNext != ir.InvalidState {
-						state = rawNext & (ir.StateIDMask | ir.WarpStateFlag)
-						if rawNext < 0 {
+						if (rawNext & ir.TaggedStateFlag) != 0 {
 							uIndices, uUpdates := d.TagUpdateIndices(), d.TagUpdates()
 							if off < len(uIndices) {
 								uIdx := uIndices[off]
@@ -273,10 +284,11 @@ func matchExecLoop[T loopTrait](trait T, re *Regexp, b []byte) (int, int, int) {
 								}
 							}
 						}
+						state = rawNext
 						if byteVal < 0x80 || (rawNext&ir.WarpStateFlag) == 0 {
 							i++
 						} else {
-							i += 1 + (bits.LeadingZeros8(^byteVal) - 1)
+							i += 1 + ir.GetTrailingByteCount(byteVal)
 						}
 						continue
 					}
@@ -287,7 +299,7 @@ func matchExecLoop[T loopTrait](trait T, re *Regexp, b []byte) (int, int, int) {
 			}
 			i++
 			prio = i * ir.SearchRestartPenalty
-			state = d.SearchState()
+			state = uint32(d.SearchState())
 		} else {
 			break
 		}
@@ -295,25 +307,27 @@ func matchExecLoop[T loopTrait](trait T, re *Regexp, b []byte) (int, int, int) {
 	return bestStart, bestEnd, bestPriority
 }
 
-// Pass 2: Identifies the unique "winning NFA path" from start to end.
 func (re *Regexp) sparseTDFA_PathSelection(mc *matchContext, b []byte, start, end, prio int) {
 	d := re.dfa
 	recap := d.RecapTables()[0]
-	currPrio := int16(0) // Start priority for winning path at start position
+	currPrio := int16(0)
 	for i := start; i < end; {
-		state := mc.history[i]
-		sidx := int(state & ir.StateIDMask)
+		sidx := mc.history[i]
+		if sidx == ir.InvalidState {
+			panic(fmt.Sprintf("Corrupt history at pos %d during Pass 2", i))
+		}
 		byteVal := b[i]
-		off := (sidx << 8) | int(byteVal)
+		off := (int(sidx) << 8) | int(byteVal)
 		mc.pathHistory[i] = int32(currPrio)
 
-		entries := recap.Transitions[off]
 		found := false
-		for _, entry := range entries {
-			if entry.InputPriority == currPrio {
-				currPrio = entry.NextPriority
-				found = true
-				break
+		if off < len(recap.Transitions) {
+			for _, entry := range recap.Transitions[off] {
+				if int32(entry.InputPriority) == int32(currPrio) {
+					currPrio = entry.NextPriority
+					found = true
+					break
+				}
 			}
 		}
 		if !found {
@@ -328,6 +342,63 @@ func (re *Regexp) sparseTDFA_PathSelection(mc *matchContext, b []byte, start, en
 		}
 	}
 	mc.pathHistory[end] = int32(currPrio)
+}
+
+func (re *Regexp) sparseTDFA_Recap(mc *matchContext, b []byte, start, end, prio int, regs []int) {
+	d := re.dfa
+	recap := d.RecapTables()[0]
+	re.applyEntryTags(regs, d.StartUpdates(), 0, start)
+
+	for i := start; i < end; {
+		sidx := mc.history[i]
+		if sidx == ir.InvalidState {
+			panic(fmt.Sprintf("Corrupt history at pos %d during Pass 3", i))
+		}
+		pathID := mc.pathHistory[i]
+		byteVal := b[i]
+		off := (int(sidx) << 8) | int(byteVal)
+
+		step := 1
+		rawNext := d.Transitions()[off]
+		if byteVal >= 0x80 && (rawNext&ir.WarpStateFlag) != 0 {
+			step = 1 + ir.GetTrailingByteCount(byteVal)
+		}
+
+		if off < len(recap.Transitions) {
+			for _, entry := range recap.Transitions[off] {
+				if int32(entry.InputPriority) == pathID {
+					re.applyRawTags(regs, entry.PreTags, i+step)
+					break
+				}
+			}
+		}
+		i += step
+	}
+	lastSidx := mc.history[end]
+	if lastSidx != ir.InvalidState {
+		re.applyEntryTags(regs, d.MatchUpdates(lastSidx), mc.pathHistory[end], end)
+	}
+}
+
+func (re *Regexp) applyRawTags(regs []int, tags uint64, pos int) {
+	if tags == 0 {
+		return
+	}
+	for bit := 0; bit < 64; bit++ {
+		if (tags & (1 << uint(bit))) != 0 {
+			if bit < len(regs) {
+				regs[bit] = pos
+			}
+		}
+	}
+}
+
+func (re *Regexp) applyEntryTags(regs []int, updates []ir.PathTagUpdate, pathID int32, pos int) {
+	for _, u := range updates {
+		if u.NextPriority == pathID || pathID == -1 {
+			re.applyRawTags(regs, u.Tags, pos)
+		}
+	}
 }
 
 func (re *Regexp) FindStringSubmatchIndex(s string) []int {
@@ -364,15 +435,15 @@ func (re *Regexp) FindStringSubmatch(s string) []string {
 }
 
 type matchContext struct {
-	historyBuf     [1024]ir.StateID
-	history        []ir.StateID
+	historyBuf     [1024]uint32
+	history        []uint32
 	pathHistoryBuf [1024]int32
 	pathHistory    []int32
 }
 
 func (mc *matchContext) prepare(n int) {
 	if n+1 > len(mc.historyBuf) {
-		mc.history = make([]ir.StateID, n+1)
+		mc.history = make([]uint32, n+1)
 		mc.pathHistory = make([]int32, n+1)
 	} else {
 		mc.history = mc.historyBuf[:n+1]

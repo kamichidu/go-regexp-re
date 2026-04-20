@@ -42,6 +42,7 @@ The engine follows a **3-Pass Sparse TDFA** strategy to guarantee peak performan
 #### 2.5.1 NFA-Free Path Selection Mandate (Pass 2)
 Path selection in Pass 2 MUST NOT employ runtime NFA simulation or dynamic priority comparisons. The identity of the winning path must be reconstructed solely by following pre-calculated priority transitions (`InputPriority` -> `NextPriority`) stored within the `RecapTable`. Pass 2 must operate as a strictly linear, table-driven loop that updates the current priority identity based on the `StateID` history from Pass 1, ensuring total compliance with the engine's calculation-free philosophy.
 - **Zero-Allocation Execution**: All recap paths MUST be strictly iterative and utilize stack-resident or pre-allocated buffers, ensuring zero heap allocations during execution.
+- **Naked History Isolation (Panic Prevention)**: To maintain $O(1)$ table access in Pass 2 and 3 without redundant boundary checks, the execution history (`mc.history`) MUST store only the raw state index. All control flags (Tagged, Anchor, Warp) MUST be physically stripped via `StateIDMask` before recording the trace. This isolation is the project's primary defense against memory access violations during submatch reconstruction.
 
 ### 2.6 Physical Prevention of State Explosion (Naked State Identity)
 To achieve scalability, DFA construction (Subset Construction) employs **Naked State Identity**:

@@ -57,3 +57,25 @@ Pass 2 is implemented as a "Priority-Chain Tracking" loop, identifying the winni
 * **Warp Integration**: During a lead-byte warp, the `RecapEntry` encapsulates the cumulative priority update for the entire multi-byte sequence, allowing the path identity to stay synchronized with the pointer jumps.
 
 This design ensures that Pass 2 remains a pure table-lookup operation, strictly (n)$ in time and zero-allocation in space.
+
+== Technical Implementation Details
+
+=== Canonical State ID layout
+To maximize execution speed while maintaining rich control features (anchors, SIMD warp), the `StateID` utilizes a packed bit layout.
+
+[cols="1,4"]
+|===
+| Bit Range | Description
+| `31` | **TaggedStateFlag**: Indicates that the transition has associated priority/tag updates.
+| `30` | **AnchorVerifyFlag**: Indicates that the transition is guarded by an anchor (e.g., `^`, `$`).
+| `29` | **WarpStateFlag**: Indicates that the transition triggers a multi-byte lead-byte jump.
+| `28-22` | **AnchorMask**: Encodes the required empty-width context bits.
+| `21-0` | **StateIndex**: The physical index into transition and property tables.
+|===
+
+=== Naked History Isolation
+To guarantee $O(1)$ table access in Phases 2 and 3, the project enforces a **Strict Purity Policy** for the execution history buffer (`mc.history`).
+
+1. **Stripping on Record**: Phase 1 MUST apply the `ir.StateIDMask` to every state before writing it to the history buffer.
+2. **Naked Access**: Phases 2 and 3 MUST assume the history is pure and use the values directly for left-shift indexing (`sidx << 8`) without redundant masking.
+3. **Safety Guarantee**: This isolation prevents control flags from leaking into indexing logic, which would otherwise cause massive memory access violations (panics).

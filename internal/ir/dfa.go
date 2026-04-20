@@ -10,15 +10,16 @@ import (
 	"github.com/kamichidu/go-regexp-re/syntax"
 )
 
-type StateID int32
+type StateID uint32
 
 const (
-	InvalidState     StateID = -1
-	TaggedStateFlag  StateID = -2147483648
-	AnchorVerifyFlag StateID = 0x40000000
-	AnchorMask       StateID = 0x3F000000
-	WarpStateFlag    StateID = 0x00800000
-	StateIDMask      StateID = 0x007FFFFF
+	InvalidState uint32 = 0xFFFFFFFF
+	// Fixed Canonical Layout: [31: Tagged] [30: Anchor] [29: Warp] [28-22: AnchorMask] [21-0: StateIndex]
+	TaggedStateFlag  uint32 = 0x80000000
+	AnchorVerifyFlag uint32 = 0x40000000
+	WarpStateFlag    uint32 = 0x20000000
+	AnchorMask       uint32 = 0x1FC00000
+	StateIDMask      uint32 = 0x003FFFFF
 )
 
 const MaxDFAMemory = 64 * 1024 * 1024
@@ -51,11 +52,11 @@ type RecapEntry struct {
 type GroupRecapTable struct{ Transitions [][]RecapEntry }
 
 type DFA struct {
-	transitions             []StateID
+	transitions             []uint32
 	tagUpdateIndices        []uint32
 	tagUpdates              []TransitionUpdate
 	numStates               int
-	searchState, matchState StateID
+	searchState, matchState uint32
 	numSubexp               int
 	Naked                   bool
 	stateIsSearch           []bool
@@ -72,11 +73,12 @@ type DFA struct {
 	stateToMask             []uint64
 	startUpdates            []PathTagUpdate
 	stateMatchUpdates       [][]PathTagUpdate
+	stateEntryTags          [][]PathTagUpdate
 }
 
 type NFAPathStorage interface {
-	Put(id StateID, paths []NFAPath) error
-	Get(id StateID, buf []NFAPath) ([]NFAPath, error)
+	Put(id uint32, paths []NFAPath) error
+	Get(id uint32, buf []NFAPath) ([]NFAPath, error)
 	Close() error
 }
 
@@ -85,78 +87,83 @@ type memoryNfaSetStorage struct {
 	mu   sync.RWMutex
 }
 
-func (s *memoryNfaSetStorage) Put(id StateID, paths []NFAPath) error {
+func (s *memoryNfaSetStorage) Put(id uint32, paths []NFAPath) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if int(id) >= len(s.data) {
+	idx := int(id & StateIDMask)
+	if idx >= len(s.data) {
 		s.data = append(s.data, make([][]NFAPath, 1024)...)
 	}
-	s.data[id] = append([]NFAPath(nil), paths...)
+	s.data[idx] = append([]NFAPath(nil), paths...)
 	return nil
 }
-func (s *memoryNfaSetStorage) Get(id StateID, buf []NFAPath) ([]NFAPath, error) {
+func (s *memoryNfaSetStorage) Get(id uint32, buf []NFAPath) ([]NFAPath, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.data[id], nil
+	idx := int(id & StateIDMask)
+	if idx >= len(s.data) {
+		return nil, nil
+	}
+	return s.data[idx], nil
 }
 func (s *memoryNfaSetStorage) Close() error { return nil }
 
 func (d *DFA) IsNaked() bool                  { return d.Naked }
 func (d *DFA) NumStates() int                 { return d.numStates }
 func (d *DFA) RecapTables() []GroupRecapTable { return d.recapTables }
-func (d *DFA) StateMinPriority(s StateID) int32 {
-	id := int(s & StateIDMask)
-	if id < 0 || id >= d.numStates {
+func (d *DFA) StateMinPriority(id uint32) int32 {
+	idx := int(id & StateIDMask)
+	if idx >= d.numStates {
 		return 0
 	}
-	return d.stateMinPriority[id]
+	return d.stateMinPriority[idx]
 }
-func (d *DFA) Transitions() []StateID         { return d.transitions }
-func (d *DFA) TagUpdates() []TransitionUpdate { return d.tagUpdates }
+func (d *DFA) Transitions() []uint32          { return d.transitions }
 func (d *DFA) TagUpdateIndices() []uint32     { return d.tagUpdateIndices }
-func (d *DFA) MatchPriority(s StateID) int {
-	id := int(s & StateIDMask)
-	if id < 0 || id >= d.numStates {
+func (d *DFA) TagUpdates() []TransitionUpdate { return d.tagUpdates }
+func (d *DFA) MatchPriority(id uint32) int {
+	idx := int(id & StateIDMask)
+	if idx >= d.numStates {
 		return 1<<30 - 1
 	}
-	return d.stateMatchPriority[id]
+	return d.stateMatchPriority[idx]
 }
-func (d *DFA) IsBestMatch(s StateID) bool {
-	id := int(s & StateIDMask)
-	if id < 0 || id >= d.numStates {
+func (d *DFA) IsBestMatch(id uint32) bool {
+	idx := int(id & StateIDMask)
+	if idx >= d.numStates {
 		return false
 	}
-	return d.stateIsBestMatch[id]
+	return d.stateIsBestMatch[idx]
 }
-func (d *DFA) IsAccepting(s StateID) bool {
-	id := int(s & StateIDMask)
-	if id < 0 || id >= d.numStates {
+func (d *DFA) IsAccepting(id uint32) bool {
+	idx := int(id & StateIDMask)
+	if idx >= d.numStates {
 		return false
 	}
-	return d.accepting[id]
+	return d.accepting[idx]
 }
 func (d *DFA) Accepting() []bool                 { return d.accepting }
 func (d *DFA) AcceptingGuards() []syntax.EmptyOp { return d.acceptingGuards }
-func (d *DFA) SearchState() StateID              { return d.searchState }
-func (d *DFA) MatchState() StateID               { return d.matchState }
+func (d *DFA) SearchState() uint32               { return d.searchState }
+func (d *DFA) MatchState() uint32                { return d.matchState }
 func (d *DFA) HasAnchors() bool                  { return true }
 func (d *DFA) UsedAnchors() syntax.EmptyOp       { return 0 }
 func (d *DFA) MaskStride() int                   { return d.maskStride }
-func (d *DFA) Next(current StateID, b int) StateID {
-	id := int(current & StateIDMask)
-	if id < 0 || id >= d.numStates || b < 0 || b >= 256 {
+func (d *DFA) Next(currentID uint32, b int) uint32 {
+	idx := int(currentID & StateIDMask)
+	if idx >= d.numStates || b < 0 || b >= 256 {
 		return InvalidState
 	}
-	return d.transitions[id*256+b] & StateIDMask
+	return d.transitions[idx*256+b]
 }
-func (d *DFA) AnchorNext(s StateID, bit int) StateID { return InvalidState }
-func (d *DFA) StartUpdates() []PathTagUpdate         { return d.startUpdates }
-func (d *DFA) MatchUpdates(s StateID) []PathTagUpdate {
-	id := int(s & StateIDMask)
-	if id < 0 || id >= d.numStates {
+func (d *DFA) AnchorNext(id uint32, bit int) uint32 { return InvalidState }
+func (d *DFA) StartUpdates() []PathTagUpdate        { return d.startUpdates }
+func (d *DFA) MatchUpdates(id uint32) []PathTagUpdate {
+	idx := int(id & StateIDMask)
+	if idx >= d.numStates {
 		return nil
 	}
-	return d.stateMatchUpdates[id]
+	return d.stateMatchUpdates[idx]
 }
 
 type ClosureResult struct {
@@ -173,7 +180,7 @@ type dfaStateKey struct {
 func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error {
 	d.maskStride = (len(prog.Inst) + 63) / 64
 	d.storage = &memoryNfaSetStorage{data: make([][]NFAPath, 1024)}
-	nfaToDfa := make(map[dfaStateKey]StateID)
+	nfaToDfa := make(map[dfaStateKey]uint32)
 	closureCache := make(map[uint64]ClosureResult)
 	getCachedClosure := func(paths []NFAPath) ClosureResult {
 		h := uint64(14695981039346656037)
@@ -196,7 +203,7 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 		closureCache[h] = res
 		return res
 	}
-	addDfaState := func(closure []NFAPath, matchAnchors syntax.EmptyOp, isSearch bool) StateID {
+	addDfaState := func(closure []NFAPath, updates []PathTagUpdate, matchAnchors syntax.EmptyOp, isSearch bool) uint32 {
 		matchP := 1<<30 - 1
 		for _, s := range closure {
 			if prog.Inst[s.ID].Op == syntax.InstMatch && s.NodeID == 0 {
@@ -209,7 +216,7 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 		if id, ok := nfaToDfa[key]; ok {
 			return id
 		}
-		id := StateID(d.numStates)
+		id := uint32(d.numStates)
 		nfaToDfa[key] = id
 		d.storage.Put(id, closure)
 		d.stateIsSearch = append(d.stateIsSearch, isSearch)
@@ -248,18 +255,20 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 	}
 
 	startRes := getCachedClosure([]NFAPath{{ID: uint32(prog.Start), Priority: 0}})
-	d.matchState = addDfaState(startRes.NextClosure, startRes.MatchAnchors, false)
+	d.matchState = addDfaState(startRes.NextClosure, startRes.Updates, startRes.MatchAnchors, false)
 	d.startUpdates = startRes.Updates
-	d.searchState = addDfaState(startRes.NextClosure, startRes.MatchAnchors, true)
+	d.searchState = addDfaState(startRes.NextClosure, startRes.Updates, startRes.MatchAnchors, true)
 
 	d.recapTables = []GroupRecapTable{{Transitions: make([][]RecapEntry, 0, 1024)}}
+	d.tagUpdateIndices = make([]uint32, 0, 1024)
+	d.tagUpdates = make([]TransitionUpdate, 0, 1024)
 	scratchBuf := make([]NFAPath, 0, 1024)
 	nextPaths := make([]NFAPath, 0, 1024)
 	processed := 0
 	for processed < d.numStates {
-		i := processed
+		i := uint32(processed)
 		processed++
-		currentClosure, _ := d.storage.Get(StateID(i), scratchBuf)
+		currentClosure, _ := d.storage.Get(i, scratchBuf)
 		scratchBuf = currentClosure
 
 		for b := 0; b < 256; b++ {
@@ -268,14 +277,12 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 			foundEdge := false
 			for _, p := range currentClosure {
 				inst := prog.Inst[p.ID]
+				match := false
 				if p.NodeID == 0 {
-					// Byte-Level Expansion for Multi-byte Rune
 					if inst.Op == syntax.InstRune || inst.Op == syntax.InstRune1 || inst.Op == syntax.InstRuneAny || inst.Op == syntax.InstRuneAnyNotNL {
-						match := false
 						if inst.MatchRune(rune(b)) {
 							match = true
 						} else if b >= 0x80 {
-							// If b is a lead byte of some multi-byte rune matched by this inst
 							for _, r := range inst.Rune {
 								var buf [4]byte
 								n := utf8.EncodeRune(buf[:], r)
@@ -285,33 +292,16 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 								}
 							}
 						}
-						if match {
-							if !foundEdge {
-								preGuard = p.Anchors
-								foundEdge = true
-							} else {
-								preGuard |= p.Anchors
-							}
-							nextPaths = append(nextPaths, NFAPath{ID: inst.Out, Priority: p.Priority, Tags: p.Tags})
-						}
 					}
-				} else {
-					root := d.nodes[p.NodeID]
-					if root.Match(byte(b), false) {
-						if !foundEdge {
-							preGuard = p.Anchors
-							foundEdge = true
-						} else {
-							preGuard |= p.Anchors
-						}
-						if root.Next == nil {
-							nextPaths = append(nextPaths, NFAPath{ID: uint32(prog.Inst[p.ID].Out), NodeID: 0, Priority: p.Priority, Tags: p.Tags})
-						} else {
-							for _, child := range root.Next {
-								nextPaths = append(nextPaths, NFAPath{ID: p.ID, NodeID: uint32(child.ID), Priority: p.Priority, Tags: p.Tags})
-							}
-						}
+				}
+				if match {
+					if !foundEdge {
+						preGuard = p.Anchors
+						foundEdge = true
+					} else {
+						preGuard |= p.Anchors
 					}
+					nextPaths = append(nextPaths, NFAPath{ID: inst.Out, Priority: p.Priority, Tags: p.Tags})
 				}
 			}
 			if d.stateIsSearch[i] {
@@ -326,13 +316,12 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 				continue
 			}
 
-			nextDfaID := addDfaState(nextRes.NextClosure, nextRes.MatchAnchors, d.stateIsSearch[i])
-			idx := (i << 8) | b
+			nextDfaID := addDfaState(nextRes.NextClosure, nextRes.Updates, nextRes.MatchAnchors, d.stateIsSearch[i])
+			idx := (int(i) << 8) | b
 			rawNext := nextDfaID
 			if preGuard != 0 {
-				rawNext |= AnchorVerifyFlag | (StateID(preGuard) << 24)
+				rawNext |= AnchorVerifyFlag | (uint32(preGuard) << 22)
 			}
-
 			if b >= 0x80 {
 				isLead := false
 				for _, p := range currentClosure {
@@ -356,7 +345,17 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 				}
 			}
 
-			d.transitions[idx] = rawNext | TaggedStateFlag
+			for len(d.tagUpdateIndices) <= idx {
+				d.tagUpdateIndices = append(d.tagUpdateIndices, 0xFFFFFFFF)
+			}
+			if len(nextRes.Updates) > 0 {
+				uIdx := uint32(len(d.tagUpdates))
+				d.tagUpdates = append(d.tagUpdates, TransitionUpdate{BasePriority: 0, PreUpdates: nextRes.Updates})
+				d.tagUpdateIndices[idx] = uIdx
+				rawNext |= TaggedStateFlag
+			}
+
+			d.transitions[idx] = rawNext
 			for len(d.recapTables[0].Transitions) <= idx {
 				d.recapTables[0].Transitions = append(d.recapTables[0].Transitions, nil)
 			}
@@ -365,7 +364,7 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 				entries = append(entries, RecapEntry{
 					InputPriority: int16(u.RelativePriority - d.stateMinPriority[i]),
 					NextPriority:  int16(u.NextPriority),
-					PostTags:      u.Tags,
+					PreTags:       u.Tags, // 遷移時に発生するタグを記録
 				})
 			}
 			d.recapTables[0].Transitions[idx] = entries
@@ -507,14 +506,6 @@ func isEpsilon(op syntax.InstOp) bool {
 	return false
 }
 
-func NewDFAWithMemoryLimit(ctx context.Context, prog *syntax.Prog, maxMemory int, naked bool) (*DFA, error) {
-	d := &DFA{Naked: naked, numSubexp: prog.NumCap / 2}
-	if err := d.build(ctx, prog, maxMemory); err != nil {
-		return nil, err
-	}
-	return d, nil
-}
-
 func hashSet(paths []NFAPath, naked bool) [2]uint64 {
 	var h1 uint64 = 14695981039346656037
 	for _, p := range paths {
@@ -523,7 +514,14 @@ func hashSet(paths []NFAPath, naked bool) [2]uint64 {
 	}
 	return [2]uint64{h1, 0}
 }
-func (d *DFA) minimize() {}
+
+func NewDFAWithMemoryLimit(ctx context.Context, prog *syntax.Prog, maxMemory int, naked bool) (*DFA, error) {
+	d := &DFA{Naked: naked, numSubexp: prog.NumCap / 2}
+	if err := d.build(ctx, prog, maxMemory); err != nil {
+		return nil, err
+	}
+	return d, nil
+}
 
 type BitParallelDFA struct {
 	CharMasks         [256]uint64
@@ -553,15 +551,16 @@ func (bp *BitParallelDFA) HasAnchors() bool {
 	return false
 }
 func NewBitParallelDFA(prog *syntax.Prog) *BitParallelDFA { return nil }
-func (d *DFA) CanReachPriority(fromState, toState StateID, context syntax.EmptyOp, p_in, p_out int32) bool {
-	return fromState == toState && p_in == p_out
+func (d *DFA) CanReachPriority(fromState, toState uint32, context syntax.EmptyOp, p_in, p_out int32) bool {
+	return false
 }
 func (d *DFA) registerNodes(node *UTF8Node, nodes *[]*UTF8Node) {}
 func (d *DFA) computePhase2Metadata(prog *syntax.Prog)          {}
-func (d *DFA) ReachableToMatch(s StateID) uint64                { return 0 }
-func (d *DFA) StateToMasks(s StateID) []uint64                  { return nil }
-func (d *DFA) StateToMask(s StateID) uint64                     { return 0 }
-func (d *DFA) WarpPoint(s StateID) int                          { return -1 }
-func (d *DFA) WarpPointState(s StateID) StateID                 { return InvalidState }
-func (d *DFA) WarpPointGuard(s StateID) syntax.EmptyOp          { return 0 }
+func (d *DFA) ReachableToMatch(s uint32) uint64                 { return 0 }
+func (d *DFA) StateToMasks(s uint32) []uint64                   { return nil }
+func (d *DFA) StateToMask(s uint32) uint64                      { return 0 }
+func (d *DFA) WarpPoint(s uint32) int                           { return -1 }
+func (d *DFA) WarpPointState(s uint32) uint32                   { return InvalidState }
+func (d *DFA) WarpPointGuard(s uint32) syntax.EmptyOp           { return 0 }
 func (d *DFA) MaxInst() int                                     { return 0 }
+func (d *DFA) minimize()                                        {}
