@@ -36,6 +36,7 @@ func GetByteClass(b byte) RuneClass {
 		}
 		return RuneClassOther
 	}
+	// Under ASCII Word Boundary mandate, all multi-byte bytes belong to Non-Word class.
 	return RuneClassOther
 }
 
@@ -77,31 +78,41 @@ func CalculateContextByClass(c1, c2 RuneClass) syntax.EmptyOp {
 	return op
 }
 
+// CalculateContext determines the empty-width assertions at junction i.
+// Strictly Byte-Oriented: No rune decoding, no loops.
 func CalculateContext(b []byte, i int) syntax.EmptyOp {
-	var r1, r2 rune = -1, -1
-	if i > 0 {
-		j := i - 1
-		for j > 0 && b[j]&0xC0 == 0x80 {
-			j--
+	var op syntax.EmptyOp
+	var wordLeft, wordRight bool
+
+	// Junction Left Analysis
+	if i == 0 {
+		op |= syntax.EmptyBeginText | syntax.EmptyBeginLine
+	} else {
+		prev := b[i-1]
+		if prev == '\n' {
+			op |= syntax.EmptyBeginLine
 		}
-		r1 = decodeRune(b[j:i])
-	}
-	if i < len(b) {
-		r2 = decodeRune(b[i:])
+		// ASCII Word Char check: 0x80+ are always Non-Word.
+		if prev < 0x80 && syntax.IsWordChar(rune(prev)) {
+			wordLeft = true
+		}
 	}
 
-	var op syntax.EmptyOp
-	if r1 < 0 {
-		op |= syntax.EmptyBeginText | syntax.EmptyBeginLine
-	} else if r1 == '\n' {
-		op |= syntax.EmptyBeginLine
-	}
-	if r2 < 0 {
+	// Junction Right Analysis
+	if i == len(b) {
 		op |= syntax.EmptyEndText | syntax.EmptyEndLine
-	} else if r2 == '\n' {
-		op |= syntax.EmptyEndLine
+	} else {
+		curr := b[i]
+		if curr == '\n' {
+			op |= syntax.EmptyEndLine
+		}
+		// ASCII Word Char check: 0x80+ are always Non-Word.
+		if curr < 0x80 && syntax.IsWordChar(rune(curr)) {
+			wordRight = true
+		}
 	}
-	if IsWord(r1) != IsWord(r2) {
+
+	if wordLeft != wordRight {
 		op |= syntax.EmptyWordBoundary
 	} else {
 		op |= syntax.EmptyNoWordBoundary
@@ -110,22 +121,8 @@ func CalculateContext(b []byte, i int) syntax.EmptyOp {
 }
 
 func IsWord(r rune) bool {
-	if r < 0 {
+	if r < 0 || r >= 0x80 {
 		return false
 	}
-	if r <= 0x7F {
-		return syntax.IsWordChar(r)
-	}
-	return false
-}
-
-func decodeRune(b []byte) rune {
-	if len(b) == 0 {
-		return -1
-	}
-	if b[0] < 0x80 {
-		return rune(b[0])
-	}
-	r, _ := DecodeRune(b)
-	return r
+	return syntax.IsWordChar(r)
 }
