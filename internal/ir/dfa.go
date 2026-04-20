@@ -26,7 +26,7 @@ const SearchRestartPenalty = 1000000
 type NFAPath struct {
 	ID, NodeID uint32
 	Priority   int32
-	_          int32
+	Anchors    syntax.EmptyOp
 	Tags       uint64
 }
 
@@ -136,7 +136,7 @@ func (d *DFA) IsAccepting(s StateID) bool {
 func (d *DFA) Accepting() []bool           { return d.accepting }
 func (d *DFA) SearchState() StateID        { return d.searchState }
 func (d *DFA) MatchState() StateID         { return d.matchState }
-func (d *DFA) HasAnchors() bool            { return true } // Rely on bit 30
+func (d *DFA) HasAnchors() bool            { return true }
 func (d *DFA) UsedAnchors() syntax.EmptyOp { return 0 }
 func (d *DFA) MaskStride() int             { return d.maskStride }
 func (d *DFA) Next(current StateID, b int) StateID {
@@ -159,7 +159,6 @@ func (d *DFA) MatchUpdates(s StateID) []PathTagUpdate {
 type ClosureResult struct {
 	NextClosure []NFAPath
 	Updates     []PathTagUpdate
-	Anchors     syntax.EmptyOp
 }
 type dfaStateKey struct {
 	hash          [2]uint64
@@ -172,7 +171,7 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 	d.storage = &memoryNfaSetStorage{data: make([][]NFAPath, 1024)}
 	nfaToDfa := make(map[dfaStateKey]StateID)
 	closureCache := make(map[uint64]ClosureResult)
-	getCachedClosure := func(paths []NFAPath, context syntax.EmptyOp) ClosureResult {
+	getCachedClosure := func(paths []NFAPath) ClosureResult {
 		h := uint64(14695981039346656037)
 		for _, p := range paths {
 			h ^= uint64(p.ID)
@@ -181,14 +180,15 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 			h *= 1099511628211
 			h ^= uint64(p.Priority)
 			h *= 1099511628211
+			h ^= uint64(p.Anchors)
+			h *= 1099511628211
 			h ^= uint64(p.Tags)
 			h *= 1099511628211
 		}
-		h ^= uint64(context)
 		if res, ok := closureCache[h]; ok {
 			return res
 		}
-		res := epsilonClosureWithPathTags(prog, paths, context)
+		res := epsilonClosureWithGuards(prog, paths)
 		closureCache[h] = res
 		return res
 	}
@@ -237,13 +237,12 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 		d.stateMinPriority = append(d.stateMinPriority, minP)
 		for i := 0; i < 256; i++ {
 			d.transitions = append(d.transitions, InvalidState)
-			d.tagUpdateIndices = append(d.tagUpdateIndices, 0)
 		}
 		d.numStates++
 		return id
 	}
 
-	startRes := getCachedClosure([]NFAPath{{ID: uint32(prog.Start), Priority: 0}}, 0xFF)
+	startRes := getCachedClosure([]NFAPath{{ID: uint32(prog.Start), Priority: 0}})
 	d.matchState = addDfaState(startRes.NextClosure, false)
 	d.startUpdates = startRes.Updates
 	d.searchState = addDfaState(startRes.NextClosure, true)
@@ -260,15 +259,29 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 
 		for b := 0; b < 256; b++ {
 			nextPaths = nextPaths[:0]
+			var commonGuard syntax.EmptyOp
+			foundMatch := false
 			for _, p := range currentClosure {
 				inst := prog.Inst[p.ID]
 				if p.NodeID == 0 {
 					if inst.MatchRune(rune(b)) {
+						if !foundMatch {
+							commonGuard = p.Anchors
+							foundMatch = true
+						} else {
+							commonGuard |= p.Anchors
+						}
 						nextPaths = append(nextPaths, NFAPath{ID: inst.Out, Priority: p.Priority, Tags: p.Tags})
 					}
 				} else {
 					root := d.nodes[p.NodeID]
 					if root.Match(byte(b), false) {
+						if !foundMatch {
+							commonGuard = p.Anchors
+							foundMatch = true
+						} else {
+							commonGuard |= p.Anchors
+						}
 						if root.Next == nil {
 							nextPaths = append(nextPaths, NFAPath{ID: uint32(prog.Inst[p.ID].Out), NodeID: 0, Priority: p.Priority, Tags: p.Tags})
 						} else {
@@ -286,16 +299,21 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 				continue
 			}
 
-			nextRes := getCachedClosure(nextPaths, 0xFF)
+			nextRes := getCachedClosure(nextPaths)
 			if len(nextRes.NextClosure) == 0 {
 				continue
+			}
+
+			// Accumulate anchors encountered AFTER consumption too
+			for _, p := range nextRes.NextClosure {
+				commonGuard |= p.Anchors
 			}
 
 			nextDfaID := addDfaState(nextRes.NextClosure, d.stateIsSearch[i])
 			idx := (i << 8) | b
 			rawNext := nextDfaID
-			if nextRes.Anchors != 0 {
-				rawNext |= AnchorVerifyFlag | (StateID(nextRes.Anchors) << 24)
+			if commonGuard != 0 {
+				rawNext |= AnchorVerifyFlag | (StateID(commonGuard) << 24)
 			}
 
 			if b >= 0x80 {
@@ -324,7 +342,7 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 	return nil
 }
 
-func epsilonClosureWithPathTags(prog *syntax.Prog, paths []NFAPath, context syntax.EmptyOp) ClosureResult {
+func epsilonClosureWithGuards(prog *syntax.Prog, paths []NFAPath) ClosureResult {
 	type stateKey struct{ ID, NodeID uint32 }
 	minPriority := make(map[stateKey]int32)
 	for _, p := range paths {
@@ -336,15 +354,14 @@ func epsilonClosureWithPathTags(prog *syntax.Prog, paths []NFAPath, context synt
 		p          NFAPath
 		newTags    uint64
 		sourcePrio int32
-		anchors    syntax.EmptyOp
 	}
 	stack := make([]pathWithNewTags, len(paths))
 	for i, p := range paths {
-		stack[i] = pathWithNewTags{p, 0, p.Priority, 0}
+		stack[i] = pathWithNewTags{p, 0, p.Priority}
 	}
+
 	var updates []PathTagUpdate
 	var resultPathsMap = make(map[stateKey]NFAPath)
-	var resultAnchors syntax.EmptyOp
 	for len(stack) > 0 {
 		ph := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
@@ -352,22 +369,14 @@ func epsilonClosureWithPathTags(prog *syntax.Prog, paths []NFAPath, context synt
 		if p.Priority > minPriority[stateKey{p.ID, p.NodeID}] {
 			continue
 		}
+
 		if p.NodeID != 0 || !isEpsilon(prog.Inst[p.ID].Op) {
 			rk := stateKey{p.ID, p.NodeID}
 			if existing, ok := resultPathsMap[rk]; !ok || p.Priority < existing.Priority {
 				resultPathsMap[rk] = p
-				updates = append(updates, PathTagUpdate{
-					RelativePriority: ph.sourcePrio,
-					NextPriority:     p.Priority,
-					Tags:             ph.newTags,
-				})
-				resultAnchors |= ph.anchors
+				updates = append(updates, PathTagUpdate{RelativePriority: ph.sourcePrio, NextPriority: p.Priority, Tags: ph.newTags})
 			} else if p.Priority == existing.Priority {
-				updates = append(updates, PathTagUpdate{
-					RelativePriority: ph.sourcePrio,
-					NextPriority:     p.Priority,
-					Tags:             ph.newTags,
-				})
+				updates = append(updates, PathTagUpdate{RelativePriority: ph.sourcePrio, NextPriority: p.Priority, Tags: ph.newTags})
 			}
 		}
 		if inst := prog.Inst[p.ID]; p.NodeID == 0 {
@@ -379,29 +388,25 @@ func epsilonClosureWithPathTags(prog *syntax.Prog, paths []NFAPath, context synt
 				}{{inst.Arg, p.Priority + 1}, {inst.Out, p.Priority}} {
 					if m, ok := minPriority[stateKey{next.id, 0}]; !ok || next.p < m {
 						minPriority[stateKey{next.id, 0}] = next.p
-						stack = append(stack, pathWithNewTags{NFAPath{ID: next.id, Priority: next.p, Tags: p.Tags}, ph.newTags, ph.sourcePrio, ph.anchors})
+						stack = append(stack, pathWithNewTags{NFAPath{ID: next.id, Priority: next.p, Anchors: p.Anchors, Tags: p.Tags}, ph.newTags, ph.sourcePrio})
 					}
 				}
 			case syntax.InstCapture:
 				tagBit := uint64(1 << inst.Arg)
 				if m, ok := minPriority[stateKey{inst.Out, 0}]; !ok || p.Priority <= m {
 					minPriority[stateKey{inst.Out, 0}] = p.Priority
-					stack = append(stack, pathWithNewTags{NFAPath{ID: inst.Out, Priority: p.Priority, Tags: p.Tags | tagBit}, ph.newTags | tagBit, ph.sourcePrio, ph.anchors})
+					stack = append(stack, pathWithNewTags{NFAPath{ID: inst.Out, Priority: p.Priority, Anchors: p.Anchors, Tags: p.Tags | tagBit}, ph.newTags | tagBit, ph.sourcePrio})
 				}
 			case syntax.InstEmptyWidth:
-				newAnchors := ph.anchors | syntax.EmptyOp(inst.Arg)
-				if (syntax.EmptyOp(inst.Arg) & context) == syntax.EmptyOp(inst.Arg) {
-					if m, ok := minPriority[stateKey{inst.Out, 0}]; !ok || p.Priority <= m {
-						minPriority[stateKey{inst.Out, 0}] = p.Priority
-						stack = append(stack, pathWithNewTags{NFAPath{ID: inst.Out, Priority: p.Priority, Tags: p.Tags}, ph.newTags, ph.sourcePrio, ph.anchors})
-					}
-				} else {
-					resultAnchors |= newAnchors
+				newAnchors := p.Anchors | syntax.EmptyOp(inst.Arg)
+				if m, ok := minPriority[stateKey{inst.Out, 0}]; !ok || p.Priority <= m {
+					minPriority[stateKey{inst.Out, 0}] = p.Priority
+					stack = append(stack, pathWithNewTags{NFAPath{ID: inst.Out, Priority: p.Priority, Anchors: newAnchors, Tags: p.Tags}, ph.newTags, ph.sourcePrio})
 				}
 			case syntax.InstNop:
 				if m, ok := minPriority[stateKey{inst.Out, 0}]; !ok || p.Priority <= m {
 					minPriority[stateKey{inst.Out, 0}] = p.Priority
-					stack = append(stack, pathWithNewTags{NFAPath{ID: inst.Out, Priority: p.Priority, Tags: p.Tags}, ph.newTags, ph.sourcePrio, ph.anchors})
+					stack = append(stack, pathWithNewTags{NFAPath{ID: inst.Out, Priority: p.Priority, Anchors: p.Anchors, Tags: p.Tags}, ph.newTags, ph.sourcePrio})
 				}
 			}
 		}
@@ -447,7 +452,7 @@ func epsilonClosureWithPathTags(prog *syntax.Prog, paths []NFAPath, context synt
 		}
 		return resPaths[i].Tags < resPaths[j].Tags
 	})
-	return ClosureResult{resPaths, updates, resultAnchors}
+	return ClosureResult{resPaths, updates}
 }
 
 func isEpsilon(op syntax.InstOp) bool {
