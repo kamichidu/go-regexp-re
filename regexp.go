@@ -147,7 +147,7 @@ func (extendedMatchTrait) HasAnchors() bool { return true }
 
 func submatchExecLoop[T loopTrait](trait T, re *Regexp, b []byte, mc *matchContext) (int, int, int) {
 	d := re.dfa
-	trans, accepting, numStates, numBytes := d.Transitions(), d.Accepting(), d.NumStates(), len(b)
+	trans, accepting, guards, numStates, numBytes := d.Transitions(), d.Accepting(), d.AcceptingGuards(), d.NumStates(), len(b)
 	anchorStart := re.anchorStart
 	bestStart, bestEnd, bestPriority := -1, -1, 1<<30-1
 	state, prio := d.SearchState(), 0
@@ -158,27 +158,33 @@ func submatchExecLoop[T loopTrait](trait T, re *Regexp, b []byte, mc *matchConte
 	for i := 0; i <= numBytes; {
 		mc.history[i] = state
 		sidx := int(state & ir.StateIDMask)
+
+		// 1. Post-Junction Accept Guard
 		if sidx >= 0 && sidx < len(accepting) && accepting[sidx] {
-			p := prio + d.MatchPriority(state)
-			if p <= bestPriority {
-				bestPriority, bestEnd = p, i
-				if anchorStart {
-					bestStart = 0
-				} else {
-					bestStart = p / ir.SearchRestartPenalty
-				}
-				if d.IsBestMatch(state) {
-					return bestStart, bestEnd, bestPriority
+			req := guards[sidx]
+			if (ir.CalculateContext(b, i) & req) == req {
+				p := prio + d.MatchPriority(state)
+				if p <= bestPriority {
+					bestPriority, bestEnd = p, i
+					if anchorStart {
+						bestStart = 0
+					} else {
+						bestStart = p / ir.SearchRestartPenalty
+					}
+					if d.IsBestMatch(state) {
+						return bestStart, bestEnd, bestPriority
+					}
 				}
 			}
 		}
+
 		if i < numBytes {
 			byteVal := b[i]
 			if sidx >= 0 && sidx < numStates {
 				off := (sidx << 8) | int(byteVal)
 				rawNext := trans[off]
 				if rawNext != ir.InvalidState {
-					// PURE GUARDED VERIFICATION (Mandate 2.5/2.19)
+					// 2. Pre-Junction Transition Guard
 					if (rawNext & ir.AnchorVerifyFlag) != 0 {
 						req := syntax.EmptyOp((rawNext & ir.AnchorMask) >> 24)
 						if (ir.CalculateContext(b, i) & req) != req {
@@ -220,7 +226,7 @@ func submatchExecLoop[T loopTrait](trait T, re *Regexp, b []byte, mc *matchConte
 
 func matchExecLoop[T loopTrait](trait T, re *Regexp, b []byte) (int, int, int) {
 	d := re.dfa
-	trans, accepting, numStates, numBytes := d.Transitions(), d.Accepting(), d.NumStates(), len(b)
+	trans, accepting, guards, numStates, numBytes := d.Transitions(), d.Accepting(), d.AcceptingGuards(), d.NumStates(), len(b)
 	anchorStart := re.anchorStart
 	bestStart, bestEnd, bestPriority := -1, -1, 1<<30-1
 	state, prio := d.SearchState(), 0
@@ -231,16 +237,19 @@ func matchExecLoop[T loopTrait](trait T, re *Regexp, b []byte) (int, int, int) {
 	for i := 0; i <= numBytes; {
 		sidx := int(state & ir.StateIDMask)
 		if sidx >= 0 && sidx < len(accepting) && accepting[sidx] {
-			p := prio + d.MatchPriority(state)
-			if p <= bestPriority {
-				bestPriority, bestEnd = p, i
-				if anchorStart {
-					bestStart = 0
-				} else {
-					bestStart = p / ir.SearchRestartPenalty
-				}
-				if d.IsBestMatch(state) {
-					return bestStart, bestEnd, bestPriority
+			req := guards[sidx]
+			if (ir.CalculateContext(b, i) & req) == req {
+				p := prio + d.MatchPriority(state)
+				if p <= bestPriority {
+					bestPriority, bestEnd = p, i
+					if anchorStart {
+						bestStart = 0
+					} else {
+						bestStart = p / ir.SearchRestartPenalty
+					}
+					if d.IsBestMatch(state) {
+						return bestStart, bestEnd, bestPriority
+					}
 				}
 			}
 		}

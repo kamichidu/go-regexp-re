@@ -9,8 +9,8 @@ func TestWarpAndAnchors(t *testing.T) {
 	tests := []struct {
 		pattern string
 		input   string
-		want    bool // Manually defined expected value for this engine
-		isStd   bool // Whether it should match standard library behavior
+		want    bool // Expected value (Go standard compliant)
+		isStd   bool // Should match standard library behavior
 	}{
 		// Basic anchors
 		{"^abc$", "abc", true, true},
@@ -19,7 +19,7 @@ func TestWarpAndAnchors(t *testing.T) {
 		{"^abc", "abc", true, true},
 		{"abc$", "abc", true, true},
 
-		// Word boundaries (\b) - Strict verification
+		// Word boundaries (\b) - Standard ASCII word boundary
 		{"\\babc\\b", "abc", true, true},
 		{"\\babc\\b", "xabc", false, true},
 		{"\\babc\\b", "abcx", false, true},
@@ -31,17 +31,18 @@ func TestWarpAndAnchors(t *testing.T) {
 		{"^あ$", "あ", true, true},
 		{"^あ$", "い", false, true},
 		{"^あ$", "あい", false, true},
-		{"\\bあ\\b", "あ", true, true},
+		// Note: \b is ASCII-only by default in Go. 'あ' is NOT a word character.
+		{"\\bあ\\b", "あ", false, true},
 		{"\\bあ\\b", "aあ", false, true},
-		{"\\bあ\\b", " あ ", true, true},
-		{"\\bあ\\b", "あ ", true, true},
-		{"\\bあ\\b", " あ", true, true},
+		{"\\bあ\\b", " あ ", false, true},
+		{"\\bあ\\b", "あ ", false, true},
+		{"\\bあ\\b", " あ", false, true},
 
 		// Dot Behavior (Defined as strict byte/class unit, not context-greedy)
-		// These cases return false in this engine to maintain DFA determinism.
-		{"^.+$", "あいう", true, true},    // Successive dots handled by Lead-Byte Warp
-		{"^あ.う$", "あいう", false, false}, // Dot at junction point is false by design
-		{"^.あ.$", "いあう", false, false}, // Dot at junction point is false by design
+		// Junction dots return false to maintain O(1) DFA transitions.
+		{"^.+$", "あいう", true, true},    // Consecutive dots handled by Lead-Byte Warp
+		{"^あ.う$", "あいう", false, false}, // Junction dot is false by design
+		{"^.あ.$", "いあう", false, false}, // Junction dot is false by design
 
 		// Nested/Sequential Anchors
 		{"^\\babc\\b$", "abc", true, true},

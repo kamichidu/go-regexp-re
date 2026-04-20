@@ -4,6 +4,7 @@ import (
 	"context"
 	"sort"
 	"sync"
+	"unicode/utf8"
 	"unsafe"
 
 	"github.com/kamichidu/go-regexp-re/syntax"
@@ -59,6 +60,7 @@ type DFA struct {
 	Naked                   bool
 	stateIsSearch           []bool
 	accepting               []bool
+	acceptingGuards         []syntax.EmptyOp
 	stateMatchPriority      []int
 	stateMatchTags          []uint64
 	stateIsBestMatch        []bool
@@ -133,12 +135,13 @@ func (d *DFA) IsAccepting(s StateID) bool {
 	}
 	return d.accepting[id]
 }
-func (d *DFA) Accepting() []bool           { return d.accepting }
-func (d *DFA) SearchState() StateID        { return d.searchState }
-func (d *DFA) MatchState() StateID         { return d.matchState }
-func (d *DFA) HasAnchors() bool            { return true }
-func (d *DFA) UsedAnchors() syntax.EmptyOp { return 0 }
-func (d *DFA) MaskStride() int             { return d.maskStride }
+func (d *DFA) Accepting() []bool                 { return d.accepting }
+func (d *DFA) AcceptingGuards() []syntax.EmptyOp { return d.acceptingGuards }
+func (d *DFA) SearchState() StateID              { return d.searchState }
+func (d *DFA) MatchState() StateID               { return d.matchState }
+func (d *DFA) HasAnchors() bool                  { return true }
+func (d *DFA) UsedAnchors() syntax.EmptyOp       { return 0 }
+func (d *DFA) MaskStride() int                   { return d.maskStride }
 func (d *DFA) Next(current StateID, b int) StateID {
 	id := int(current & StateIDMask)
 	if id < 0 || id >= d.numStates || b < 0 || b >= 256 {
@@ -157,8 +160,9 @@ func (d *DFA) MatchUpdates(s StateID) []PathTagUpdate {
 }
 
 type ClosureResult struct {
-	NextClosure []NFAPath
-	Updates     []PathTagUpdate
+	NextClosure  []NFAPath
+	Updates      []PathTagUpdate
+	MatchAnchors syntax.EmptyOp
 }
 type dfaStateKey struct {
 	hash          [2]uint64
@@ -188,11 +192,11 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 		if res, ok := closureCache[h]; ok {
 			return res
 		}
-		res := epsilonClosureWithGuards(prog, paths)
+		res := epsilonClosureWithAnchorWall(prog, paths)
 		closureCache[h] = res
 		return res
 	}
-	addDfaState := func(closure []NFAPath, isSearch bool) StateID {
+	addDfaState := func(closure []NFAPath, matchAnchors syntax.EmptyOp, isSearch bool) StateID {
 		matchP := 1<<30 - 1
 		for _, s := range closure {
 			if prog.Inst[s.ID].Op == syntax.InstMatch && s.NodeID == 0 {
@@ -228,6 +232,7 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 		d.stateMatchUpdates = append(d.stateMatchUpdates, matchUpdates)
 		d.stateIsBestMatch = append(d.stateIsBestMatch, isAcc)
 		d.accepting = append(d.accepting, isAcc)
+		d.acceptingGuards = append(d.acceptingGuards, matchAnchors)
 		minP := int32(1<<30 - 1)
 		for _, p := range closure {
 			if p.Priority < minP {
@@ -243,9 +248,9 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 	}
 
 	startRes := getCachedClosure([]NFAPath{{ID: uint32(prog.Start), Priority: 0}})
-	d.matchState = addDfaState(startRes.NextClosure, false)
+	d.matchState = addDfaState(startRes.NextClosure, startRes.MatchAnchors, false)
 	d.startUpdates = startRes.Updates
-	d.searchState = addDfaState(startRes.NextClosure, true)
+	d.searchState = addDfaState(startRes.NextClosure, startRes.MatchAnchors, true)
 
 	d.recapTables = []GroupRecapTable{{Transitions: make([][]RecapEntry, 0, 1024)}}
 	scratchBuf := make([]NFAPath, 0, 1024)
@@ -259,28 +264,45 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 
 		for b := 0; b < 256; b++ {
 			nextPaths = nextPaths[:0]
-			var commonGuard syntax.EmptyOp
-			foundMatch := false
+			var preGuard syntax.EmptyOp
+			foundEdge := false
 			for _, p := range currentClosure {
 				inst := prog.Inst[p.ID]
 				if p.NodeID == 0 {
-					if inst.MatchRune(rune(b)) {
-						if !foundMatch {
-							commonGuard = p.Anchors
-							foundMatch = true
-						} else {
-							commonGuard |= p.Anchors
+					// Byte-Level Expansion for Multi-byte Rune
+					if inst.Op == syntax.InstRune || inst.Op == syntax.InstRune1 || inst.Op == syntax.InstRuneAny || inst.Op == syntax.InstRuneAnyNotNL {
+						match := false
+						if inst.MatchRune(rune(b)) {
+							match = true
+						} else if b >= 0x80 {
+							// If b is a lead byte of some multi-byte rune matched by this inst
+							for _, r := range inst.Rune {
+								var buf [4]byte
+								n := utf8.EncodeRune(buf[:], r)
+								if n > 1 && buf[0] == byte(b) {
+									match = true
+									break
+								}
+							}
 						}
-						nextPaths = append(nextPaths, NFAPath{ID: inst.Out, Priority: p.Priority, Tags: p.Tags})
+						if match {
+							if !foundEdge {
+								preGuard = p.Anchors
+								foundEdge = true
+							} else {
+								preGuard |= p.Anchors
+							}
+							nextPaths = append(nextPaths, NFAPath{ID: inst.Out, Priority: p.Priority, Tags: p.Tags})
+						}
 					}
 				} else {
 					root := d.nodes[p.NodeID]
 					if root.Match(byte(b), false) {
-						if !foundMatch {
-							commonGuard = p.Anchors
-							foundMatch = true
+						if !foundEdge {
+							preGuard = p.Anchors
+							foundEdge = true
 						} else {
-							commonGuard |= p.Anchors
+							preGuard |= p.Anchors
 						}
 						if root.Next == nil {
 							nextPaths = append(nextPaths, NFAPath{ID: uint32(prog.Inst[p.ID].Out), NodeID: 0, Priority: p.Priority, Tags: p.Tags})
@@ -304,26 +326,36 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 				continue
 			}
 
-			// Accumulate anchors encountered AFTER consumption too
-			for _, p := range nextRes.NextClosure {
-				commonGuard |= p.Anchors
-			}
-
-			nextDfaID := addDfaState(nextRes.NextClosure, d.stateIsSearch[i])
+			nextDfaID := addDfaState(nextRes.NextClosure, nextRes.MatchAnchors, d.stateIsSearch[i])
 			idx := (i << 8) | b
 			rawNext := nextDfaID
-			if commonGuard != 0 {
-				rawNext |= AnchorVerifyFlag | (StateID(commonGuard) << 24)
+			if preGuard != 0 {
+				rawNext |= AnchorVerifyFlag | (StateID(preGuard) << 24)
 			}
 
 			if b >= 0x80 {
+				isLead := false
 				for _, p := range currentClosure {
-					if p.NodeID == 0 && prog.Inst[p.ID].MatchRune(rune(b)) {
-						rawNext |= WarpStateFlag
+					if p.NodeID == 0 {
+						inst := prog.Inst[p.ID]
+						for _, r := range inst.Rune {
+							var buf [4]byte
+							n := utf8.EncodeRune(buf[:], r)
+							if n > 1 && buf[0] == byte(b) {
+								isLead = true
+								break
+							}
+						}
+					}
+					if isLead {
 						break
 					}
 				}
+				if isLead {
+					rawNext |= WarpStateFlag
+				}
 			}
+
 			d.transitions[idx] = rawNext | TaggedStateFlag
 			for len(d.recapTables[0].Transitions) <= idx {
 				d.recapTables[0].Transitions = append(d.recapTables[0].Transitions, nil)
@@ -342,71 +374,80 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 	return nil
 }
 
-func epsilonClosureWithGuards(prog *syntax.Prog, paths []NFAPath) ClosureResult {
-	type stateKey struct{ ID, NodeID uint32 }
+func epsilonClosureWithAnchorWall(prog *syntax.Prog, paths []NFAPath) ClosureResult {
+	type stateKey struct {
+		ID, NodeID uint32
+		Anchors    syntax.EmptyOp
+	}
 	minPriority := make(map[stateKey]int32)
 	for _, p := range paths {
-		if prio, ok := minPriority[stateKey{p.ID, p.NodeID}]; !ok || p.Priority < prio {
-			minPriority[stateKey{p.ID, p.NodeID}] = p.Priority
+		if prio, ok := minPriority[stateKey{p.ID, p.NodeID, p.Anchors}]; !ok || p.Priority < prio {
+			minPriority[stateKey{p.ID, p.NodeID, p.Anchors}] = p.Priority
 		}
 	}
-	type pathWithNewTags struct {
+	type pathWithMeta struct {
 		p          NFAPath
 		newTags    uint64
 		sourcePrio int32
 	}
-	stack := make([]pathWithNewTags, len(paths))
+	stack := make([]pathWithMeta, len(paths))
 	for i, p := range paths {
-		stack[i] = pathWithNewTags{p, 0, p.Priority}
+		stack[i] = pathWithMeta{p, 0, p.Priority}
 	}
 
 	var updates []PathTagUpdate
 	var resultPathsMap = make(map[stateKey]NFAPath)
+	var matchAnchors syntax.EmptyOp
 	for len(stack) > 0 {
 		ph := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
 		p := ph.p
-		if p.Priority > minPriority[stateKey{p.ID, p.NodeID}] {
+		if p.Priority > minPriority[stateKey{p.ID, p.NodeID, p.Anchors}] {
 			continue
 		}
 
-		if p.NodeID != 0 || !isEpsilon(prog.Inst[p.ID].Op) {
-			rk := stateKey{p.ID, p.NodeID}
+		inst := prog.Inst[p.ID]
+		if p.NodeID != 0 || !isEpsilon(inst.Op) {
+			rk := stateKey{p.ID, p.NodeID, p.Anchors}
 			if existing, ok := resultPathsMap[rk]; !ok || p.Priority < existing.Priority {
 				resultPathsMap[rk] = p
 				updates = append(updates, PathTagUpdate{RelativePriority: ph.sourcePrio, NextPriority: p.Priority, Tags: ph.newTags})
+				if p.NodeID == 0 && inst.Op == syntax.InstMatch {
+					matchAnchors |= p.Anchors
+				}
 			} else if p.Priority == existing.Priority {
 				updates = append(updates, PathTagUpdate{RelativePriority: ph.sourcePrio, NextPriority: p.Priority, Tags: ph.newTags})
 			}
+			continue
 		}
-		if inst := prog.Inst[p.ID]; p.NodeID == 0 {
+		if p.NodeID == 0 {
 			switch inst.Op {
 			case syntax.InstAlt, syntax.InstAltMatch:
 				for _, next := range []struct {
 					id uint32
 					p  int32
 				}{{inst.Arg, p.Priority + 1}, {inst.Out, p.Priority}} {
-					if m, ok := minPriority[stateKey{next.id, 0}]; !ok || next.p < m {
-						minPriority[stateKey{next.id, 0}] = next.p
-						stack = append(stack, pathWithNewTags{NFAPath{ID: next.id, Priority: next.p, Anchors: p.Anchors, Tags: p.Tags}, ph.newTags, ph.sourcePrio})
+					if m, ok := minPriority[stateKey{next.id, 0, p.Anchors}]; !ok || next.p < m {
+						minPriority[stateKey{next.id, 0, p.Anchors}] = next.p
+						stack = append(stack, pathWithMeta{NFAPath{ID: next.id, Priority: next.p, Anchors: p.Anchors, Tags: p.Tags}, ph.newTags, ph.sourcePrio})
 					}
 				}
 			case syntax.InstCapture:
 				tagBit := uint64(1 << inst.Arg)
-				if m, ok := minPriority[stateKey{inst.Out, 0}]; !ok || p.Priority <= m {
-					minPriority[stateKey{inst.Out, 0}] = p.Priority
-					stack = append(stack, pathWithNewTags{NFAPath{ID: inst.Out, Priority: p.Priority, Anchors: p.Anchors, Tags: p.Tags | tagBit}, ph.newTags | tagBit, ph.sourcePrio})
+				if m, ok := minPriority[stateKey{inst.Out, 0, p.Anchors}]; !ok || p.Priority <= m {
+					minPriority[stateKey{inst.Out, 0, p.Anchors}] = p.Priority
+					stack = append(stack, pathWithMeta{NFAPath{ID: inst.Out, Priority: p.Priority, Anchors: p.Anchors, Tags: p.Tags | tagBit}, ph.newTags | tagBit, ph.sourcePrio})
 				}
 			case syntax.InstEmptyWidth:
 				newAnchors := p.Anchors | syntax.EmptyOp(inst.Arg)
-				if m, ok := minPriority[stateKey{inst.Out, 0}]; !ok || p.Priority <= m {
-					minPriority[stateKey{inst.Out, 0}] = p.Priority
-					stack = append(stack, pathWithNewTags{NFAPath{ID: inst.Out, Priority: p.Priority, Anchors: newAnchors, Tags: p.Tags}, ph.newTags, ph.sourcePrio})
+				if m, ok := minPriority[stateKey{inst.Out, 0, newAnchors}]; !ok || p.Priority <= m {
+					minPriority[stateKey{inst.Out, 0, newAnchors}] = p.Priority
+					stack = append(stack, pathWithMeta{NFAPath{ID: inst.Out, Priority: p.Priority, Anchors: newAnchors, Tags: p.Tags}, ph.newTags, ph.sourcePrio})
 				}
 			case syntax.InstNop:
-				if m, ok := minPriority[stateKey{inst.Out, 0}]; !ok || p.Priority <= m {
-					minPriority[stateKey{inst.Out, 0}] = p.Priority
-					stack = append(stack, pathWithNewTags{NFAPath{ID: inst.Out, Priority: p.Priority, Anchors: p.Anchors, Tags: p.Tags}, ph.newTags, ph.sourcePrio})
+				if m, ok := minPriority[stateKey{inst.Out, 0, p.Anchors}]; !ok || p.Priority <= m {
+					minPriority[stateKey{inst.Out, 0, p.Anchors}] = p.Priority
+					stack = append(stack, pathWithMeta{NFAPath{ID: inst.Out, Priority: p.Priority, Anchors: p.Anchors, Tags: p.Tags}, ph.newTags, ph.sourcePrio})
 				}
 			}
 		}
@@ -450,9 +491,12 @@ func epsilonClosureWithGuards(prog *syntax.Prog, paths []NFAPath) ClosureResult 
 		if resPaths[i].Priority != resPaths[j].Priority {
 			return resPaths[i].Priority < resPaths[j].Priority
 		}
+		if resPaths[i].Anchors != resPaths[j].Anchors {
+			return resPaths[i].Anchors < resPaths[j].Anchors
+		}
 		return resPaths[i].Tags < resPaths[j].Tags
 	})
-	return ClosureResult{resPaths, updates}
+	return ClosureResult{resPaths, updates, matchAnchors}
 }
 
 func isEpsilon(op syntax.InstOp) bool {

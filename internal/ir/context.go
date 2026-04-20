@@ -2,8 +2,6 @@ package ir
 
 import (
 	"github.com/kamichidu/go-regexp-re/syntax"
-	"unicode"
-	"unicode/utf8"
 )
 
 type RuneClass uint8
@@ -82,10 +80,14 @@ func CalculateContextByClass(c1, c2 RuneClass) syntax.EmptyOp {
 func CalculateContext(b []byte, i int) syntax.EmptyOp {
 	var r1, r2 rune = -1, -1
 	if i > 0 {
-		r1, _ = utf8.DecodeLastRune(b[:i])
+		j := i - 1
+		for j > 0 && b[j]&0xC0 == 0x80 {
+			j--
+		}
+		r1 = decodeRune(b[j:i])
 	}
 	if i < len(b) {
-		r2, _ = utf8.DecodeRune(b[i:])
+		r2 = decodeRune(b[i:])
 	}
 
 	var op syntax.EmptyOp
@@ -114,5 +116,16 @@ func IsWord(r rune) bool {
 	if r <= 0x7F {
 		return syntax.IsWordChar(r)
 	}
-	return unicode.Is(unicode.L, r) || unicode.Is(unicode.N, r) || r == '_'
+	return false
+}
+
+func decodeRune(b []byte) rune {
+	if len(b) == 0 {
+		return -1
+	}
+	if b[0] < 0x80 {
+		return rune(b[0])
+	}
+	r, _ := DecodeRune(b)
+	return r
 }
