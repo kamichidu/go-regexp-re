@@ -111,6 +111,9 @@ To maintain constant-time throughput and sub-linear memory growth for complex pa
 #### 2.19.1 Multi-byte Dot ('.') Determinism Mandate
 To ensure DFA determinism and $O(1)$ transitions, the behavior of `.` (dot) is strictly defined as matching a single byte or a static lead-byte unit. Standard library behavior involving complex grapheme clusters or context-dependent consumption is excluded as it requires NFA-like backtracking (violating Mandate 2.5). Patterns like `^あ.う$` matching `あいう` may return false if the dot junction conflicts with lead-byte warp boundaries; this is a conscious architectural trade-off for performance.
 
+#### 2.19.2 Calculation-Free Boundary Analysis Mandate
+Junction verification for anchors (`\b`, `^`, `$`) MUST NOT employ `utf8.DecodeRune` or any iterative rune restoration. All boundary conditions must be determined solely by inspecting the bit patterns of the surrounding physical bytes (`b[i-1]`, `b[i]`). To maintain Go-compatibility with $O(1)$ performance, word boundaries (`\b`) are defined as **ASCII Word Boundaries**; multi-byte bytes (0x80+) are strictly treated as non-word characters. This ensures that boundary analysis remains a zero-allocation, constant-time operation aligned with the engine's byte-oriented philosophy.
+
 ## 3. Feature Selection Policy
 
 ### 3.1 Supported Features

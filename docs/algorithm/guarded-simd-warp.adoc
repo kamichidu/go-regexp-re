@@ -54,3 +54,12 @@ This allows address calculation using a simple bit shift: `state << 8 + byte`, e
 * **SIMD Continuity**: SIMD skipping does not stop even when anchors are present; it only performs minimal verification upon hits.
 * **Cache Efficiency**: Stride 256 ensures transition tables are well-aligned with cache lines, improving memory locality.
 * **Branchless Verification**: Anchor logic is implemented using bitwise operations to minimize branch prediction misses.
+
+=== Zero-Cost Junction Verification
+Anchor guard verification is optimized to a single pointer lookup by inspecting only the immediate surrounding bytes:
+
+* **Junction Left**: `i == 0` implies `BeginText`. Otherwise, `b[i-1]` is inspected.
+* **Junction Right**: `i == len(b)` implies `EndText`. Otherwise, `b[i]` is inspected.
+* **Word Class Shortcut**: `syntax.IsWordChar` is only applied if the byte is `< 0x80`. All multi-byte lead or continuation bytes (`>= 0x80`) are treated as `Non-Word` characters by definition.
+
+This bit-pattern-only analysis ensures that boundary checks remain O(1) and never incur the penalty of UTF-8 decoding or L2/L3 cache misses.
