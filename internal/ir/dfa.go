@@ -2,6 +2,7 @@ package ir
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"sync"
 	"unicode/utf8"
@@ -179,6 +180,9 @@ type dfaStateKey struct {
 }
 
 func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error {
+	if err := checkEpsilonLoop(prog); err != nil {
+		return err
+	}
 	for _, inst := range prog.Inst {
 		if inst.Op == syntax.InstEmptyWidth {
 			d.hasAnchors = true
@@ -521,6 +525,47 @@ func isEpsilon(op syntax.InstOp) bool {
 		return true
 	}
 	return false
+}
+
+func checkEpsilonLoop(prog *syntax.Prog) error {
+	visited := make([]bool, len(prog.Inst))
+	onStack := make([]bool, len(prog.Inst))
+
+	var dfs func(int) error
+	dfs = func(id int) error {
+		if onStack[id] {
+			return fmt.Errorf("DFA: unsupported epsilon loop")
+		}
+		if visited[id] {
+			return nil
+		}
+
+		visited[id] = true
+		onStack[id] = true
+		defer func() { onStack[id] = false }()
+
+		inst := prog.Inst[id]
+		if isEpsilon(inst.Op) {
+			if err := dfs(int(inst.Out)); err != nil {
+				return err
+			}
+			if inst.Op == syntax.InstAlt || inst.Op == syntax.InstAltMatch {
+				if err := dfs(int(inst.Arg)); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+
+	for i := range prog.Inst {
+		if !visited[i] {
+			if err := dfs(i); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func hashSet(paths []NFAPath, naked bool) [2]uint64 {
