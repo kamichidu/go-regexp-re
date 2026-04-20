@@ -170,7 +170,16 @@ type dfaStateKey struct {
 	isSearch      bool
 }
 
-func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error {
+func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			if s, ok := r.(string); ok && s == "regexp: pattern too large or ambiguous" {
+				err = fmt.Errorf("%s", s)
+			} else {
+				panic(r)
+			}
+		}
+	}()
 	if err := checkEpsilonLoop(prog); err != nil {
 		return err
 	}
@@ -185,27 +194,57 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 	nfaToDfa := make(map[dfaStateKey]uint32)
 	closureCache := make(map[uint64]ClosureResult)
 	getCachedClosure := func(paths []NFAPath) ClosureResult {
+		if len(paths) == 0 {
+			return ClosureResult{}
+		}
+		// Calculate the minimum priority to make the hash invariant to absolute offsets
+		minP := paths[0].Priority
+		for _, p := range paths {
+			if p.Priority < minP {
+				minP = p.Priority
+			}
+		}
+
 		h := uint64(14695981039346656037)
 		for _, p := range paths {
 			h = (h ^ uint64(p.ID)) * 1099511628211
 			h = (h ^ uint64(p.NodeID)) * 1099511628211
-			h = (h ^ uint64(p.Priority)) * 1099511628211
-			h = (h ^ uint64(p.Anchors)) * 1099511628211
+			// Use normalized priority for the hash
+			h = (h ^ uint64(p.Priority-minP)) * 1099511628211
 			h = (h ^ uint64(p.Tags)) * 1099511628211
+			h = (h ^ uint64(p.Anchors)) * 1099511628211
 		}
 		if res, ok := closureCache[h]; ok {
 			// Return a copy of Updates to prevent callers from corrupting the cache
 			updatesCopy := make([]PathTagUpdate, len(res.Updates))
 			copy(updatesCopy, res.Updates)
-			return ClosureResult{res.NextClosure, updatesCopy, res.MatchAnchors}
+			resCopy := res
+			resCopy.Updates = updatesCopy
+			return resCopy
 		}
-		res := epsilonClosureWithAnchorWall(prog, paths)
+
+		// Create a normalized copy of paths for epsilonClosure
+		normPaths := make([]NFAPath, len(paths))
+		copy(normPaths, paths)
+		for i := range normPaths {
+			normPaths[i].Priority -= minP
+		}
+
+		res := epsilonClosureWithAnchorWall(prog, normPaths)
 		closureCache[h] = res
 
+		// Return a copy to prevent accidental corruption
 		updatesCopy := make([]PathTagUpdate, len(res.Updates))
 		copy(updatesCopy, res.Updates)
-		return ClosureResult{res.NextClosure, updatesCopy, res.MatchAnchors}
+		resCopy := res
+		resCopy.Updates = updatesCopy
+		return resCopy
 	}
+	maxStates := maxMemory / 2048
+	if maxStates < 100 {
+		maxStates = 100
+	}
+
 	addDfaState := func(closure []NFAPath, updates []PathTagUpdate, matchAnchors syntax.EmptyOp, isSearch bool) uint32 {
 		matchP := 1<<30 - 1
 		for _, s := range closure {
@@ -215,9 +254,16 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 				}
 			}
 		}
-		key := dfaStateKey{hashSet(closure, d.Naked), matchP, isSearch}
+		keyPrio := matchP
+		if d.Naked {
+			keyPrio = 0
+		}
+		key := dfaStateKey{hashSet(closure, d.Naked), keyPrio, isSearch}
 		if id, ok := nfaToDfa[key]; ok {
 			return id
+		}
+		if d.numStates >= maxStates {
+			panic("regexp: pattern too large or ambiguous")
 		}
 		id := uint32(d.numStates)
 		nfaToDfa[key] = id
