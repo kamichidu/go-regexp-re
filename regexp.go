@@ -368,32 +368,43 @@ func matchExecLoop[T loopTrait](trait T, re *Regexp, b []byte) (int, int, int) {
 func (re *Regexp) sparseTDFA_PathSelection(mc *matchContext, b []byte, start, end, prio int) {
 	d := re.dfa
 	recap := d.RecapTables()[0]
+	uIndices, uUpdates := d.TagUpdateIndices(), d.TagUpdates()
 
 	// The winning path's relative priority at the end point.
-	// We MUST use the MatchPriority of the final state to find which path reached InstMatch.
 	currPrio := int16(d.MatchPriority(mc.history[end]))
 	mc.pathHistory[end] = int32(currPrio)
 
 	for i := end - 1; i >= start; i-- {
+		// Only the lead byte of a multi-byte sequence (or ASCII) has a transition entry.
+		byteVal := b[i]
+		if (byteVal & 0xC0) == 0x80 {
+			mc.pathHistory[i] = mc.pathHistory[i+1]
+			continue
+		}
+
 		sidx := mc.history[i]
 		if sidx == ir.InvalidState {
-			// This index was skipped by a SIMD warp, carry over the path identity.
 			mc.pathHistory[i] = int32(currPrio)
 			continue
 		}
-		byteVal := b[i]
 		off := (int(sidx) << 8) | int(byteVal)
 
 		found := false
 		bestInputPrio := int16(32767)
 		if off < len(recap.Transitions) {
+			basePrio := int16(0)
+			if off < len(uIndices) {
+				uIdx := uIndices[off]
+				if int(uIdx) < len(uUpdates) {
+					basePrio = int16(uUpdates[uIdx].BasePriority)
+				}
+			}
+
 			for _, entry := range recap.Transitions[off] {
-				// We search backward: which InputPriority leads to the current NextPriority?
-				// To ensure leftmost-first semantics, we must choose the smallest InputPriority
-				// that connects to our current (winning) path identity.
 				if int16(entry.NextPriority) == currPrio {
-					if entry.InputPriority < bestInputPrio {
-						bestInputPrio = entry.InputPriority
+					p := entry.InputPriority + basePrio
+					if p < bestInputPrio {
+						bestInputPrio = p
 						found = true
 					}
 				}
@@ -411,6 +422,7 @@ func (re *Regexp) sparseTDFA_PathSelection(mc *matchContext, b []byte, start, en
 func (re *Regexp) sparseTDFA_Recap(mc *matchContext, b []byte, start, end, prio int, regs []int) {
 	d := re.dfa
 	recap := d.RecapTables()[0]
+	uIndices, uUpdates := d.TagUpdateIndices(), d.TagUpdates()
 
 	// Apply initial tags for the winning path identity at start.
 	re.applyEntryTags(regs, d.StartUpdates(), mc.pathHistory[start], start)
@@ -427,19 +439,28 @@ func (re *Regexp) sparseTDFA_Recap(mc *matchContext, b []byte, start, end, prio 
 
 		step := 1
 		rawNext := d.Transitions()[off]
-		if byteVal >= 0x80 && (rawNext&ir.WarpStateFlag) != 0 {
+		if byteVal >= 0x80 && rawNext != ir.InvalidState && (rawNext&ir.WarpStateFlag) != 0 {
 			step = 1 + ir.GetTrailingByteCount(byteVal)
 		}
 
 		if off < len(recap.Transitions) {
+			basePrio := int16(0)
+			if off < len(uIndices) {
+				uIdx := uIndices[off]
+				if int(uIdx) < len(uUpdates) {
+					basePrio = int16(uUpdates[uIdx].BasePriority)
+				}
+			}
+
 			// Step 2: Forward lick. Determine the next identity to select the unique edge.
 			nextPathID := int32(0)
 			if i+step <= end {
 				nextPathID = mc.pathHistory[i+step]
 			}
 
+			// We need to find entry where InputPriority == pathID - basePrio AND NextPriority == nextPathID
 			for _, entry := range recap.Transitions[off] {
-				if int32(entry.InputPriority) == pathID && int32(entry.NextPriority) == nextPathID {
+				if entry.InputPriority == int16(pathID)-basePrio && int32(entry.NextPriority) == nextPathID {
 					// Purely apply delta tags on the winning path identity.
 					// PreTags belong to position i (before byte),
 					// PostTags belong to position i+step (after byte).
@@ -451,7 +472,6 @@ func (re *Regexp) sparseTDFA_Recap(mc *matchContext, b []byte, start, end, prio 
 		}
 		i += step
 	}
-
 }
 
 func (re *Regexp) applyRawTags(regs []int, tags uint64, pos int) {

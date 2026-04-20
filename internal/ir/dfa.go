@@ -271,13 +271,18 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) (err 
 		d.stateIsSearch = append(d.stateIsSearch, isSearch)
 		isAcc, matchP := false, 1<<30-1
 		minP := int32(1<<30 - 1)
-		for _, s := range closure {
-			if s.Priority < minP {
-				minP = s.Priority
+		if len(closure) > 0 {
+			minP = closure[0].Priority
+			for _, s := range closure {
+				if s.Priority < minP {
+					minP = s.Priority
+				}
 			}
+		}
+		for _, s := range closure {
 			if prog.Inst[s.ID].Op == syntax.InstMatch && s.NodeID == 0 {
 				isAcc = true
-				prio := int(s.Priority)
+				prio := int(s.Priority - minP)
 				if prio < matchP {
 					matchP = prio
 				}
