@@ -15,6 +15,14 @@ Many regular expressions are effectively just fixed strings (literals) or anchor
    - The engine uses `bytes.Index` or `bytes.HasPrefix` to locate the match.
    - On a successful match, it uses the template to generate submatch indices in $O(1)$ time.
 
+== Compilation-Phase Optimization (DFA Bypass)
+
+To minimize the memory footprint and compilation time for simple patterns, the engine MUST follow a strict **DFA-Free Bypass Mandate**:
+
+1. **Detection**: If `AnalyzeLiteralPattern` successfully identifies a specializeable literal pattern, it returns a `LiteralMatcher`.
+2. **Bypass**: The compilation orchestrator (`CompileContextWithOptions`) MUST detect the presence of a `LiteralMatcher` and **skip all NFA-to-DFA conversion phases**.
+3. **Lazy Allocation**: Transition tables and state-identity maps are not allocated, ensuring that a literal regex consumes significantly less memory than a general-purpose DFA.
+
 == Advantages
 
 * **Zero State Transition Cost**: No need to access DFA transition tables.

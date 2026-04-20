@@ -60,14 +60,7 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 	}
 
 	literalMatcher := ir.AnalyzeLiteralPattern(s, numSubexp+1)
-	var prefix []byte
-	complete := false
-	if literalMatcher != nil {
-		prefix = literalMatcher.Literal
-		if literalMatcher.Strategy == ir.LiteralStrategyExact {
-			complete = true
-		}
-	}
+	prefix, complete := calculateLiteralPrefix(s)
 
 	anchorStart := false
 	if s.Op == syntax.OpConcat && len(s.Sub) > 0 && s.Sub[0].Op == syntax.OpBeginText {
@@ -76,15 +69,18 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 		anchorStart = true
 	}
 
-	dfa, err := ir.NewDFAWithMemoryLimit(ctx, prog, opts.MaxMemory, true)
-	if err != nil {
-		return nil, err
+	var dfa *ir.DFA
+	if literalMatcher == nil {
+		dfa, err = ir.NewDFAWithMemoryLimit(ctx, prog, opts.MaxMemory, true)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	res := &Regexp{
 		expr:           expr,
 		numSubexp:      numSubexp,
-		prefix:         prefix,
+		prefix:         []byte(prefix),
 		complete:       complete,
 		anchorStart:    anchorStart,
 		prog:           prog,
@@ -94,6 +90,40 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 	}
 	res.bindMatchStrategy()
 	return res, nil
+}
+
+func calculateLiteralPrefix(re *syntax.Regexp) (string, bool) {
+	switch re.Op {
+	default:
+		return "", false
+	case syntax.OpLiteral:
+		if re.Flags&syntax.FoldCase != 0 {
+			return "", false
+		}
+		return string(re.Rune), true
+	case syntax.OpCharClass:
+		if len(re.Rune) == 2 && re.Rune[0] == re.Rune[1] {
+			return string(re.Rune[0]), true
+		}
+		return "", false
+	case syntax.OpCapture:
+		return calculateLiteralPrefix(re.Sub[0])
+	case syntax.OpConcat:
+		var prefix string
+		for i, sub := range re.Sub {
+			p, c := calculateLiteralPrefix(sub)
+			prefix += p
+			if !c {
+				return prefix, false
+			}
+			if i == len(re.Sub)-1 {
+				return prefix, true
+			}
+		}
+		return prefix, true
+	case syntax.OpBeginText:
+		return "", false // Not a literal
+	}
 }
 
 func (re *Regexp) bindMatchStrategy() {
@@ -108,7 +138,7 @@ func (re *Regexp) bindMatchStrategy() {
 		return
 	}
 
-	if re.dfa.HasAnchors() {
+	if re.dfa != nil && re.dfa.HasAnchors() {
 		re.strategy = strategyExtended
 	} else {
 		re.strategy = strategyFast
