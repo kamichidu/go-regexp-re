@@ -21,8 +21,8 @@ The 3-Pass Sparse TDFA solves this by making the memory structure **additive** (
 
 === Phase 2: Path Identity Selection
 * **Objective**: Determine the unique "winning path" from `start` to `end` based on Go's leftmost-first rules.
-* **Mechanism**: Utilizing the `NakedState` history recorded in Phase 1, the engine performs a forward recap using NFA-set guidance to identify the priority level and path that reached the `end` position.
-* **Output**: A sequence of `PathIDs` or `Priority` transitions that guide the next phase.
+* **Mechanism**: Utilizing the `NakedState` history recorded in Phase 1, the engine performs a **backward trace** from the `end` position. It initializes the `PathID` from the `MatchPriority` of the final accepting state and works backward to the `start` position by matching `entry.NextPriority` in the `RecapTable`.
+* **Output**: A sequence of `PathIDs` (recorded in `mc.pathHistory`) that guide the next phase.
 
 === Phase 3: Group-Specific Recap
 * **Objective**: Extract capturing group registers along the confirmed winning path.
@@ -52,13 +52,17 @@ This ensures that even regular expressions with hundreds of capturing groups can
 * **Priority-Burned Precision**: Maintains 100% compatibility with Go's standard matching rules.
 
 === Phase 2: Path Identity Selection (Priority-Chain Tracking)
-Pass 2 is implemented as a "Priority-Chain Tracking" loop, identifying the winning path without NFA simulation.
+Pass 2 is implemented as a **Backward Priority-Chain Tracking** loop, identifying the winning path without NFA simulation or lookahead.
 
-* **Mechanism**: Every DFA transition edge stores a set of `RecapEntry` objects, each representing an NFA path's "Input Priority" (relative to the state minimum) and its corresponding "Next Priority" after consuming the byte or performing a warp.
-* **Tracking**: Starting from Priority 0 at the match start position, the engine follows the recorded `StateID` history. At each step, it lookups the `NextPriority` mapped to the current `InputPriority` for the given byte.
-* **Warp Integration**: During a lead-byte warp, the `RecapEntry` encapsulates the cumulative priority update for the entire multi-byte sequence, allowing the path identity to stay synchronized with the pointer jumps.
+* **Mechanism**: Every DFA transition edge stores a set of `RecapEntry` objects, each representing an NFA path's "Input Priority" and its corresponding "Next Priority" after consuming the byte or performing a warp.
+* **Tracking**:
+    1. The loop starts at the match `end` position.
+    2. It initializes the current `PathID` using the `MatchPriority` of the DFA state at `mc.history[end]`.
+    3. It iterates backward toward `start`. At each step, it finds the `RecapEntry` for the current byte where `entry.NextPriority` matches the current `PathID`.
+    4. The current `PathID` is then updated to `entry.InputPriority` for the previous step.
+* **Warp Integration**: During a lead-byte warp, the `RecapEntry` encapsulates the cumulative priority update for the entire multi-byte sequence, allowing the backward trace to jump across the warped segments while maintaining path identity.
 
-This design ensures that Pass 2 remains a pure table-lookup operation, strictly (n)$ in time and zero-allocation in space.
+This design ensures that Pass 2 remains a pure, linear table-lookup operation, strictly $O(n)$ in time and zero-allocation in space.
 
 == Technical Implementation Details
 

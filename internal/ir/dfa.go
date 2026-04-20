@@ -73,7 +73,6 @@ type DFA struct {
 	maskStride              int
 	stateToMask             []uint64
 	startUpdates            []PathTagUpdate
-	stateMatchUpdates       [][]PathTagUpdate
 	stateEntryTags          [][]PathTagUpdate
 	hasAnchors              bool
 }
@@ -160,13 +159,6 @@ func (d *DFA) Next(currentID uint32, b int) uint32 {
 }
 func (d *DFA) AnchorNext(id uint32, bit int) uint32 { return InvalidState }
 func (d *DFA) StartUpdates() []PathTagUpdate        { return d.startUpdates }
-func (d *DFA) MatchUpdates(id uint32) []PathTagUpdate {
-	idx := int(id & StateIDMask)
-	if idx >= d.numStates {
-		return nil
-	}
-	return d.stateMatchUpdates[idx]
-}
 
 type ClosureResult struct {
 	NextClosure  []NFAPath
@@ -233,7 +225,6 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 		d.stateIsSearch = append(d.stateIsSearch, isSearch)
 		isAcc, matchP := false, 1<<30-1
 		var matchTags uint64
-		var matchUpdates []PathTagUpdate
 		minP := int32(1<<30 - 1)
 		for _, s := range closure {
 			if s.Priority < minP {
@@ -246,13 +237,11 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) error
 					matchP = prio
 					matchTags = s.Tags
 				}
-				matchUpdates = append(matchUpdates, PathTagUpdate{RelativePriority: s.Priority, NextPriority: s.Priority, Tags: s.Tags})
 			}
 		}
 		d.stateMinPriority = append(d.stateMinPriority, minP)
 		d.stateMatchPriority = append(d.stateMatchPriority, matchP)
 		d.stateMatchTags = append(d.stateMatchTags, matchTags)
-		d.stateMatchUpdates = append(d.stateMatchUpdates, matchUpdates)
 		d.stateEntryTags = append(d.stateEntryTags, updates)
 
 		d.stateIsBestMatch = append(d.stateIsBestMatch, isAcc && matchP <= int(minP))

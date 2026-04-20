@@ -398,12 +398,6 @@ func (re *Regexp) sparseTDFA_Recap(mc *matchContext, b []byte, start, end, prio 
 		}
 		i += step
 	}
-	lastSidx := mc.history[end]
-	if lastSidx != ir.InvalidState {
-		updates := d.MatchUpdates(lastSidx)
-		pathID := mc.pathHistory[end]
-		re.applyEntryTags(regs, updates, pathID, end)
-	}
 }
 
 func (re *Regexp) applyRawTags(regs []int, tags uint64, pos int) {
