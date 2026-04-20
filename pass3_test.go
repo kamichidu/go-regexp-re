@@ -39,7 +39,7 @@ func TestPass3MultiByte(t *testing.T) {
 	re := MustCompile(`あ(い)う`)
 	input := "あいう"
 	got := re.FindSubmatchIndex([]byte(input))
-	// あ=3bytes, い=3bytes, う=3bytes. Total=9. Group1=[3, 6].
+	// Each character is 3 bytes. Total=9. Group1=[3, 6].
 	expected := []int{0, 9, 3, 6}
 	if !reflect.DeepEqual(got, expected) {
 		t.Errorf("Multi-byte failed: expected %v, got %v", expected, got)

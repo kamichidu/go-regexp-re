@@ -26,11 +26,13 @@ The 3-Pass Sparse TDFA solves this by making the memory structure **additive** (
 
 === Phase 3: Group-Specific Recap
 * **Objective**: Extract capturing group registers along the confirmed winning path.
-* **Mechanism**:
+*   **Mechanism**:
     1.  Uses **Group-Specific "Burned" Tables** that are pre-calculated during compilation.
     2.  Each table is specialized for a single capturing group (e.g., Group 1, Group 2).
     3.  The engine follows the `PathID` guide from Phase 2 and applies PUSH/POP commands from the tables.
-* **Efficiency**: Each group recap is a simple table-lookup loop. Because tables are separate, they don't cause state explosion in the primary DFA.
+*   **Transition-Resident Tags**: Because DFA states are "Naked" (defined purely by the set of reachable NFA states), capture tags cannot be stored on the state itself without causing ambiguity. Instead, tags are associated with **Transition Edges** (`RecapEntry`). This ensures that submatch boundaries are correctly attributed to the specific NFA path taken through the deterministic state machine.
+*   **Efficiency**: Each group recap is a simple table-lookup loop. Because tables are separate, they don't cause state explosion in the primary DFA.
+
 
 == The "Additive Memory" Mandate
 A core architectural requirement of this engine is that **total memory consumption must be linear relative to the number of capturing groups**.

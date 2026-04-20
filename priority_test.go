@@ -5,8 +5,8 @@ import (
 )
 
 func TestPriorityGreedyLoop(t *testing.T) {
-	// a* は a を繰り返すパス(Prio 0)と、空文字で抜けるパス(Prio 1)がある。
-	// Greedy であれば Prio 0 を最優先し、可能な限り長くマッチすべき。
+	// a* has a loop path (Prio 0) and an exit path (Prio 1).
+	// Greedy matching should prioritize Prio 0 to match as long as possible.
 	re := MustCompile(`a*`)
 	input := []byte("aaa")
 	mc := &matchContext{}
@@ -21,30 +21,29 @@ func TestPriorityGreedyLoop(t *testing.T) {
 		t.Errorf("Greedy failed: expected [0, 3], got [%d, %d]", start, end)
 	}
 
-	// 履歴を確認
+	// Verify history trace
 	for i := 0; i <= len(input); i++ {
 		t.Logf("Pos %d: State %d", i, mc.history[i])
 	}
 }
 
 func TestPriorityAlternation(t *testing.T) {
-	// (a|aa) の leftmost-first ループ
-	// aa が後にあっても、標準Goでは a が優先される(非Greedy的振る舞い)か、
-	// あるいは全体の最長一致を優先するかはパターンの構造に依存。
-	// syntax.Simplify を通すと (?:aa|a) と最適化されることもある。
+	// (a|aa) leftmost-first loop behavior.
+	// In standard Go, 'a' is prioritized even if 'aa' follows, or longest match is preferred
+	// depending on the exact AST structure. syntax.Simplify might optimize it to (?:aa|a).
 	re := MustCompile(`a|aa`)
 	input := []byte("aa")
 
 	got := re.FindSubmatchIndex(input)
 	t.Logf("Pattern a|aa on 'aa': %v", got)
-	// Go標準: "a|aa" on "aa" -> "a" [0, 1]
+	// Go standard: "a|aa" on "aa" -> "a" [0, 1]
 	if got[1] != 1 {
 		t.Errorf("Leftmost-first failed: expected end 1, got %d", got[1])
 	}
 }
 
 func TestPriorityAbsoluteTracking(t *testing.T) {
-	// 憲法 2.12: Priority Normalization & Absolute Tracking の検証
+	// Mandate 2.12: Verification of Priority Normalization & Absolute Tracking
 	re := MustCompile(`(a*)b`)
 	input := []byte("aaab")
 

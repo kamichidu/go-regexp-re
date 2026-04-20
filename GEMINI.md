@@ -38,6 +38,7 @@ The engine follows a **3-Pass Sparse TDFA** strategy to guarantee peak performan
 - **Pass 1: Naked Discovery**: A single high-speed scan (DFA or BP-DFA) determines match boundaries `[start, end]` and records a history of deterministic states. This pass uses a minimal DFA that excludes priority and tag information to physically block the exponential state explosion.
 - **Pass 2: Path Identity Selection**: Identifies the unique "winning NFA path" from start to end based on Go's leftmost-first rules using the recorded history.
 - **Pass 3: Group-Specific Recap**: Uses independent "burned tables" for each capturing group to determine boundaries along the winning path.
+- **Transition-Resident Tags**: Because DFA states are "Naked" (defined only by the NFA state set), capturing group boundaries (tags) MUST be associated with **transitions** (`RecapEntry`) rather than states. This ensures that tags remain unambiguous even when multiple NFA paths with different tag histories are merged into a single DFA state.
 
 #### 2.5.1 NFA-Free Path Selection Mandate (Pass 2)
 Path selection in Pass 2 MUST NOT employ runtime NFA simulation or dynamic priority comparisons. The identity of the winning path must be reconstructed solely by following pre-calculated priority transitions (`InputPriority` -> `NextPriority`) stored within the `RecapTable`. Pass 2 must operate as a strictly linear, table-driven loop that updates the current priority identity based on the `StateID` history from Pass 1, ensuring total compliance with the engine's calculation-free philosophy.
@@ -78,7 +79,7 @@ To maintain maximum throughput for small patterns, the BP-DFA MUST avoid all run
 - **Absolute Priority Tracking**: The engine MUST track cumulative priority to identify the true leftmost-first match during Phase 1.
 
 ### 2.13 Early Exit Optimization (IsBestMatch)
-- **Deterministic Finality**: If a DFA state identifies a match whose priority is unbeatable (`IsBestMatch == true`), the engine MUST stop scanning immediately for the current start position.
+- **Strict Greedy Finality**: A DFA state is considered to have an unbeatable match (`IsBestMatch == true`) ONLY if its `MatchPriority` is less than or equal to the `MinPriority` reachable from that state. This ensures that greedy repetitions (e.g., `.*`, `a*`) do not terminate prematurely on higher-priority but shorter matches.
 
 ### 2.14 State Explosion Protection (Configurable & Scalable)
 - **Default Memory Threshold**: The DFA transition table is typically limited to **64MiB**.

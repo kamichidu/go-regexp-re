@@ -202,7 +202,6 @@ func submatchExecLoop[T loopTrait](trait T, re *Regexp, b []byte, mc *matchConte
 							if off < len(uIndices) {
 								uIdx := uIndices[off]
 								if int(uIdx) < len(uUpdates) {
-									// 優先度の正規化に伴う差分を累積
 									prio += int(uUpdates[uIdx].BasePriority)
 								}
 							}
@@ -368,6 +367,7 @@ func (re *Regexp) sparseTDFA_Recap(mc *matchContext, b []byte, start, end, prio 
 		if off < len(recap.Transitions) {
 			for _, entry := range recap.Transitions[off] {
 				if int32(entry.InputPriority) == pathID {
+					// Apply tags generated during transition (byte consumption + epsilon closure) at pos i+step
 					re.applyRawTags(regs, entry.PreTags, i+step)
 					break
 				}
