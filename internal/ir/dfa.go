@@ -170,7 +170,7 @@ type dfaStateKey struct {
 	isSearch      bool
 }
 
-func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) (err error) {
+func (d *DFA) build(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, maxMemory int) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			if s, ok := r.(string); ok && s == "regexp: pattern too large or ambiguous" {
@@ -180,6 +180,9 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) (err 
 			}
 		}
 	}()
+	if err := checkCompatibility(s); err != nil {
+		return err
+	}
 	if err := checkEpsilonLoop(prog); err != nil {
 		return err
 	}
@@ -704,9 +707,9 @@ func hashSet(paths []NFAPath, naked bool) [2]uint64 {
 	return [2]uint64{h1, 0}
 }
 
-func NewDFAWithMemoryLimit(ctx context.Context, prog *syntax.Prog, maxMemory int, naked bool) (*DFA, error) {
+func NewDFAWithMemoryLimit(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, maxMemory int, naked bool) (*DFA, error) {
 	d := &DFA{Naked: naked, numSubexp: prog.NumCap / 2}
-	if err := d.build(ctx, prog, maxMemory); err != nil {
+	if err := d.build(ctx, s, prog, maxMemory); err != nil {
 		return nil, err
 	}
 	return d, nil
@@ -753,3 +756,167 @@ func (d *DFA) WarpPointState(s uint32) uint32                   { return Invalid
 func (d *DFA) WarpPointGuard(s uint32) syntax.EmptyOp           { return 0 }
 func (d *DFA) MaxInst() int                                     { return 0 }
 func (d *DFA) minimize()                                        {}
+
+func checkCompatibility(re *syntax.Regexp) error {
+	if re == nil {
+		return nil
+	}
+	switch re.Op {
+	case syntax.OpCapture:
+		if hasEmptyAlternative(re.Sub[0]) {
+			return fmt.Errorf("DFA: unsupported empty alternative in capture")
+		}
+	case syntax.OpQuest:
+		if hasCapture(re.Sub[0]) && matchesEmpty(re.Sub[0]) {
+			return fmt.Errorf("DFA: unsupported optional empty capture")
+		}
+	}
+	for _, sub := range re.Sub {
+		if err := checkCompatibility(sub); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func simplifyRegexp(re *syntax.Regexp) *syntax.Regexp {
+	for re.Op == syntax.OpCapture {
+		re = re.Sub[0]
+	}
+	return re
+}
+
+func hasCapture(re *syntax.Regexp) bool {
+	if re.Op == syntax.OpCapture {
+		return true
+	}
+	for _, sub := range re.Sub {
+		if hasCapture(sub) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasEmptyAlternative(re *syntax.Regexp) bool {
+	switch re.Op {
+	case syntax.OpEmptyMatch:
+		return true
+	case syntax.OpCapture:
+		return hasEmptyAlternative(re.Sub[0])
+	case syntax.OpAlternate:
+		for _, sub := range re.Sub {
+			if hasEmptyAlternative(sub) {
+				return true
+			}
+		}
+	case syntax.OpConcat:
+		// If a concat consists only of empty matches, it's an empty alternative
+		if len(re.Sub) == 0 {
+			return true
+		}
+		for _, sub := range re.Sub {
+			if !hasEmptyAlternative(sub) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+func isGreedyQuantifier(re *syntax.Regexp) bool {
+	return (re.Op == syntax.OpStar || re.Op == syntax.OpPlus || re.Op == syntax.OpQuest || re.Op == syntax.OpRepeat) && (re.Flags&syntax.NonGreedy == 0)
+}
+
+type byteSet [4]uint64 // 256 bits
+
+func (s *byteSet) set(b byte) { s[b>>6] |= 1 << (b & 63) }
+func (s *byteSet) overlaps(other byteSet) bool {
+	return (s[0]&other[0]) != 0 || (s[1]&other[1]) != 0 || (s[2]&other[2]) != 0 || (s[3]&other[3]) != 0
+}
+
+func getFirstBytes(re *syntax.Regexp) byteSet {
+	var set byteSet
+	switch re.Op {
+	case syntax.OpLiteral:
+		if len(re.Rune) > 0 {
+			var buf [4]byte
+			utf8.EncodeRune(buf[:], re.Rune[0])
+			set.set(buf[0])
+		}
+	case syntax.OpCharClass:
+		for i := 0; i < len(re.Rune); i += 2 {
+			lo, hi := re.Rune[i], re.Rune[i+1]
+			if lo <= 0x7F && hi <= 0x7F {
+				for b := byte(lo); b <= byte(hi); b++ {
+					set.set(b)
+				}
+			} else {
+				var buf [4]byte
+				utf8.EncodeRune(buf[:], lo)
+				set.set(buf[0])
+				if lo != hi {
+					utf8.EncodeRune(buf[:], hi)
+					set.set(buf[0])
+				}
+			}
+		}
+	case syntax.OpAnyChar, syntax.OpAnyCharNotNL:
+		for b := 0; b < 256; b++ {
+			set.set(byte(b))
+		}
+	case syntax.OpCapture, syntax.OpStar, syntax.OpPlus, syntax.OpQuest, syntax.OpRepeat:
+		return getFirstBytes(re.Sub[0])
+	case syntax.OpConcat:
+		for _, sub := range re.Sub {
+			s := getFirstBytes(sub)
+			for i := range set {
+				set[i] |= s[i]
+			}
+			if !matchesEmpty(sub) {
+				break
+			}
+		}
+	case syntax.OpAlternate:
+		for _, sub := range re.Sub {
+			s := getFirstBytes(sub)
+			for i := range set {
+				set[i] |= s[i]
+			}
+		}
+	}
+	return set
+}
+
+func matchesEmpty(re *syntax.Regexp) bool {
+	switch re.Op {
+	case syntax.OpEmptyMatch, syntax.OpStar, syntax.OpQuest:
+		return true
+	case syntax.OpRepeat:
+		return re.Min == 0
+	case syntax.OpCapture:
+		return matchesEmpty(re.Sub[0])
+	case syntax.OpConcat:
+		for _, sub := range re.Sub {
+			if !matchesEmpty(sub) {
+				return false
+			}
+		}
+		return true
+	case syntax.OpAlternate:
+		for _, sub := range re.Sub {
+			if matchesEmpty(sub) {
+				return true
+			}
+		}
+		return false
+	}
+	return false
+}
+
+func overlaps(a, b *syntax.Regexp) bool {
+	sa := getFirstBytes(a)
+	sb := getFirstBytes(b)
+	return sa.overlaps(sb)
+}

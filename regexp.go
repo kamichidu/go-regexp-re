@@ -34,7 +34,8 @@ type Regexp struct {
 }
 
 type CompileOptions struct {
-	MaxMemory int
+	MaxMemory     int
+	forceStrategy matchStrategy // Internal use for testing (strategyFast or strategyExtended)
 }
 
 func Compile(expr string) (*Regexp, error) { return CompileContext(context.Background(), expr) }
@@ -54,12 +55,16 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 	subexpNames := s.CapNames()
 
 	s = syntax.Simplify(s)
+	s = syntax.Optimize(s)
 	prog, err := syntax.Compile(s)
 	if err != nil {
 		return nil, err
 	}
 
-	literalMatcher := ir.AnalyzeLiteralPattern(s, numSubexp+1)
+	var literalMatcher *ir.LiteralMatcher
+	if opts.forceStrategy == strategyNone {
+		literalMatcher = ir.AnalyzeLiteralPattern(s, numSubexp+1)
+	}
 	prefix, complete := calculateLiteralPrefix(s)
 
 	anchorStart := false
@@ -71,7 +76,7 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 
 	var dfa *ir.DFA
 	if literalMatcher == nil {
-		dfa, err = ir.NewDFAWithMemoryLimit(ctx, prog, opts.MaxMemory, true)
+		dfa, err = ir.NewDFAWithMemoryLimit(ctx, s, prog, opts.MaxMemory, true)
 		if err != nil {
 			return nil, err
 		}
@@ -88,7 +93,11 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 		literalMatcher: literalMatcher,
 		subexpNames:    subexpNames,
 	}
-	res.bindMatchStrategy()
+	if opts.forceStrategy != strategyNone {
+		res.strategy = opts.forceStrategy
+	} else {
+		res.bindMatchStrategy()
+	}
 	return res, nil
 }
 
