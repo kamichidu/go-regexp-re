@@ -258,9 +258,6 @@ func (d *DFA) build(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, ma
 			}
 		}
 		keyPrio := matchP
-		if d.Naked {
-			keyPrio = 0
-		}
 		key := dfaStateKey{hashSet(closure, d.Naked), keyPrio, isSearch}
 		if id, ok := nfaToDfa[key]; ok {
 			return id
@@ -294,7 +291,7 @@ func (d *DFA) build(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, ma
 		d.stateMinPriority = append(d.stateMinPriority, minP)
 		d.stateMatchPriority = append(d.stateMatchPriority, matchP)
 		d.stateEntryTags = append(d.stateEntryTags, updates)
-		d.stateIsBestMatch = append(d.stateIsBestMatch, isAcc && matchP <= int(minP))
+		d.stateIsBestMatch = append(d.stateIsBestMatch, isAcc && matchP == 0 && minP == 0)
 
 		d.accepting = append(d.accepting, isAcc)
 		d.acceptingGuards = append(d.acceptingGuards, matchAnchors)
@@ -424,7 +421,7 @@ func (d *DFA) build(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, ma
 			if len(nextRes.Updates) > 0 {
 				uIdx := uint32(len(d.tagUpdates))
 				d.tagUpdates = append(d.tagUpdates, TransitionUpdate{
-					BasePriority: minNextPrio,
+					BasePriority: minNextPrio - d.stateMinPriority[i],
 					PreUpdates:   nextRes.Updates,
 				})
 				d.tagUpdateIndices[idx] = uIdx

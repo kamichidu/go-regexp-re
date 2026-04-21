@@ -309,6 +309,7 @@ func fastMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 	}
 	return bestStart, bestEnd, bestPriority
 }
+
 func extendedMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 	d := re.dfa
 	trans := d.Transitions()
