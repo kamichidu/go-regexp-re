@@ -10,6 +10,10 @@ import (
 	"github.com/kamichidu/go-regexp-re/syntax"
 )
 
+// UnsupportedError represents a valid regular expression pattern that is not
+// currently supported by the DFA engine due to structural limitations.
+type UnsupportedError = syntax.UnsupportedError
+
 type matchStrategy uint8
 
 const (

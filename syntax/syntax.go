@@ -29,6 +29,20 @@ const (
 	POSIX Flags = gosyntax.POSIX
 )
 
+// UnsupportedError represents a valid regular expression pattern that is not
+// currently supported by the DFA engine due to structural limitations.
+type UnsupportedError struct {
+	Op     string // The operation or structure that triggered the error
+	Detail string // More detailed explanation
+}
+
+func (e *UnsupportedError) Error() string {
+	if e.Detail != "" {
+		return "regexp: unsupported " + e.Op + ": " + e.Detail
+	}
+	return "regexp: unsupported " + e.Op
+}
+
 // Parse parses a regular expression string.
 func Parse(s string, flags Flags) (*Regexp, error) {
 	return gosyntax.Parse(s, flags)

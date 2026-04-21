@@ -58,7 +58,8 @@ To maintain the integrity of the NFA-free architecture, the engine MUST perform 
 - **Ambiguous Capture Rejection**: Patterns with structural ambiguities that the 3-pass TDFA cannot reliably resolve MUST be rejected at compile time:
     - **Explicit Empty Alternatives in Captures**: e.g., `(|a)`, `(a|)`, `(a||b)`.
     - **Optional Empty Captures**: e.g., `(a*)?`, `(a?|b?)?`.
-- **Deterministic Guarantee**: Only patterns whose submatch extraction can be perfectly "burned" into a deterministic table are supported. Return `DFA: unsupported ...` for violations.
+- **Deterministic Guarantee**: Only patterns whose submatch extraction can be perfectly "burned" into a deterministic table are supported.
+- **Error Type**: Violations MUST return a **`regexp.UnsupportedError`** (aliased from `syntax.UnsupportedError`). This allows callers to distinguish between syntax errors and engine limitations.
 
 ### 2.8 Architectural Shortcut (Compilation Efficiency)
 To minimize compilation overhead, the engine MUST use an **Architectural Shortcut** for simple patterns.

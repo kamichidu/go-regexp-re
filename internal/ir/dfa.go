@@ -478,7 +478,7 @@ func epsilonClosureWithAnchorWall(prog *syntax.Prog, paths []NFAPath) ClosureRes
 	stack := make([]pathWithMeta, 0, len(paths))
 	var updates []PathTagUpdate
 	for _, p := range paths {
-		if minPriority[p.Priority] == nil {
+		if _, ok := minPriority[p.Priority]; !ok {
 			minPriority[p.Priority] = make(map[stateKey]int32)
 		}
 		minPriority[p.Priority][stateKey{p.ID, p.NodeID, p.Anchors}] = p.Priority
@@ -540,7 +540,7 @@ func epsilonClosureWithAnchorWall(prog *syntax.Prog, paths []NFAPath) ClosureRes
 				p  int32
 			}{{inst.Arg, p.Priority + 1}, {inst.Out, p.Priority}} {
 				nsk := stateKey{next.id, 0, p.Anchors}
-				if minPriority[ph.sourcePrio] == nil {
+				if _, ok := minPriority[ph.sourcePrio]; !ok {
 					minPriority[ph.sourcePrio] = make(map[stateKey]int32)
 				}
 				if m, ok := minPriority[ph.sourcePrio][nsk]; !ok || next.p <= m {
@@ -556,7 +556,7 @@ func epsilonClosureWithAnchorWall(prog *syntax.Prog, paths []NFAPath) ClosureRes
 		case syntax.InstCapture:
 			tagBit := uint64(1 << inst.Arg)
 			nsk := stateKey{inst.Out, 0, p.Anchors}
-			if minPriority[ph.sourcePrio] == nil {
+			if _, ok := minPriority[ph.sourcePrio]; !ok {
 				minPriority[ph.sourcePrio] = make(map[stateKey]int32)
 			}
 			if m, ok := minPriority[ph.sourcePrio][nsk]; !ok || p.Priority <= m {
@@ -580,7 +580,7 @@ func epsilonClosureWithAnchorWall(prog *syntax.Prog, paths []NFAPath) ClosureRes
 		case syntax.InstEmptyWidth:
 			newAnchors := p.Anchors | syntax.EmptyOp(inst.Arg)
 			nsk := stateKey{inst.Out, 0, newAnchors}
-			if minPriority[ph.sourcePrio] == nil {
+			if _, ok := minPriority[ph.sourcePrio]; !ok {
 				minPriority[ph.sourcePrio] = make(map[stateKey]int32)
 			}
 			if m, ok := minPriority[ph.sourcePrio][nsk]; !ok || p.Priority <= m {
@@ -594,7 +594,7 @@ func epsilonClosureWithAnchorWall(prog *syntax.Prog, paths []NFAPath) ClosureRes
 			}
 		case syntax.InstNop:
 			nsk := stateKey{inst.Out, 0, p.Anchors}
-			if minPriority[ph.sourcePrio] == nil {
+			if _, ok := minPriority[ph.sourcePrio]; !ok {
 				minPriority[ph.sourcePrio] = make(map[stateKey]int32)
 			}
 			if m, ok := minPriority[ph.sourcePrio][nsk]; !ok || p.Priority <= m {
@@ -661,7 +661,7 @@ func checkEpsilonLoop(prog *syntax.Prog) error {
 	var dfs func(int) error
 	dfs = func(id int) error {
 		if onStack[id] {
-			return fmt.Errorf("DFA: unsupported epsilon loop")
+			return &syntax.UnsupportedError{Op: "epsilon loop"}
 		}
 		if visited[id] {
 			return nil
@@ -761,11 +761,11 @@ func checkCompatibility(re *syntax.Regexp) error {
 	switch re.Op {
 	case syntax.OpCapture:
 		if hasEmptyAlternative(re.Sub[0]) {
-			return fmt.Errorf("DFA: unsupported empty alternative in capture")
+			return &syntax.UnsupportedError{Op: "empty alternative in capture"}
 		}
 	case syntax.OpQuest:
 		if hasCapture(re.Sub[0]) && matchesEmpty(re.Sub[0]) {
-			return fmt.Errorf("DFA: unsupported optional empty capture")
+			return &syntax.UnsupportedError{Op: "optional empty capture"}
 		}
 	}
 	for _, sub := range re.Sub {
