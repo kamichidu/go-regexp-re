@@ -11,53 +11,38 @@ The core idea is to decouple match discovery from boundary extraction, using a *
 
 === Phase 1: Naked Discovery (Forward Scan)
 *   **Objective**: Determine the match boundaries `[start, end]` and record the state history.
-*   **Mechanism**: Uses a **Naked DFA** where state identity is defined purely by NFA node IDs, ignoring tags and priorities. This physically prevents the exponential state explosion typical of traditional TDFAs.
+*   **Mechanism**: Uses a **Naked DFA** for match discovery.
+    *   **State Identity via MatchPriority**: To prevent incorrect match boundary extensions (e.g., `aa|a` matching `aaaa` as `[0 4]`), Phase 1 DFA states include the **MatchPriority** (the highest priority NFA path in the state) in their identity key. This ensures that states with identical NFA IDs but different leftmost-first implications are physically separated.
 *   **Output**: A successful match window `[start, end]`, the final `MatchPriority`, and a `history []uint32` of DFA state IDs.
 
 === Phase 2: Path Identity Selection (Backward Trace)
 *   **Objective**: Determine the unique "winning path" from `start` to `end` based on Go's leftmost-first rules.
-*   **Mechanism**: Utilizing the `NakedState` history recorded in Phase 1, the engine performs a **backward trace** from the `end` position. It initializes the `PathID` from the `MatchPriority` of the final accepting state and works backward to the `start` position by matching `entry.NextPriority` in the `RecapTable`.
-*   **Priority Restoration**: To handle state-relative priorities, the engine adds the `BasePriority` stored in the `TagUpdate` to the `entry.InputPriority`. If multiple transitions lead to the same result, the one with the **minimum restored InputPriority** is selected to guarantee leftmost-first semantics.
-*   **SIMD Warp & Multi-byte Handling**:
-    *   If indices were skipped by a SIMD Warp jump, the path identity is carried over across the gap.
-    *   For multi-byte sequences, the path identity is carried backward from the trailing byte to the lead byte.
+*   **Mechanism**: Performs a **backward trace** from the `end` position.
+    1.  Initialize `PathID` from the `MatchPriority` of the final accepting state.
+    2.  Work backward to the `start` position by matching `entry.NextPriority` in the `RecapTable`.
+*   **Priority Delta Restoration**: During backward traversal, the engine restores the previous path identity using **Priority Deltas**. It adds the `BasePriority` (shift amount) stored in the `TagUpdate` to the `entry.InputPriority`.
 *   **Output**: A sequence of `PathIDs` (recorded in `mc.pathHistory`) that uniquely identifies the winning NFA path.
 
 === Phase 3: Pure Forward Recap (Licking)
 *   **Objective**: Extract capturing group registers along the confirmed winning path.
 *   **Mechanism**:
-    1.  Starts at the `start` position and applies initial tags from `StartUpdates` based on the path identity at `mc.pathHistory[start]`.
-    2.  Iterates forward from `start` to `end`. At each step $i$, it retrieves the unique transition edge from the `RecapTable` where `entry.InputPriority == pathID - BasePriority` and `entry.NextPriority == nextPathID`.
-    3.  Applies **delta tags** from the transition:
-        *   **PreTags**: Applied at position $i$ (before byte consumption).
-        *   **PostTags**: Applied at position $i+step$ (after byte consumption).
+    1.  Starts at the `start` position and applies initial tags from `StartUpdates`.
+    2.  Iterates forward from `start` to `end`. At each step $i$, it select the unique transition where `entry.InputPriority == pathID - BasePriority` and `entry.NextPriority == nextPathID`.
+    3.  Applies **delta tags** from the transition.
 *   **Go-Compatible Tagging Rules**:
-    *   **Start Tags**: Recorded only on the first encounter (fixed once set).
-    *   **End Tags**: Updated on every encounter (latest value wins).
-*   **Efficiency**: This "licking" process is a pure sequential update loop with zero branching or priority comparison, maintaining $O(n)$ complexity.
+    *   **Start Tags** (even bits): Recorded only on the first encounter (leftmost).
+    *   **End Tags** (odd bits): Updated on every encounter (licking).
 
 == Technical Implementation Details
 
 === Transition-Resident Delta Tags
-To prevent submatch boundary corruption, tags are never stored within DFA states. Instead, they reside exclusively on transitions in the `RecapTable`.
+To prevent submatch boundary corruption, tags are never stored within DFA states.
 
-*   **Delta-Only**: Transitions only store the tags that were **newly encountered** during that specific byte consumption and its associated epsilon closure.
-*   **Separation**:
-    *   **PreTags**: Capture epsilon transitions occurring **just before** a byte is consumed.
-    *   **PostTags**: Capture epsilon transitions occurring **immediately after** a byte is consumed, leading to the next state.
+*   **Delta-Only**: Transitions only store the tags that were newly encountered during that specific byte consumption.
+*   **Priority Delta Propagation**: During the forward scan (Phase 1), the engine tracks priority using `BasePriority` deltas. This prevents absolute priority accumulation from corrupting search restart logic.
 
-=== Backward Priority-Chain Tracking
-Pass 2 recovers the path identity by following pre-calculated priority mappings:
-
-1.  **Start**: `currPrio = d.MatchPriority(history[end])`
-2.  **Step**: For index $i$ from `end-1` down to `start`:
-    *   `off = (history[i] << 8) | input[i]`
-    *   `BasePriority = d.TagUpdates()[d.TagUpdateIndices()[off]].BasePriority`
-    *   Find `entry` where `entry.NextPriority == currPrio` AND `entry.InputPriority + BasePriority` is minimum.
-    *   `currPrio = entry.InputPriority + BasePriority`
-3.  **Result**: `pathHistory[i] = currPrio`
-
-This ensures that even when NFA paths merge into a single DFA state, the engine can "unzip" them and recover the exact priority identity that Go's standard library would have chosen.
+=== Match Integrity Guard (Static Analysis)
+Patterns that match empty strings in a loop (Epsilon Cycles) or contain ambiguous explicit empty branches in captures are rejected at compile time. This ensures that every execution path in the TDFA has a deterministic path identity sequence.
 
 == Advantages
 
