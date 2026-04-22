@@ -95,7 +95,10 @@ To minimize compilation overhead, the engine MUST use an **Architectural Shortcu
 - **Warp Flag Preservation**: The `WarpStateFlag` (Bit 23) MUST be preserved during DFA minimization.
 
 #### 2.19.1 Multi-byte Dot ('.') Determinism Mandate
-To ensure DFA determinism and $O(1)$ transitions, the behavior of `.` (dot) is implemented via **Byte-level Trie Expansion**. During DFA construction, `.` is expanded into a series of byte transitions that correctly match any valid UTF-8 rune boundary. This ensures 100% Go-compatible precision for multi-byte dots while maintaining the architectural mandate of constant-time-per-byte execution. Complex grapheme cluster boundaries remain excluded.
+To ensure DFA determinism and $O(1)$ transitions, the behavior of `.` (dot) is strictly defined as matching a single byte (for ASCII and invalid UTF-8 bytes) or a static lead-byte unit (for valid multi-byte UTF-8).
+- **Invalid UTF-8 Handling**: Single bytes in the ranges `80-BF`, `C0-C1`, and `F5-FF` are treated as valid 1-byte matches for `.` to maintain parity with Go's standard library.
+- **Warp Safety**: The execution loop MUST use a robust `GetTrailingByteCount` to ensure index increments do not overflow when encountering these invalid bytes during a Warp skip.
+- **Submatch Precision**: Internal capturing group boundaries that fall within an invalid UTF-8 sequence are handled on a best-effort basis and may deviate from standard `regexp` to maintain $O(n)$ performance.
 
 #### 2.19.2 Calculation-Free Boundary Analysis Mandate
 Junction verification for anchors (`\b`, `^`, `$`) MUST NOT employ `utf8.DecodeRune`. Word boundaries (`\b`) are defined as **ASCII Word Boundaries**; multi-byte bytes (0x80+) are treated as non-word characters.

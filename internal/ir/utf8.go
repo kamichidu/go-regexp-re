@@ -183,6 +183,15 @@ func maxRuneForBytes(n int) rune {
 	return 0
 }
 
+func (t *Trie) AddInvalidUTF8() {
+	// Continuation bytes are never valid start bytes.
+	t.addTransition(0, 0x80, 0xBF, UTF8MatchCompleted)
+	// Overlong 2-byte sequences are invalid.
+	t.addTransition(0, 0xC0, 0xC1, UTF8MatchCompleted)
+	// Out of range (F5-FF) are invalid.
+	t.addTransition(0, 0xF5, 0xFF, UTF8MatchCompleted)
+}
+
 var anyRuneTrie *Trie
 
 func GetAnyRuneTrie() *Trie {
@@ -191,6 +200,7 @@ func GetAnyRuneTrie() *Trie {
 	}
 	t := NewTrie()
 	t.AddRuneRange(0, utf8.MaxRune)
+	t.AddInvalidUTF8()
 	anyRuneTrie = t
 	return anyRuneTrie
 }
@@ -204,6 +214,7 @@ func GetAnyRuneNotNLTrie() *Trie {
 	t := NewTrie()
 	t.AddRuneRange(0, '\n'-1)
 	t.AddRuneRange('\n'+1, utf8.MaxRune)
+	t.AddInvalidUTF8()
 	anyRuneNotNLTrie = t
 	return anyRuneNotNLTrie
 }

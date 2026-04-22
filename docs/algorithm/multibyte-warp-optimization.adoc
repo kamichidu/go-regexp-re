@@ -14,18 +14,19 @@ The Warp strategy treats a multi-byte UTF-8 sequence as a single logical transit
 
 === 2.1 Lead-Byte Detection & Length Calculation
 
-The total length $L$ of a UTF-8 character can be determined solely from its first byte (Lead Byte).
+The total length $L$ of a UTF-8 character can be determined from its first byte (Lead Byte). For invalid UTF-8 bytes (e.g., continuation bytes appearing as lead bytes), the length is treated as 1 to match Go's standard library behavior.
 
 [cols="1,1,1"]
 |===
 | Bit Pattern | $L$ (Total Bytes) | $N$ (Trailing Bytes to Skip)
 | `0xxxxxxx`  | 1                 | 0 (ASCII)
-| `110xxxxx`  | 2                 | 1
-| `1110xxxx`  | 3                 | 2
-| `11110xxx`  | 4                 | 3
+| `110xxxxx`  | 2                 | 1 (Valid Lead)
+| `1110xxxx`  | 3                 | 2 (Valid Lead)
+| `11110xxx`  | 4                 | 3 (Valid Lead)
+| Others      | 1                 | 0 (Invalid Lead/Continuation)
 |===
 
-The execution engine uses `math/bits.LeadingZeros8(^byteVal) - 1` to calculate the skip distance $N$ without branching.
+The execution engine uses a robust `ir.GetTrailingByteCount(byteVal)` which employs range checks to correctly identify the skip distance $N$ and avoid over-skipping on invalid UTF-8 sequences.
 
 === 2.2 Execution Engine Logic (`matchExecLoop` / `submatchExecLoop`)
 

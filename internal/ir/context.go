@@ -2,7 +2,6 @@ package ir
 
 import (
 	"github.com/kamichidu/go-regexp-re/syntax"
-	"math/bits"
 )
 
 type RuneClass uint8
@@ -128,8 +127,17 @@ func IsWord(r rune) bool {
 }
 
 func GetTrailingByteCount(lead byte) int {
-	if lead < 0x80 {
+	if lead < 0xC2 {
 		return 0
 	}
-	return bits.LeadingZeros8(^lead) - 1
+	if lead < 0xE0 {
+		return 1
+	}
+	if lead < 0xF0 {
+		return 2
+	}
+	if lead < 0xF5 {
+		return 3
+	}
+	return 0
 }
