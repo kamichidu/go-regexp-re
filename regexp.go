@@ -296,7 +296,11 @@ func fastMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 					}
 					if rawNext != ir.InvalidState {
 						state = rawNext
-						i++
+						if byteVal < 0x80 || (rawNext&ir.WarpStateFlag) == 0 {
+							i++
+						} else {
+							i += 1 + ir.GetTrailingByteCount(byteVal)
+						}
 						continue
 					}
 				}
@@ -546,13 +550,7 @@ func (re *Regexp) sparseTDFA_PathSelection(mc *matchContext, b []byte, start, en
 	mc.pathHistory[end] = int32(currPrio)
 
 	for i := end - 1; i >= start; i-- {
-		// Only the lead byte of a multi-byte sequence (or ASCII) has a transition entry.
 		byteVal := b[i]
-		if (byteVal & 0xC0) == 0x80 {
-			mc.pathHistory[i] = mc.pathHistory[i+1]
-			continue
-		}
-
 		sidx := mc.history[i]
 		if sidx == ir.InvalidState {
 			mc.pathHistory[i] = int32(currPrio)
@@ -632,9 +630,6 @@ func (re *Regexp) sparseTDFA_Recap(mc *matchContext, b []byte, start, end, prio 
 			// We need to find entry where InputPriority == pathID - basePrio AND NextPriority == nextPathID
 			for _, entry := range recap.Transitions[off] {
 				if entry.InputPriority == int16(pathID)-basePrio && int32(entry.NextPriority) == nextPathID {
-					// Purely apply delta tags on the winning path identity.
-					// PreTags belong to position i (before byte),
-					// PostTags belong to position i+step (after byte).
 					re.applyRawTags(regs, entry.PreTags, i)
 					re.applyRawTags(regs, entry.PostTags, i+step)
 					break

@@ -48,6 +48,12 @@ type PathTagUpdate struct {
 type RecapEntry struct {
 	InputPriority, NextPriority int16
 	PreTags, PostTags           uint64
+	WarpTags                    []WarpTagBundle
+}
+
+type WarpTagBundle struct {
+	Offset int
+	Tags   uint64
 }
 
 type GroupRecapTable struct{ Transitions [][]RecapEntry }
@@ -263,7 +269,7 @@ func (d *DFA) build(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, ma
 			return id
 		}
 		if d.numStates >= maxStates {
-			panic("regexp: pattern too large or ambiguous")
+			panic(fmt.Sprintf("regexp: pattern too large or ambiguous (states: %d, max: %d)", d.numStates, maxStates))
 		}
 		id := uint32(d.numStates)
 		nfaToDfa[key] = id
@@ -312,6 +318,43 @@ func (d *DFA) build(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, ma
 	d.tagUpdates = make([]TransitionUpdate, 0, 1024)
 	scratchBuf := make([]NFAPath, 0, 1024)
 	nextPaths := make([]NFAPath, 0, 1024)
+	// Cache Tries by their content (rune ranges) to reuse them within this build.
+	contentTries := make(map[string]*Trie)
+	getTrie := func(id uint32) *Trie {
+		inst := prog.Inst[id]
+		var key string
+		switch inst.Op {
+		case syntax.InstRune, syntax.InstRune1:
+			key = string(inst.Rune)
+		case syntax.InstRuneAny:
+			return GetAnyRuneTrie()
+		case syntax.InstRuneAnyNotNL:
+			return GetAnyRuneNotNLTrie()
+		default:
+			return nil
+		}
+
+		if t, ok := contentTries[key]; ok {
+			return t
+		}
+
+		var t *Trie
+		switch inst.Op {
+		case syntax.InstRune:
+			t = NewTrie()
+			for i := 0; i+1 < len(inst.Rune); i += 2 {
+				t.AddRuneRange(inst.Rune[i], inst.Rune[i+1])
+			}
+		case syntax.InstRune1:
+			t = NewTrie()
+			if len(inst.Rune) > 0 {
+				t.AddRuneRange(inst.Rune[0], inst.Rune[0])
+			}
+		}
+		contentTries[key] = t
+		return t
+	}
+
 	processed := 0
 	for processed < d.numStates {
 		i := uint32(processed)
@@ -323,25 +366,42 @@ func (d *DFA) build(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, ma
 			nextPaths = nextPaths[:0]
 			var preGuard syntax.EmptyOp
 			foundEdge := false
-			for _, p := range currentClosure {
-				inst := prog.Inst[p.ID]
-				match := false
-				if p.NodeID == 0 {
-					if inst.Op == syntax.InstRune || inst.Op == syntax.InstRune1 || inst.Op == syntax.InstRuneAny || inst.Op == syntax.InstRuneAnyNotNL {
-						if inst.MatchRune(rune(b)) {
-							match = true
-						} else if b >= 0x80 {
-							for _, r := range inst.Rune {
-								var buf [4]byte
-								n := utf8.EncodeRune(buf[:], r)
-								if n > 1 && buf[0] == byte(b) {
-									match = true
-									break
-								}
+
+			// Determine if this transition is warpable.
+			isWarpable := b >= 0x80
+			hasMultiByte := false
+			if isWarpable {
+				for _, p := range currentClosure {
+					if p.NodeID != 0 {
+						continue
+					}
+					t := getTrie(p.ID)
+					if t != nil {
+						if _, ok := t.GetTransitions(p.NodeID, byte(b)); ok {
+							hasMultiByte = true
+							if t != GetAnyRuneTrie() && t != GetAnyRuneNotNLTrie() {
+								isWarpable = false
+								break
 							}
 						}
 					}
 				}
+			}
+			isWarpable = isWarpable && hasMultiByte
+
+			for _, p := range currentClosure {
+				inst := prog.Inst[p.ID]
+				match := false
+				var nextNodeID uint32
+
+				t := getTrie(p.ID)
+				if t != nil {
+					if next, ok := t.GetTransitions(p.NodeID, byte(b)); ok {
+						match = true
+						nextNodeID = next
+					}
+				}
+
 				if match {
 					if !foundEdge {
 						preGuard = p.Anchors
@@ -350,17 +410,24 @@ func (d *DFA) build(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, ma
 						preGuard |= p.Anchors
 					}
 
-					// Merge with existing path in nextPaths if ID/Priority/Anchors match
+					nextID := inst.Out
+					if nextNodeID != UTF8MatchCompleted && !isWarpable {
+						nextID = p.ID
+					} else {
+						nextNodeID = 0
+					}
+
+					// Merge with existing path in nextPaths if ID/Priority/Anchors/NodeID match
 					found := false
 					for j := range nextPaths {
-						if nextPaths[j].ID == inst.Out && nextPaths[j].NodeID == 0 && nextPaths[j].Priority == p.Priority && nextPaths[j].Anchors == p.Anchors {
+						if nextPaths[j].ID == nextID && nextPaths[j].NodeID == nextNodeID && nextPaths[j].Priority == p.Priority && nextPaths[j].Anchors == p.Anchors {
 							nextPaths[j].Tags |= p.Tags
 							found = true
 							break
 						}
 					}
 					if !found {
-						nextPaths = append(nextPaths, NFAPath{ID: inst.Out, Priority: p.Priority, Tags: p.Tags})
+						nextPaths = append(nextPaths, NFAPath{ID: nextID, NodeID: nextNodeID, Priority: p.Priority, Tags: p.Tags, Anchors: 0})
 					}
 				}
 			}
@@ -382,27 +449,8 @@ func (d *DFA) build(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, ma
 			if preGuard != 0 {
 				rawNext |= AnchorVerifyFlag | (uint32(preGuard) << 22)
 			}
-			if b >= 0x80 {
-				isLead := false
-				for _, p := range currentClosure {
-					if p.NodeID == 0 {
-						inst := prog.Inst[p.ID]
-						for _, r := range inst.Rune {
-							var buf [4]byte
-							n := utf8.EncodeRune(buf[:], r)
-							if n > 1 && buf[0] == byte(b) {
-								isLead = true
-								break
-							}
-						}
-					}
-					if isLead {
-						break
-					}
-				}
-				if isLead {
-					rawNext |= WarpStateFlag
-				}
+			if isWarpable {
+				rawNext |= WarpStateFlag
 			}
 
 			// The penalty/priority shift incurred during normalization of the next state.
@@ -699,6 +747,8 @@ func hashSet(paths []NFAPath, naked bool) [2]uint64 {
 	var h1 uint64 = 14695981039346656037
 	for _, p := range paths {
 		h1 ^= uint64(p.ID)
+		h1 *= 1099511628211
+		h1 ^= uint64(p.NodeID)
 		h1 *= 1099511628211
 	}
 	return [2]uint64{h1, 0}

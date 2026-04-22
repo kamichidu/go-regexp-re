@@ -17,42 +17,42 @@ func TestUTF8EdgeCases(t *testing.T) {
 			pattern:   "あ",
 			input:     "い",
 			want:      false,
-			expectErr: false, // Handled by LiteralMatcher
+			expectErr: false,
 			name:      "Lead-byte collision (same E3 prefix)",
 		},
 		{
 			pattern:   "あ+",
 			input:     "あいあ",
-			want:      false,
-			expectErr: false, // Compiles now, matching might have UTF-8 quirks
+			want:      true,
+			expectErr: false,
 			name:      "Multi-byte repetition with collision",
 		},
 		{
 			pattern:   "あ",
 			input:     "\xe3\x81\x00",
 			want:      false,
-			expectErr: false, // Handled by LiteralMatcher
+			expectErr: false,
 			name:      "Invalid trailing bytes",
 		},
 		{
 			pattern:   "^.あ.$",
 			input:     "いあう",
 			want:      true,
-			expectErr: false, // Compiles now, but Junction Dot is a known limitation
-			name:      "Dot between multi-byte (Junction Dot)",
+			expectErr: false,
+			name:      "Dot between multi-byte (Junction_Dot)",
 		},
 		{
 			pattern:   "([あいう])+",
 			input:     "あいう",
 			want:      true,
-			expectErr: false, // Compiles now
+			expectErr: false,
 			name:      "Multi-byte character class repetition",
 		},
 		{
 			pattern:   "あ{2}",
 			input:     "ああ",
 			want:      true,
-			expectErr: false, // Handled by LiteralMatcher
+			expectErr: false,
 			name:      "Multi-byte counted repetition",
 		},
 	}
@@ -61,6 +61,7 @@ func TestUTF8EdgeCases(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			re, err := CompileWithOptions(tt.pattern, CompileOptions{
 				forceStrategy: strategyFast,
+				MaxMemory:     64 * 1024 * 1024,
 			})
 			if err != nil {
 				if tt.expectErr {
@@ -79,11 +80,11 @@ func TestUTF8EdgeCases(t *testing.T) {
 			stdWant := stdRe.MatchString(tt.input)
 
 			if got != tt.want {
-				t.Logf("INFO: Match(%q, %q) = %v, want %v (Known engine limitation)", tt.pattern, tt.input, got, tt.want)
+				t.Errorf("Match(%q, %q) = %v, want %v (Known engine limitation)", tt.pattern, tt.input, got, tt.want)
 			}
 
 			if got != stdWant {
-				t.Logf("INFO: Standard library discrepancy for %q: Go std says %v, we say %v", tt.pattern, stdWant, got)
+				t.Errorf("Standard library discrepancy for %q: Go std says %v, we say %v", tt.pattern, stdWant, got)
 			}
 		})
 	}
