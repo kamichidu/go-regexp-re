@@ -175,14 +175,14 @@ func (re *Regexp) FindSubmatchIndex(b []byte) []int {
 	defer matchContextPool.Put(mc)
 	mc.prepare(len(b))
 
-	regs := make([]int, (re.numSubexp+1)*2)
-	for i := range regs {
-		regs[i] = -1
-	}
-
 	start, end, prio := re.submatch(b, mc)
 	if start < 0 {
 		return nil
+	}
+
+	regs := make([]int, (re.numSubexp+1)*2)
+	for i := range regs {
+		regs[i] = -1
 	}
 
 	regs[0], regs[1] = start, end
@@ -729,9 +729,6 @@ func (mc *matchContext) prepare(n int) {
 	} else {
 		mc.history = mc.historyBuf[:required]
 		mc.pathHistory = mc.pathHistoryBuf[:required]
-	}
-	for i := range mc.history {
-		mc.history[i] = ir.InvalidState
 	}
 }
 

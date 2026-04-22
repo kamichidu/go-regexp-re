@@ -314,34 +314,39 @@ func (d *DFA) build(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, ma
 	d.recapTables = []GroupRecapTable{{Transitions: make([][]RecapEntry, 0, 1024)}}
 	d.tagUpdateIndices = make([]uint32, 0, 1024)
 	d.tagUpdates = make([]TransitionUpdate, 0, 1024)
-	scratchBuf := make([]NFAPath, 0, 1024)
-	nextPaths := make([]NFAPath, 0, 1024)
-	// Cache Tries by their content (rune ranges) to reuse them within this build.
+
+	// Pre-calculate Tries for all instructions that need them.
+	// This avoids expensive map lookups and string formatting in the hot loop.
+	instructionTries := make([]*Trie, len(prog.Inst))
 	contentTries := make(map[string]*Trie)
-	getTrie := func(id uint32) *Trie {
-		inst := prog.Inst[id]
+	for id, inst := range prog.Inst {
+		var t *Trie
 		var key string
 		switch inst.Op {
 		case syntax.InstRune, syntax.InstRune1:
 			key = fmt.Sprintf("%d:%d:%v", inst.Op, inst.Arg&1, inst.Rune)
 		case syntax.InstRuneAny:
-			return GetAnyRuneTrie()
+			t = GetAnyRuneTrie()
 		case syntax.InstRuneAnyNotNL:
-			return GetAnyRuneNotNLTrie()
+			t = GetAnyRuneNotNLTrie()
 		default:
-			return nil
+			continue
 		}
 
-		if t, ok := contentTries[key]; ok {
-			return t
+		if t != nil {
+			instructionTries[id] = t
+			continue
 		}
 
-		var t *Trie
-		switch inst.Op {
-		case syntax.InstRune:
-			t = NewTrie()
-			if len(inst.Rune) == 1 && (inst.Arg&1) != 0 {
-				// FoldCase for single rune
+		if cached, ok := contentTries[key]; ok {
+			instructionTries[id] = cached
+			continue
+		}
+
+		t = NewTrie()
+		foldCase := (inst.Arg & 1) != 0
+		if inst.Op == syntax.InstRune {
+			if len(inst.Rune) == 1 && foldCase {
 				r := inst.Rune[0]
 				for {
 					t.AddRuneRange(r, r)
@@ -355,11 +360,9 @@ func (d *DFA) build(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, ma
 					t.AddRuneRange(inst.Rune[i], inst.Rune[i+1])
 				}
 			}
-		case syntax.InstRune1:
-			t = NewTrie()
+		} else { // InstRune1
 			if len(inst.Rune) > 0 {
-				if (inst.Arg & 1) != 0 {
-					// FoldCase for single rune
+				if foldCase {
 					r := inst.Rune[0]
 					for {
 						t.AddRuneRange(r, r)
@@ -374,8 +377,11 @@ func (d *DFA) build(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, ma
 			}
 		}
 		contentTries[key] = t
-		return t
+		instructionTries[id] = t
 	}
+
+	scratchBuf := make([]NFAPath, 0, 1024)
+	nextPaths := make([]NFAPath, 0, 1024)
 
 	processed := 0
 	for processed < d.numStates {
@@ -396,7 +402,7 @@ func (d *DFA) build(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, ma
 					if p.NodeID != 0 {
 						continue
 					}
-					t := getTrie(p.ID)
+					t := instructionTries[p.ID]
 					if t != nil {
 						if _, ok := t.GetTransitions(p.NodeID, byte(b)); ok {
 							hasMultiByte = true
@@ -412,7 +418,7 @@ func (d *DFA) build(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, ma
 
 			minPrioForByte := int32(1<<30 - 1)
 			for _, p := range currentClosure {
-				t := getTrie(p.ID)
+				t := instructionTries[p.ID]
 				if t != nil {
 					if _, ok := t.GetTransitions(p.NodeID, byte(b)); ok {
 						if p.Priority < minPrioForByte {
@@ -427,7 +433,7 @@ func (d *DFA) build(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, ma
 				match := false
 				var nextNodeID uint32
 
-				t := getTrie(p.ID)
+				t := instructionTries[p.ID]
 				if t != nil {
 					if next, ok := t.GetTransitions(p.NodeID, byte(b)); ok {
 						match = true
