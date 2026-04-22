@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"unicode/utf8"
 	"unsafe"
@@ -24,7 +25,7 @@ const (
 )
 
 const MaxDFAMemory = 64 * 1024 * 1024
-const SearchRestartPenalty = 1000000
+const SearchRestartPenalty = 1000
 
 type NFAPath struct {
 	ID, NodeID uint32
@@ -179,7 +180,7 @@ type dfaStateKey struct {
 func (d *DFA) build(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, maxMemory int) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			if s, ok := r.(string); ok && s == "regexp: pattern too large or ambiguous" {
+			if s, ok := r.(string); ok && strings.HasPrefix(s, "regexp: pattern too large or ambiguous") {
 				err = fmt.Errorf("%s", s)
 			} else {
 				panic(r)
@@ -255,16 +256,29 @@ func (d *DFA) build(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, ma
 	}
 
 	addDfaState := func(closure []NFAPath, updates []PathTagUpdate, matchAnchors syntax.EmptyOp, isSearch bool) uint32 {
+		minP := int32(1<<30 - 1)
 		matchP := 1<<30 - 1
-		for _, s := range closure {
-			if prog.Inst[s.ID].Op == syntax.InstMatch && s.NodeID == 0 {
-				if int(s.Priority) < matchP {
-					matchP = int(s.Priority)
+		if len(closure) > 0 {
+			for _, s := range closure {
+				if s.Priority < minP {
+					minP = s.Priority
 				}
 			}
+			// Clone and normalize closure priorities.
+			normalizedClosure := make([]NFAPath, len(closure))
+			copy(normalizedClosure, closure)
+			for i := range normalizedClosure {
+				normalizedClosure[i].Priority -= minP
+				if prog.Inst[normalizedClosure[i].ID].Op == syntax.InstMatch && normalizedClosure[i].NodeID == 0 {
+					if int(normalizedClosure[i].Priority) < matchP {
+						matchP = int(normalizedClosure[i].Priority)
+					}
+				}
+			}
+			closure = normalizedClosure
 		}
-		keyPrio := matchP
-		key := dfaStateKey{hashSet(closure, d.Naked), keyPrio, isSearch}
+
+		key := dfaStateKey{hashSet(closure, d.Naked), matchP, isSearch}
 		if id, ok := nfaToDfa[key]; ok {
 			return id
 		}
@@ -275,25 +289,8 @@ func (d *DFA) build(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, ma
 		nfaToDfa[key] = id
 		d.storage.Put(id, closure)
 		d.stateIsSearch = append(d.stateIsSearch, isSearch)
-		isAcc, matchP := false, 1<<30-1
-		minP := int32(1<<30 - 1)
-		if len(closure) > 0 {
-			minP = closure[0].Priority
-			for _, s := range closure {
-				if s.Priority < minP {
-					minP = s.Priority
-				}
-			}
-		}
-		for _, s := range closure {
-			if prog.Inst[s.ID].Op == syntax.InstMatch && s.NodeID == 0 {
-				isAcc = true
-				prio := int(s.Priority - minP)
-				if prio < matchP {
-					matchP = prio
-				}
-			}
-		}
+
+		isAcc := matchP != 1<<30-1
 		d.stateMinPriority = append(d.stateMinPriority, minP)
 		d.stateMatchPriority = append(d.stateMatchPriority, matchP)
 		d.stateEntryTags = append(d.stateEntryTags, updates)
@@ -750,6 +747,10 @@ func hashSet(paths []NFAPath, naked bool) [2]uint64 {
 		h1 *= 1099511628211
 		h1 ^= uint64(p.NodeID)
 		h1 *= 1099511628211
+		if !naked {
+			h1 ^= uint64(p.Priority)
+			h1 *= 1099511628211
+		}
 	}
 	return [2]uint64{h1, 0}
 }
