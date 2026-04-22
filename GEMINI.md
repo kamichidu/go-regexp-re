@@ -42,6 +42,9 @@ The engine follows a **3-Pass Sparse TDFA** strategy to guarantee peak performan
 - **Transition-Resident Tags (Delta-Only)**: Because DFA states are "Naked", capturing group boundaries (tags) MUST be associated exclusively with **transitions** (`RecapEntry`). To prevent boundary corruption, these tags MUST be stored as **deltas** (newly encountered during that specific transition).
 - **Priority Delta Propagation**: During DFA execution, priority (`prio`) MUST be tracked using **Priority Deltas** stored in `TransitionUpdate.BasePriority`. This prevents absolute priority accumulation from corrupting search restart logic.
 
+#### 2.5.2 Priority-Aware Anchor Masking (Mandate)
+To prevent "Anchor Pollution", DFA subset construction MUST filter anchor verification flags (`preGuard`) by NFA path priority. A transition's anchor requirements MUST be derived exclusively from the **highest-priority NFA paths** that match the current byte. This prevents low-priority Search Restart paths (which often carry `^` or `\b` constraints) from incorrectly imposing their restrictions onto high-priority continuation paths, ensuring that valid matches are never blocked by unrelated anchor mismatches.
+
 #### 2.5.1 NFA-Free Path Selection Mandate (Pass 2)
 Path selection in Pass 2 MUST NOT employ runtime NFA simulation or dynamic priority comparisons. The identity of the winning path must be reconstructed solely by following pre-calculated priority transitions (`InputPriority` -> `NextPriority`) stored within the `RecapTable`.
 - **Zero-Allocation Execution**: All recap paths MUST be strictly iterative and utilize stack-resident or pre-allocated buffers, ensuring zero heap allocations during execution.

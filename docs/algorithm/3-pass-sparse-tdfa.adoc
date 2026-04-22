@@ -41,6 +41,12 @@ To prevent submatch boundary corruption, tags are never stored within DFA states
 *   **Delta-Only**: Transitions only store the tags that were newly encountered during that specific byte consumption.
 *   **Priority Delta Propagation**: During the forward scan (Phase 1), the engine tracks priority using `BasePriority` deltas. This prevents absolute priority accumulation from corrupting search restart logic.
 
+=== Priority-Aware Anchor Verification
+To prevent **Anchor Pollution**, DFA subset construction must filter anchor verification requirements by NFA path priority.
+
+*   **Problem**: In search mode, a DFA state contains both high-priority continuation paths and low-priority search-restart paths (e.g., those starting with `^`). If anchor requirements are blindly merged, a low-priority path could impose a restriction that invalidates a high-priority transition, leading to false negatives.
+*   **Solution**: For each byte transition, the DFA builder determines the `minPrioForByte` among all matching NFA paths. Anchor verification flags (`preGuard`) are then derived **exclusively from paths matching this minimum priority**. This ensures that continuation paths are never blocked by anchors that only apply to new search restarts.
+
 === Match Integrity Guard (Static Analysis)
 Patterns that match empty strings in a loop (Epsilon Cycles) or contain ambiguous explicit empty branches in captures are rejected at compile time. This ensures that every execution path in the TDFA has a deterministic path identity sequence.
 

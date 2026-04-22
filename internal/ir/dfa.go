@@ -387,7 +387,6 @@ func (d *DFA) build(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, ma
 		for b := 0; b < 256; b++ {
 			nextPaths = nextPaths[:0]
 			var preGuard syntax.EmptyOp
-			foundEdge := false
 
 			// Determine if this transition is warpable.
 			isWarpable := b >= 0x80
@@ -411,6 +410,18 @@ func (d *DFA) build(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, ma
 			}
 			isWarpable = isWarpable && hasMultiByte
 
+			minPrioForByte := int32(1<<30 - 1)
+			for _, p := range currentClosure {
+				t := getTrie(p.ID)
+				if t != nil {
+					if _, ok := t.GetTransitions(p.NodeID, byte(b)); ok {
+						if p.Priority < minPrioForByte {
+							minPrioForByte = p.Priority
+						}
+					}
+				}
+			}
+
 			for _, p := range currentClosure {
 				inst := prog.Inst[p.ID]
 				match := false
@@ -425,10 +436,10 @@ func (d *DFA) build(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, ma
 				}
 
 				if match {
-					if !foundEdge {
-						preGuard = p.Anchors
-						foundEdge = true
-					} else {
+					// Only allow the HIGHEST priority paths to set the anchor requirements (preGuard).
+					// This prevents lower-priority paths (like search restarts) from adding
+					// restrictive anchors that would invalidate a valid high-priority transition.
+					if p.Priority == minPrioForByte {
 						preGuard |= p.Anchors
 					}
 
