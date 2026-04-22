@@ -19,8 +19,8 @@ The core idea is to decouple match discovery from boundary extraction, using a *
 *   **Objective**: Determine the unique "winning path" from `start` to `end` based on Go's leftmost-first rules.
 *   **Mechanism**: Performs a **backward trace** from the `end` position.
     1.  Initialize `PathID` from the `MatchPriority` of the final accepting state.
-    2.  Work backward to the `start` position by matching `entry.NextPriority` in the `RecapTable`.
-*   **Priority Delta Restoration**: During backward traversal, the engine restores the previous path identity using **Priority Deltas**. It adds the `BasePriority` (shift amount) stored in the `TagUpdate` to the `entry.InputPriority`.
+    2.  Work backward to the `start` position by matching `entry.NextPriority` in the `RecapTable`. **To maintain submatch precision for multi-byte runes, this pass MUST trace every byte transition in the history, ensuring that priority shifts occurring within continuation bytes are correctly captured.**
+    3.  During backward traversal, the engine restores the previous path identity using **Priority Deltas**. It adds the `BasePriority` (shift amount) stored in the `TagUpdate` to the `entry.InputPriority`.
 *   **Output**: A sequence of `PathIDs` (recorded in `mc.pathHistory`) that uniquely identifies the winning NFA path.
 
 === Phase 3: Pure Forward Recap (Licking)
