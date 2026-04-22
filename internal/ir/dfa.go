@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"unicode"
 	"unicode/utf8"
 	"unsafe"
 
@@ -322,7 +323,7 @@ func (d *DFA) build(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, ma
 		var key string
 		switch inst.Op {
 		case syntax.InstRune, syntax.InstRune1:
-			key = string(inst.Rune)
+			key = fmt.Sprintf("%d:%d:%v", inst.Op, inst.Arg&1, inst.Rune)
 		case syntax.InstRuneAny:
 			return GetAnyRuneTrie()
 		case syntax.InstRuneAnyNotNL:
@@ -339,13 +340,37 @@ func (d *DFA) build(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, ma
 		switch inst.Op {
 		case syntax.InstRune:
 			t = NewTrie()
-			for i := 0; i+1 < len(inst.Rune); i += 2 {
-				t.AddRuneRange(inst.Rune[i], inst.Rune[i+1])
+			if len(inst.Rune) == 1 && (inst.Arg&1) != 0 {
+				// FoldCase for single rune
+				r := inst.Rune[0]
+				for {
+					t.AddRuneRange(r, r)
+					r = unicode.SimpleFold(r)
+					if r == inst.Rune[0] {
+						break
+					}
+				}
+			} else {
+				for i := 0; i+1 < len(inst.Rune); i += 2 {
+					t.AddRuneRange(inst.Rune[i], inst.Rune[i+1])
+				}
 			}
 		case syntax.InstRune1:
 			t = NewTrie()
 			if len(inst.Rune) > 0 {
-				t.AddRuneRange(inst.Rune[0], inst.Rune[0])
+				if (inst.Arg & 1) != 0 {
+					// FoldCase for single rune
+					r := inst.Rune[0]
+					for {
+						t.AddRuneRange(r, r)
+						r = unicode.SimpleFold(r)
+						if r == inst.Rune[0] {
+							break
+						}
+					}
+				} else {
+					t.AddRuneRange(inst.Rune[0], inst.Rune[0])
+				}
 			}
 		}
 		contentTries[key] = t
@@ -414,17 +439,17 @@ func (d *DFA) build(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, ma
 						nextNodeID = 0
 					}
 
-					// Merge with existing path in nextPaths if ID/Priority/Anchors/NodeID match
+					// Merge with existing path in nextPaths if ID/Priority/NodeID match.
+					// Anchors are always 0 for next paths because requirements were checked at the current byte.
 					found := false
 					for j := range nextPaths {
-						if nextPaths[j].ID == nextID && nextPaths[j].NodeID == nextNodeID && nextPaths[j].Priority == p.Priority && nextPaths[j].Anchors == p.Anchors {
-							nextPaths[j].Tags |= p.Tags
+						if nextPaths[j].ID == nextID && nextPaths[j].NodeID == nextNodeID && nextPaths[j].Priority == p.Priority {
 							found = true
 							break
 						}
 					}
 					if !found {
-						nextPaths = append(nextPaths, NFAPath{ID: nextID, NodeID: nextNodeID, Priority: p.Priority, Tags: p.Tags, Anchors: 0})
+						nextPaths = append(nextPaths, NFAPath{ID: nextID, NodeID: nextNodeID, Priority: p.Priority, Tags: 0, Anchors: 0})
 					}
 				}
 			}
@@ -756,7 +781,7 @@ func hashSet(paths []NFAPath, naked bool) [2]uint64 {
 }
 
 func NewDFAWithMemoryLimit(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, maxMemory int, naked bool) (*DFA, error) {
-	d := &DFA{Naked: naked, numSubexp: prog.NumCap / 2}
+	d := &DFA{Naked: naked, numSubexp: prog.NumCap/2 - 1}
 	if err := d.build(ctx, s, prog, maxMemory); err != nil {
 		return nil, err
 	}
