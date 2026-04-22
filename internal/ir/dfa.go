@@ -297,7 +297,7 @@ func (d *DFA) build(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, ma
 		d.stateMinPriority = append(d.stateMinPriority, minP)
 		d.stateMatchPriority = append(d.stateMatchPriority, matchP)
 		d.stateEntryTags = append(d.stateEntryTags, updates)
-		d.stateIsBestMatch = append(d.stateIsBestMatch, isAcc && matchP == 0 && minP == 0)
+		d.stateIsBestMatch = append(d.stateIsBestMatch, isAcc && matchP <= int(minP))
 
 		d.accepting = append(d.accepting, isAcc)
 		d.acceptingGuards = append(d.acceptingGuards, matchAnchors)

@@ -296,7 +296,9 @@ func fastMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 					}
 					if rawNext != ir.InvalidState {
 						state = rawNext
-						if byteVal < 0x80 || (rawNext&ir.WarpStateFlag) == 0 {
+						// Optimized path: most characters are ASCII or not warpable.
+						// Using bitwise OR for flags to allow compiler to optimize branching.
+						if (byteVal < 0x80) || (rawNext&ir.WarpStateFlag) == 0 {
 							i++
 						} else {
 							i += 1 + ir.GetTrailingByteCount(byteVal)
@@ -400,7 +402,7 @@ func extendedMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 							}
 						}
 						state = rawNext
-						if byteVal < 0x80 || (rawNext&ir.WarpStateFlag) == 0 {
+						if (byteVal < 0x80) || (rawNext&ir.WarpStateFlag) == 0 {
 							i++
 						} else {
 							i += 1 + ir.GetTrailingByteCount(byteVal)
@@ -514,7 +516,7 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 							}
 						}
 						state = rawNext
-						if byteVal < 0x80 || (rawNext&ir.WarpStateFlag) == 0 {
+						if (byteVal < 0x80) || (rawNext&ir.WarpStateFlag) == 0 {
 							i++
 						} else {
 							step := 1 + ir.GetTrailingByteCount(byteVal)
