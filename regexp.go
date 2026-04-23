@@ -181,8 +181,16 @@ func (re *Regexp) MatchString(s string) bool {
 }
 
 func (re *Regexp) FindSubmatchIndex(b []byte) []int {
+	regs := make([]int, (re.numSubexp+1)*2)
+	for i := range regs {
+		regs[i] = -1
+	}
+
 	if re.strategy == strategyLiteral {
-		return re.literalMatcher.FindSubmatchIndex(b)
+		if !re.literalMatcher.FindSubmatchIndexInto(b, regs) {
+			return nil
+		}
+		return regs
 	}
 
 	mc := matchContextPool.Get().(*matchContext)
@@ -192,11 +200,6 @@ func (re *Regexp) FindSubmatchIndex(b []byte) []int {
 	start, end, prio := re.submatch(b, mc)
 	if start < 0 {
 		return nil
-	}
-
-	regs := make([]int, (re.numSubexp+1)*2)
-	for i := range regs {
-		regs[i] = -1
 	}
 
 	regs[0], regs[1] = start, end
