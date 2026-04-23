@@ -338,17 +338,12 @@ func getBPContext(b []byte, i int, numBytes int) int {
 
 func bitParallelMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 	bp := re.bitParallelDFA
-	charMasks := bp.CharMasks
-	successorTable := bp.SuccessorTable
-	matchMasks := bp.MatchMasks
-	contextMasks := bp.ContextMasks
-	startMasks := bp.StartMasks
 	numBytes := len(b)
 	anchorStart := re.anchorStart
 
 	// Initial context at junction 0
 	ctx := getBPContext(b, 0, numBytes)
-	curr := startMasks[ctx&63]
+	curr := bp.StartMasks[ctx&63]
 
 	// Initial match check for empty string
 	if bp.MatchesEmpty[ctx&63] {
@@ -359,17 +354,17 @@ func bitParallelMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 		byteVal := b[i]
 
 		// 1. Character transition: mask by current byte
-		active := curr & charMasks[byteVal]
+		active := curr & bp.CharMasks[byteVal]
 
 		// 2. Successor transition: compute next states using pre-calculated table (branchless)
-		next := successorTable[0][active&0xFF] |
-			successorTable[1][(active>>8)&0xFF] |
-			successorTable[2][(active>>16)&0xFF] |
-			successorTable[3][(active>>24)&0xFF] |
-			successorTable[4][(active>>32)&0xFF] |
-			successorTable[5][(active>>40)&0xFF] |
-			successorTable[6][(active>>48)&0xFF] |
-			successorTable[7][(active>>56)&0xFF]
+		next := bp.SuccessorTable[0][active&0xFF] |
+			bp.SuccessorTable[1][(active>>8)&0xFF] |
+			bp.SuccessorTable[2][(active>>16)&0xFF] |
+			bp.SuccessorTable[3][(active>>24)&0xFF] |
+			bp.SuccessorTable[4][(active>>32)&0xFF] |
+			bp.SuccessorTable[5][(active>>40)&0xFF] |
+			bp.SuccessorTable[6][(active>>48)&0xFF] |
+			bp.SuccessorTable[7][(active>>56)&0xFF]
 
 		i++
 
@@ -378,7 +373,7 @@ func bitParallelMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 
 		// 4. Accept check: if any path that matched the byte at i-1
 		// now satisfies the match condition AND the context at i.
-		if (active & matchMasks[ctx&63]) != 0 {
+		if (active & bp.MatchMasks[ctx&63]) != 0 {
 			return 0, i, 0
 		}
 
@@ -388,9 +383,9 @@ func bitParallelMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 		}
 
 		// 6. Update current state and add start states for unanchored search restart
-		curr = (next & contextMasks[ctx&63])
+		curr = (next & bp.ContextMasks[ctx&63])
 		if !anchorStart {
-			curr |= startMasks[ctx&63]
+			curr |= bp.StartMasks[ctx&63]
 		}
 	}
 
