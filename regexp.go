@@ -255,13 +255,15 @@ func fastMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 		_ = guards[len(guards)-1]
 	}
 
-	for i := 0; i <= numBytes; {
+	i := 0
+	for i < numBytes {
 		sidx := state & ir.StateIDMask
 
 		// SIMD Warp: skip to next prefix match if we are in search state and not anchored
-		if !anchorStart && (state&ir.StateIDMask) == (searchState&ir.StateIDMask) && len(re.prefix) > 0 && i < numBytes {
+		if !anchorStart && (state&ir.StateIDMask) == (searchState&ir.StateIDMask) && len(re.prefix) > 0 {
 			pos := bytes.Index(b[i:], re.prefix)
 			if pos < 0 {
+				i = numBytes
 				break
 			}
 			if pos > 0 {
@@ -273,7 +275,7 @@ func fastMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 
 		if (state & ir.AcceptingStateFlag) != 0 {
 			req := guards[sidx]
-			if req == 0 || (ir.CalculateContext(b, i, req)&req) == req {
+			if req == 0 || (ir.VerifyEnd(b, i, numBytes, req) && ir.VerifyBegin(b, i, req) && ir.VerifyWord(b, i, numBytes, req)) {
 				p := prio + d.MatchPriority(sidx)
 				if p <= bestPriority {
 					bestPriority, bestEnd = p, i
@@ -287,10 +289,6 @@ func fastMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 					}
 				}
 			}
-		}
-
-		if i >= numBytes {
-			break
 		}
 
 		byteVal := b[i]
@@ -307,7 +305,7 @@ func fastMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 				// Handle special flags
 				if (rawNext & ir.AnchorVerifyFlag) != 0 {
 					req := syntax.EmptyOp((rawNext & ir.AnchorMask) >> 22)
-					if (ir.CalculateContext(b, i, req) & req) != req {
+					if !(ir.VerifyEnd(b, i, numBytes, req) && ir.VerifyBegin(b, i, req) && ir.VerifyWord(b, i, numBytes, req)) {
 						rawNext = ir.InvalidState
 					}
 				}
@@ -323,11 +321,28 @@ func fastMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 			}
 		}
 		if anchorStart {
-			break
+			return bestStart, bestEnd, bestPriority
 		}
 		i++
 		prio = i * ir.SearchRestartPenalty
 		state = searchState
+	}
+
+	// Final EOF check
+	sidx := state & ir.StateIDMask
+	if (state & ir.AcceptingStateFlag) != 0 {
+		req := guards[sidx]
+		if req == 0 || (ir.VerifyEnd(b, i, numBytes, req) && ir.VerifyBegin(b, i, req) && ir.VerifyWord(b, i, numBytes, req)) {
+			p := prio + d.MatchPriority(sidx)
+			if p <= bestPriority {
+				bestPriority, bestEnd = p, i
+				if anchorStart {
+					bestStart = 0
+				} else {
+					bestStart = p / ir.SearchRestartPenalty
+				}
+			}
+		}
 	}
 	return bestStart, bestEnd, bestPriority
 }
@@ -358,13 +373,15 @@ func extendedMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 		_ = guards[len(guards)-1]
 	}
 
-	for i := 0; i <= numBytes; {
+	i := 0
+	for i < numBytes {
 		sidx := state & ir.StateIDMask
 
 		// SIMD Warp: skip to next prefix match if we are in search state and not anchored
-		if !anchorStart && (state&ir.StateIDMask) == (searchState&ir.StateIDMask) && len(re.prefix) > 0 && i < numBytes {
+		if !anchorStart && (state&ir.StateIDMask) == (searchState&ir.StateIDMask) && len(re.prefix) > 0 {
 			pos := bytes.Index(b[i:], re.prefix)
 			if pos < 0 {
+				i = numBytes
 				break
 			}
 			if pos > 0 {
@@ -376,7 +393,7 @@ func extendedMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 
 		if (state & ir.AcceptingStateFlag) != 0 {
 			req := guards[sidx]
-			if req == 0 || (ir.CalculateContext(b, i, req)&req) == req {
+			if req == 0 || (ir.VerifyEnd(b, i, numBytes, req) && ir.VerifyBegin(b, i, req) && ir.VerifyWord(b, i, numBytes, req)) {
 				p := prio + d.MatchPriority(sidx)
 				if p <= bestPriority {
 					bestPriority, bestEnd = p, i
@@ -392,25 +409,15 @@ func extendedMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 			}
 		}
 
-		if i >= numBytes {
-			break
-		}
-
 		byteVal := b[i]
 		if int(sidx) < numStates {
 			off := (int(sidx) << 8) | int(byteVal)
 			rawNext := trans[off]
 			if rawNext != ir.InvalidState {
-				if (rawNext & (ir.AnchorVerifyFlag | ir.TaggedStateFlag | ir.WarpStateFlag)) == 0 {
-					state = rawNext
-					i++
-					continue
-				}
-
 				// Handle special flags
 				if (rawNext & ir.AnchorVerifyFlag) != 0 {
 					req := syntax.EmptyOp((rawNext & ir.AnchorMask) >> 22)
-					if (ir.CalculateContext(b, i, req) & req) != req {
+					if !(ir.VerifyEnd(b, i, numBytes, req) && ir.VerifyBegin(b, i, req) && ir.VerifyWord(b, i, numBytes, req)) {
 						rawNext = ir.InvalidState
 					}
 				}
@@ -434,11 +441,28 @@ func extendedMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 			}
 		}
 		if anchorStart {
-			break
+			return bestStart, bestEnd, bestPriority
 		}
 		i++
 		prio = i * ir.SearchRestartPenalty
 		state = searchState
+	}
+
+	// Final EOF check
+	sidx := state & ir.StateIDMask
+	if (state & ir.AcceptingStateFlag) != 0 {
+		req := guards[sidx]
+		if req == 0 || (ir.VerifyEnd(b, i, numBytes, req) && ir.VerifyBegin(b, i, req) && ir.VerifyWord(b, i, numBytes, req)) {
+			p := prio + d.MatchPriority(sidx)
+			if p <= bestPriority {
+				bestPriority, bestEnd = p, i
+				if anchorStart {
+					bestStart = 0
+				} else {
+					bestStart = p / ir.SearchRestartPenalty
+				}
+			}
+		}
 	}
 	return bestStart, bestEnd, bestPriority
 }
@@ -475,13 +499,15 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 	}
 	_ = mc.history[len(mc.history)-1]
 
-	for i := 0; i <= numBytes; {
+	i := 0
+	for i < numBytes {
 		sidx := state & ir.StateIDMask
 
 		// SIMD Warp: skip to next prefix match if we are in search state and not anchored
-		if !anchorStart && (state&ir.StateIDMask) == (searchState&ir.StateIDMask) && len(re.prefix) > 0 && i < numBytes {
+		if !anchorStart && (state&ir.StateIDMask) == (searchState&ir.StateIDMask) && len(re.prefix) > 0 {
 			pos := bytes.Index(b[i:], re.prefix)
 			if pos < 0 {
+				i = numBytes
 				break
 			}
 			if pos > 0 {
@@ -497,7 +523,7 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 		mc.history[i] = sidx
 		if (state & ir.AcceptingStateFlag) != 0 {
 			req := guards[sidx]
-			if (ir.CalculateContext(b, i, req) & req) == req {
+			if req == 0 || (ir.VerifyEnd(b, i, numBytes, req) && ir.VerifyBegin(b, i, req) && ir.VerifyWord(b, i, numBytes, req)) {
 				p := prio + d.MatchPriority(sidx)
 				if p <= bestPriority {
 					bestPriority, bestEnd = p, i
@@ -513,18 +539,15 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 			}
 		}
 
-		if i >= numBytes {
-			break
-		}
-
 		byteVal := b[i]
 		if int(sidx) < numStates {
 			off := (int(sidx) << 8) | int(byteVal)
 			rawNext := trans[off]
 			if rawNext != ir.InvalidState {
+				// Handle special flags
 				if (rawNext & ir.AnchorVerifyFlag) != 0 {
 					req := syntax.EmptyOp((rawNext & ir.AnchorMask) >> 22)
-					if (ir.CalculateContext(b, i, req) & req) != req {
+					if !(ir.VerifyEnd(b, i, numBytes, req) && ir.VerifyBegin(b, i, req) && ir.VerifyWord(b, i, numBytes, req)) {
 						rawNext = ir.InvalidState
 					}
 				}
@@ -552,11 +575,29 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 			}
 		}
 		if anchorStart {
-			break
+			return bestStart, bestEnd, bestPriority
 		}
 		i++
 		prio = i * ir.SearchRestartPenalty
 		state = searchState
+	}
+
+	// Final EOF check
+	sidx := state & ir.StateIDMask
+	mc.history[numBytes] = sidx
+	if (state & ir.AcceptingStateFlag) != 0 {
+		req := guards[sidx]
+		if req == 0 || (ir.VerifyEnd(b, numBytes, numBytes, req) && ir.VerifyBegin(b, numBytes, req) && ir.VerifyWord(b, numBytes, numBytes, req)) {
+			p := prio + d.MatchPriority(sidx)
+			if p <= bestPriority {
+				bestPriority, bestEnd = p, numBytes
+				if anchorStart {
+					bestStart = 0
+				} else {
+					bestStart = p / ir.SearchRestartPenalty
+				}
+			}
+		}
 	}
 	return bestStart, bestEnd, bestPriority
 }
