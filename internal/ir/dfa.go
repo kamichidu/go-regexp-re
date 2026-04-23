@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
+	"unicode"
 	"unicode/utf8"
 	"unsafe"
 
@@ -15,16 +17,17 @@ type StateID uint32
 
 const (
 	InvalidState uint32 = 0xFFFFFFFF
-	// Fixed Canonical Layout: [31: Tagged] [30: Anchor] [29: Warp] [28-22: AnchorMask] [21-0: StateIndex]
-	TaggedStateFlag  uint32 = 0x80000000
-	AnchorVerifyFlag uint32 = 0x40000000
-	WarpStateFlag    uint32 = 0x20000000
-	AnchorMask       uint32 = 0x1FC00000
-	StateIDMask      uint32 = 0x003FFFFF
+	// Fixed Canonical Layout: [31: Tagged] [30: Anchor] [29: Warp] [28: Accepting] [27-22: AnchorMask] [21-0: StateIndex]
+	TaggedStateFlag    uint32 = 0x80000000
+	AnchorVerifyFlag   uint32 = 0x40000000
+	WarpStateFlag      uint32 = 0x20000000
+	AcceptingStateFlag uint32 = 0x10000000
+	AnchorMask         uint32 = 0x0FC00000
+	StateIDMask        uint32 = 0x003FFFFF
 )
 
 const MaxDFAMemory = 64 * 1024 * 1024
-const SearchRestartPenalty = 1000000
+const SearchRestartPenalty = 1000
 
 type NFAPath struct {
 	ID, NodeID uint32
@@ -48,6 +51,12 @@ type PathTagUpdate struct {
 type RecapEntry struct {
 	InputPriority, NextPriority int16
 	PreTags, PostTags           uint64
+	WarpTags                    []WarpTagBundle
+}
+
+type WarpTagBundle struct {
+	Offset int
+	Tags   uint64
 }
 
 type GroupRecapTable struct{ Transitions [][]RecapEntry }
@@ -170,16 +179,19 @@ type dfaStateKey struct {
 	isSearch      bool
 }
 
-func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) (err error) {
+func (d *DFA) build(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, maxMemory int) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			if s, ok := r.(string); ok && s == "regexp: pattern too large or ambiguous" {
+			if s, ok := r.(string); ok && strings.HasPrefix(s, "regexp: pattern too large or ambiguous") {
 				err = fmt.Errorf("%s", s)
 			} else {
 				panic(r)
 			}
 		}
 	}()
+	if err := checkCompatibility(s); err != nil {
+		return err
+	}
 	if err := checkEpsilonLoop(prog); err != nil {
 		return err
 	}
@@ -246,48 +258,41 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) (err 
 	}
 
 	addDfaState := func(closure []NFAPath, updates []PathTagUpdate, matchAnchors syntax.EmptyOp, isSearch bool) uint32 {
-		matchP := 1<<30 - 1
-		for _, s := range closure {
-			if prog.Inst[s.ID].Op == syntax.InstMatch && s.NodeID == 0 {
-				if int(s.Priority) < matchP {
-					matchP = int(s.Priority)
-				}
-			}
-		}
-		keyPrio := matchP
-		if d.Naked {
-			keyPrio = 0
-		}
-		key := dfaStateKey{hashSet(closure, d.Naked), keyPrio, isSearch}
-		if id, ok := nfaToDfa[key]; ok {
-			return id
-		}
-		if d.numStates >= maxStates {
-			panic("regexp: pattern too large or ambiguous")
-		}
-		id := uint32(d.numStates)
-		nfaToDfa[key] = id
-		d.storage.Put(id, closure)
-		d.stateIsSearch = append(d.stateIsSearch, isSearch)
-		isAcc, matchP := false, 1<<30-1
 		minP := int32(1<<30 - 1)
+		matchP := 1<<30 - 1
 		if len(closure) > 0 {
-			minP = closure[0].Priority
 			for _, s := range closure {
 				if s.Priority < minP {
 					minP = s.Priority
 				}
 			}
-		}
-		for _, s := range closure {
-			if prog.Inst[s.ID].Op == syntax.InstMatch && s.NodeID == 0 {
-				isAcc = true
-				prio := int(s.Priority - minP)
-				if prio < matchP {
-					matchP = prio
+			// Clone and normalize closure priorities.
+			normalizedClosure := make([]NFAPath, len(closure))
+			copy(normalizedClosure, closure)
+			for i := range normalizedClosure {
+				normalizedClosure[i].Priority -= minP
+				if prog.Inst[normalizedClosure[i].ID].Op == syntax.InstMatch && normalizedClosure[i].NodeID == 0 {
+					if int(normalizedClosure[i].Priority) < matchP {
+						matchP = int(normalizedClosure[i].Priority)
+					}
 				}
 			}
+			closure = normalizedClosure
 		}
+
+		key := dfaStateKey{hashSet(closure, d.Naked), matchP, isSearch}
+		if id, ok := nfaToDfa[key]; ok {
+			return id
+		}
+		if d.numStates >= maxStates {
+			panic(fmt.Sprintf("regexp: pattern too large or ambiguous (states: %d, max: %d)", d.numStates, maxStates))
+		}
+		id := uint32(d.numStates)
+		nfaToDfa[key] = id
+		d.storage.Put(id, closure)
+		d.stateIsSearch = append(d.stateIsSearch, isSearch)
+
+		isAcc := matchP != 1<<30-1
 		d.stateMinPriority = append(d.stateMinPriority, minP)
 		d.stateMatchPriority = append(d.stateMatchPriority, matchP)
 		d.stateEntryTags = append(d.stateEntryTags, updates)
@@ -304,14 +309,87 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) (err 
 
 	startRes := getCachedClosure([]NFAPath{{ID: uint32(prog.Start), Priority: 0}})
 	d.matchState = addDfaState(startRes.NextClosure, startRes.Updates, startRes.MatchAnchors, false)
+	if d.accepting[d.matchState] {
+		d.matchState |= AcceptingStateFlag
+	}
 	d.startUpdates = startRes.Updates
 	d.searchState = addDfaState(startRes.NextClosure, startRes.Updates, startRes.MatchAnchors, true)
+	if d.accepting[d.searchState] {
+		d.searchState |= AcceptingStateFlag
+	}
 
 	d.recapTables = []GroupRecapTable{{Transitions: make([][]RecapEntry, 0, 1024)}}
 	d.tagUpdateIndices = make([]uint32, 0, 1024)
 	d.tagUpdates = make([]TransitionUpdate, 0, 1024)
+
+	// Pre-calculate Tries for all instructions that need them.
+	// This avoids expensive map lookups and string formatting in the hot loop.
+	instructionTries := make([]*Trie, len(prog.Inst))
+	contentTries := make(map[string]*Trie)
+	for id, inst := range prog.Inst {
+		var t *Trie
+		var key string
+		switch inst.Op {
+		case syntax.InstRune, syntax.InstRune1:
+			key = fmt.Sprintf("%d:%d:%v", inst.Op, inst.Arg&1, inst.Rune)
+		case syntax.InstRuneAny:
+			t = GetAnyRuneTrie()
+		case syntax.InstRuneAnyNotNL:
+			t = GetAnyRuneNotNLTrie()
+		default:
+			continue
+		}
+
+		if t != nil {
+			instructionTries[id] = t
+			continue
+		}
+
+		if cached, ok := contentTries[key]; ok {
+			instructionTries[id] = cached
+			continue
+		}
+
+		t = NewTrie()
+		foldCase := (inst.Arg & 1) != 0
+		if inst.Op == syntax.InstRune {
+			if len(inst.Rune) == 1 && foldCase {
+				r := inst.Rune[0]
+				for {
+					t.AddRuneRange(r, r)
+					r = unicode.SimpleFold(r)
+					if r == inst.Rune[0] {
+						break
+					}
+				}
+			} else {
+				for i := 0; i+1 < len(inst.Rune); i += 2 {
+					t.AddRuneRange(inst.Rune[i], inst.Rune[i+1])
+				}
+			}
+		} else { // InstRune1
+			if len(inst.Rune) > 0 {
+				if foldCase {
+					r := inst.Rune[0]
+					for {
+						t.AddRuneRange(r, r)
+						r = unicode.SimpleFold(r)
+						if r == inst.Rune[0] {
+							break
+						}
+					}
+				} else {
+					t.AddRuneRange(inst.Rune[0], inst.Rune[0])
+				}
+			}
+		}
+		contentTries[key] = t
+		instructionTries[id] = t
+	}
+
 	scratchBuf := make([]NFAPath, 0, 1024)
 	nextPaths := make([]NFAPath, 0, 1024)
+
 	processed := 0
 	for processed < d.numStates {
 		i := uint32(processed)
@@ -322,45 +400,80 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) (err 
 		for b := 0; b < 256; b++ {
 			nextPaths = nextPaths[:0]
 			var preGuard syntax.EmptyOp
-			foundEdge := false
-			for _, p := range currentClosure {
-				inst := prog.Inst[p.ID]
-				match := false
-				if p.NodeID == 0 {
-					if inst.Op == syntax.InstRune || inst.Op == syntax.InstRune1 || inst.Op == syntax.InstRuneAny || inst.Op == syntax.InstRuneAnyNotNL {
-						if inst.MatchRune(rune(b)) {
-							match = true
-						} else if b >= 0x80 {
-							for _, r := range inst.Rune {
-								var buf [4]byte
-								n := utf8.EncodeRune(buf[:], r)
-								if n > 1 && buf[0] == byte(b) {
-									match = true
-									break
-								}
+
+			// Determine if this transition is warpable.
+			isWarpable := b >= 0x80
+			hasMultiByte := false
+			if isWarpable {
+				for _, p := range currentClosure {
+					if p.NodeID != 0 {
+						continue
+					}
+					t := instructionTries[p.ID]
+					if t != nil {
+						if _, ok := t.GetTransitions(p.NodeID, byte(b)); ok {
+							hasMultiByte = true
+							if t != GetAnyRuneTrie() && t != GetAnyRuneNotNLTrie() {
+								isWarpable = false
+								break
 							}
 						}
 					}
 				}
+			}
+			isWarpable = isWarpable && hasMultiByte
+
+			minPrioForByte := int32(1<<30 - 1)
+			for _, p := range currentClosure {
+				t := instructionTries[p.ID]
+				if t != nil {
+					if _, ok := t.GetTransitions(p.NodeID, byte(b)); ok {
+						if p.Priority < minPrioForByte {
+							minPrioForByte = p.Priority
+						}
+					}
+				}
+			}
+
+			for _, p := range currentClosure {
+				inst := prog.Inst[p.ID]
+				match := false
+				var nextNodeID uint32
+
+				t := instructionTries[p.ID]
+				if t != nil {
+					if next, ok := t.GetTransitions(p.NodeID, byte(b)); ok {
+						match = true
+						nextNodeID = next
+					}
+				}
+
 				if match {
-					if !foundEdge {
-						preGuard = p.Anchors
-						foundEdge = true
-					} else {
+					// Only allow the HIGHEST priority paths to set the anchor requirements (preGuard).
+					// This prevents lower-priority paths (like search restarts) from adding
+					// restrictive anchors that would invalidate a valid high-priority transition.
+					if p.Priority == minPrioForByte {
 						preGuard |= p.Anchors
 					}
 
-					// Merge with existing path in nextPaths if ID/Priority/Anchors match
+					nextID := inst.Out
+					if nextNodeID != UTF8MatchCompleted && !isWarpable {
+						nextID = p.ID
+					} else {
+						nextNodeID = 0
+					}
+
+					// Merge with existing path in nextPaths if ID/Priority/NodeID match.
+					// Anchors are always 0 for next paths because requirements were checked at the current byte.
 					found := false
 					for j := range nextPaths {
-						if nextPaths[j].ID == inst.Out && nextPaths[j].NodeID == 0 && nextPaths[j].Priority == p.Priority && nextPaths[j].Anchors == p.Anchors {
-							nextPaths[j].Tags |= p.Tags
+						if nextPaths[j].ID == nextID && nextPaths[j].NodeID == nextNodeID && nextPaths[j].Priority == p.Priority {
 							found = true
 							break
 						}
 					}
 					if !found {
-						nextPaths = append(nextPaths, NFAPath{ID: inst.Out, Priority: p.Priority, Tags: p.Tags})
+						nextPaths = append(nextPaths, NFAPath{ID: nextID, NodeID: nextNodeID, Priority: p.Priority, Tags: 0, Anchors: 0})
 					}
 				}
 			}
@@ -377,32 +490,18 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) (err 
 			}
 
 			nextDfaID := addDfaState(nextRes.NextClosure, nextRes.Updates, nextRes.MatchAnchors, d.stateIsSearch[i])
+
 			idx := (int(i) << 8) | b
 			rawNext := nextDfaID
+			if d.accepting[nextDfaID] {
+				rawNext |= AcceptingStateFlag
+			}
 			if preGuard != 0 {
 				rawNext |= AnchorVerifyFlag | (uint32(preGuard) << 22)
 			}
-			if b >= 0x80 {
-				isLead := false
-				for _, p := range currentClosure {
-					if p.NodeID == 0 {
-						inst := prog.Inst[p.ID]
-						for _, r := range inst.Rune {
-							var buf [4]byte
-							n := utf8.EncodeRune(buf[:], r)
-							if n > 1 && buf[0] == byte(b) {
-								isLead = true
-								break
-							}
-						}
-					}
-					if isLead {
-						break
-					}
-				}
-				if isLead {
-					rawNext |= WarpStateFlag
-				}
+
+			if isWarpable {
+				rawNext |= WarpStateFlag
 			}
 
 			// The penalty/priority shift incurred during normalization of the next state.
@@ -421,7 +520,7 @@ func (d *DFA) build(ctx context.Context, prog *syntax.Prog, maxMemory int) (err 
 			if len(nextRes.Updates) > 0 {
 				uIdx := uint32(len(d.tagUpdates))
 				d.tagUpdates = append(d.tagUpdates, TransitionUpdate{
-					BasePriority: minNextPrio,
+					BasePriority: minNextPrio - d.stateMinPriority[i],
 					PreUpdates:   nextRes.Updates,
 				})
 				d.tagUpdateIndices[idx] = uIdx
@@ -478,7 +577,7 @@ func epsilonClosureWithAnchorWall(prog *syntax.Prog, paths []NFAPath) ClosureRes
 	stack := make([]pathWithMeta, 0, len(paths))
 	var updates []PathTagUpdate
 	for _, p := range paths {
-		if minPriority[p.Priority] == nil {
+		if _, ok := minPriority[p.Priority]; !ok {
 			minPriority[p.Priority] = make(map[stateKey]int32)
 		}
 		minPriority[p.Priority][stateKey{p.ID, p.NodeID, p.Anchors}] = p.Priority
@@ -540,7 +639,7 @@ func epsilonClosureWithAnchorWall(prog *syntax.Prog, paths []NFAPath) ClosureRes
 				p  int32
 			}{{inst.Arg, p.Priority + 1}, {inst.Out, p.Priority}} {
 				nsk := stateKey{next.id, 0, p.Anchors}
-				if minPriority[ph.sourcePrio] == nil {
+				if _, ok := minPriority[ph.sourcePrio]; !ok {
 					minPriority[ph.sourcePrio] = make(map[stateKey]int32)
 				}
 				if m, ok := minPriority[ph.sourcePrio][nsk]; !ok || next.p <= m {
@@ -556,7 +655,7 @@ func epsilonClosureWithAnchorWall(prog *syntax.Prog, paths []NFAPath) ClosureRes
 		case syntax.InstCapture:
 			tagBit := uint64(1 << inst.Arg)
 			nsk := stateKey{inst.Out, 0, p.Anchors}
-			if minPriority[ph.sourcePrio] == nil {
+			if _, ok := minPriority[ph.sourcePrio]; !ok {
 				minPriority[ph.sourcePrio] = make(map[stateKey]int32)
 			}
 			if m, ok := minPriority[ph.sourcePrio][nsk]; !ok || p.Priority <= m {
@@ -580,7 +679,7 @@ func epsilonClosureWithAnchorWall(prog *syntax.Prog, paths []NFAPath) ClosureRes
 		case syntax.InstEmptyWidth:
 			newAnchors := p.Anchors | syntax.EmptyOp(inst.Arg)
 			nsk := stateKey{inst.Out, 0, newAnchors}
-			if minPriority[ph.sourcePrio] == nil {
+			if _, ok := minPriority[ph.sourcePrio]; !ok {
 				minPriority[ph.sourcePrio] = make(map[stateKey]int32)
 			}
 			if m, ok := minPriority[ph.sourcePrio][nsk]; !ok || p.Priority <= m {
@@ -594,7 +693,7 @@ func epsilonClosureWithAnchorWall(prog *syntax.Prog, paths []NFAPath) ClosureRes
 			}
 		case syntax.InstNop:
 			nsk := stateKey{inst.Out, 0, p.Anchors}
-			if minPriority[ph.sourcePrio] == nil {
+			if _, ok := minPriority[ph.sourcePrio]; !ok {
 				minPriority[ph.sourcePrio] = make(map[stateKey]int32)
 			}
 			if m, ok := minPriority[ph.sourcePrio][nsk]; !ok || p.Priority <= m {
@@ -661,7 +760,7 @@ func checkEpsilonLoop(prog *syntax.Prog) error {
 	var dfs func(int) error
 	dfs = func(id int) error {
 		if onStack[id] {
-			return fmt.Errorf("DFA: unsupported epsilon loop")
+			return &syntax.UnsupportedError{Op: "epsilon loop"}
 		}
 		if visited[id] {
 			return nil
@@ -700,13 +799,19 @@ func hashSet(paths []NFAPath, naked bool) [2]uint64 {
 	for _, p := range paths {
 		h1 ^= uint64(p.ID)
 		h1 *= 1099511628211
+		h1 ^= uint64(p.NodeID)
+		h1 *= 1099511628211
+		if !naked {
+			h1 ^= uint64(p.Priority)
+			h1 *= 1099511628211
+		}
 	}
 	return [2]uint64{h1, 0}
 }
 
-func NewDFAWithMemoryLimit(ctx context.Context, prog *syntax.Prog, maxMemory int, naked bool) (*DFA, error) {
-	d := &DFA{Naked: naked, numSubexp: prog.NumCap / 2}
-	if err := d.build(ctx, prog, maxMemory); err != nil {
+func NewDFAWithMemoryLimit(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, maxMemory int, naked bool) (*DFA, error) {
+	d := &DFA{Naked: naked, numSubexp: prog.NumCap/2 - 1}
+	if err := d.build(ctx, s, prog, maxMemory); err != nil {
 		return nil, err
 	}
 	return d, nil
@@ -753,3 +858,167 @@ func (d *DFA) WarpPointState(s uint32) uint32                   { return Invalid
 func (d *DFA) WarpPointGuard(s uint32) syntax.EmptyOp           { return 0 }
 func (d *DFA) MaxInst() int                                     { return 0 }
 func (d *DFA) minimize()                                        {}
+
+func checkCompatibility(re *syntax.Regexp) error {
+	if re == nil {
+		return nil
+	}
+	switch re.Op {
+	case syntax.OpCapture:
+		if hasEmptyAlternative(re.Sub[0]) {
+			return &syntax.UnsupportedError{Op: "empty alternative in capture"}
+		}
+	case syntax.OpQuest:
+		if hasCapture(re.Sub[0]) && matchesEmpty(re.Sub[0]) {
+			return &syntax.UnsupportedError{Op: "optional empty capture"}
+		}
+	}
+	for _, sub := range re.Sub {
+		if err := checkCompatibility(sub); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func simplifyRegexp(re *syntax.Regexp) *syntax.Regexp {
+	for re.Op == syntax.OpCapture {
+		re = re.Sub[0]
+	}
+	return re
+}
+
+func hasCapture(re *syntax.Regexp) bool {
+	if re.Op == syntax.OpCapture {
+		return true
+	}
+	for _, sub := range re.Sub {
+		if hasCapture(sub) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasEmptyAlternative(re *syntax.Regexp) bool {
+	switch re.Op {
+	case syntax.OpEmptyMatch:
+		return true
+	case syntax.OpCapture:
+		return hasEmptyAlternative(re.Sub[0])
+	case syntax.OpAlternate:
+		for _, sub := range re.Sub {
+			if hasEmptyAlternative(sub) {
+				return true
+			}
+		}
+	case syntax.OpConcat:
+		// If a concat consists only of empty matches, it's an empty alternative
+		if len(re.Sub) == 0 {
+			return true
+		}
+		for _, sub := range re.Sub {
+			if !hasEmptyAlternative(sub) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+func isGreedyQuantifier(re *syntax.Regexp) bool {
+	return (re.Op == syntax.OpStar || re.Op == syntax.OpPlus || re.Op == syntax.OpQuest || re.Op == syntax.OpRepeat) && (re.Flags&syntax.NonGreedy == 0)
+}
+
+type byteSet [4]uint64 // 256 bits
+
+func (s *byteSet) set(b byte) { s[b>>6] |= 1 << (b & 63) }
+func (s *byteSet) overlaps(other byteSet) bool {
+	return (s[0]&other[0]) != 0 || (s[1]&other[1]) != 0 || (s[2]&other[2]) != 0 || (s[3]&other[3]) != 0
+}
+
+func getFirstBytes(re *syntax.Regexp) byteSet {
+	var set byteSet
+	switch re.Op {
+	case syntax.OpLiteral:
+		if len(re.Rune) > 0 {
+			var buf [4]byte
+			utf8.EncodeRune(buf[:], re.Rune[0])
+			set.set(buf[0])
+		}
+	case syntax.OpCharClass:
+		for i := 0; i < len(re.Rune); i += 2 {
+			lo, hi := re.Rune[i], re.Rune[i+1]
+			if lo <= 0x7F && hi <= 0x7F {
+				for b := byte(lo); b <= byte(hi); b++ {
+					set.set(b)
+				}
+			} else {
+				var buf [4]byte
+				utf8.EncodeRune(buf[:], lo)
+				set.set(buf[0])
+				if lo != hi {
+					utf8.EncodeRune(buf[:], hi)
+					set.set(buf[0])
+				}
+			}
+		}
+	case syntax.OpAnyChar, syntax.OpAnyCharNotNL:
+		for b := 0; b < 256; b++ {
+			set.set(byte(b))
+		}
+	case syntax.OpCapture, syntax.OpStar, syntax.OpPlus, syntax.OpQuest, syntax.OpRepeat:
+		return getFirstBytes(re.Sub[0])
+	case syntax.OpConcat:
+		for _, sub := range re.Sub {
+			s := getFirstBytes(sub)
+			for i := range set {
+				set[i] |= s[i]
+			}
+			if !matchesEmpty(sub) {
+				break
+			}
+		}
+	case syntax.OpAlternate:
+		for _, sub := range re.Sub {
+			s := getFirstBytes(sub)
+			for i := range set {
+				set[i] |= s[i]
+			}
+		}
+	}
+	return set
+}
+
+func matchesEmpty(re *syntax.Regexp) bool {
+	switch re.Op {
+	case syntax.OpEmptyMatch, syntax.OpStar, syntax.OpQuest:
+		return true
+	case syntax.OpRepeat:
+		return re.Min == 0
+	case syntax.OpCapture:
+		return matchesEmpty(re.Sub[0])
+	case syntax.OpConcat:
+		for _, sub := range re.Sub {
+			if !matchesEmpty(sub) {
+				return false
+			}
+		}
+		return true
+	case syntax.OpAlternate:
+		for _, sub := range re.Sub {
+			if matchesEmpty(sub) {
+				return true
+			}
+		}
+		return false
+	}
+	return false
+}
+
+func overlaps(a, b *syntax.Regexp) bool {
+	sa := getFirstBytes(a)
+	sb := getFirstBytes(b)
+	return sa.overlaps(sb)
+}

@@ -12,7 +12,7 @@ import (
 func TestToDOT(t *testing.T) {
 	re, _ := syntax.Parse("a(b|c)*d", syntax.Perl)
 	prog, _ := syntax.Compile(re)
-	dfa, _ := ir.NewDFAWithMemoryLimit(context.Background(), prog, 64*1024*1024, true)
+	dfa, _ := ir.NewDFAWithMemoryLimit(context.Background(), re, prog, 64*1024*1024, true)
 
 	dot := ir.ToDOT(dfa)
 	if !strings.HasPrefix(dot, "digraph DFA {") {

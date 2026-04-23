@@ -40,7 +40,7 @@ func TestStateExplosion(t *testing.T) {
 			"Ambiguous Overlaps with Repetition",
 			"(a|ab|abc|abcd|abcde|abcdef|abcdefg)*x|(a|ab|abc|abcd|abcde|abcdef|abcdefg)*y",
 			64 * 1024,
-			true,
+			false, // Converges due to priority normalization
 		},
 		{
 			"Classic Exponential Explosion (N=20)",
@@ -53,7 +53,7 @@ func TestStateExplosion(t *testing.T) {
 			// Many overlapping captures that force subset differentiation
 			"((a|b)*c)|((a|b)*d)|((a|b)*e)|((a|b)*f)|((a|b)*g)|((a|b)*h)",
 			32 * 1024,
-			true,
+			false, // Converges due to normalization
 		},
 	}
 
@@ -70,7 +70,7 @@ func TestStateExplosion(t *testing.T) {
 				t.Fatalf("Compile(%q) failed: %v", tt.pattern, err)
 			}
 
-			dfa, err := NewDFAWithMemoryLimit(context.Background(), prog, tt.limit, true)
+			dfa, err := NewDFAWithMemoryLimit(context.Background(), re, prog, tt.limit, true)
 
 			if tt.expectErr {
 				if err == nil {

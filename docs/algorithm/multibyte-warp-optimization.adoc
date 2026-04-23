@@ -14,18 +14,19 @@ The Warp strategy treats a multi-byte UTF-8 sequence as a single logical transit
 
 === 2.1 Lead-Byte Detection & Length Calculation
 
-The total length $L$ of a UTF-8 character can be determined solely from its first byte (Lead Byte).
+The total length $L$ of a UTF-8 character can be determined from its first byte (Lead Byte). For invalid UTF-8 bytes (e.g., continuation bytes appearing as lead bytes), the length is treated as 1 to match Go's standard library behavior.
 
 [cols="1,1,1"]
 |===
 | Bit Pattern | $L$ (Total Bytes) | $N$ (Trailing Bytes to Skip)
 | `0xxxxxxx`  | 1                 | 0 (ASCII)
-| `110xxxxx`  | 2                 | 1
-| `1110xxxx`  | 3                 | 2
-| `11110xxx`  | 4                 | 3
+| `110xxxxx`  | 2                 | 1 (Valid Lead)
+| `1110xxxx`  | 3                 | 2 (Valid Lead)
+| `11110xxx`  | 4                 | 3 (Valid Lead)
+| Others      | 1                 | 0 (Invalid Lead/Continuation)
 |===
 
-The execution engine uses `math/bits.LeadingZeros8(^byteVal) - 1` to calculate the skip distance $N$ without branching.
+The execution engine uses a robust `ir.GetTrailingByteCount(byteVal)` which employs range checks to correctly identify the skip distance $N$ and avoid over-skipping on invalid UTF-8 sequences.
 
 === 2.2 Execution Engine Logic (`matchExecLoop` / `submatchExecLoop`)
 
@@ -35,24 +36,25 @@ When the engine encounters a Lead Byte with `WarpStateFlag` (Bit 23) set in the 
 ----
 // Logic inside DFA execution loop
 if (rawNext & ir.WarpStateFlag) != 0 {
-    skip := bits.LeadingZeros8(^byteVal) - 1
-    if skip < 0 { skip = 0 }
+    skip := ir.GetTrailingByteCount(byteVal)
 
     // For submatch extraction, we fill the history for intermediate bytes
     for j := 1; j <= skip; j++ {
-        mc.history[i+j] = state // triggered Lead-Byte state
+        mc.history[i+j] = state & ir.StateIDMask
     }
     i += 1 + skip
 }
 ----
 
-=== 2.3 Warp-Aware Tag Bundling
+The `WarpStateFlag` is applied **ONLY** when all active NFA paths in a state accept any valid UTF-8 continuation (e.g., `InstRuneAny` or `.` dot). Fixed multi-byte runes (like "あ") do not trigger Warp to ensure each byte is correctly verified.
 
-During DFA construction, if a transition corresponds to a shortcut (warp), all tags encountered on the skipped NFA path are bundled:
+=== 2.3 Byte-level Trie Expansion
 
-1. **Shortcutting**: In `internal/ir/utf8.go`, the `anyRuneTrie` directly links Lead Byte ranges to the completion state.
-2. **Collection**: `DFA.build` follows the epsilon closure from the shortcut destination to collect tags.
-3. **Encoding**: These tags are merged into the transition's `PostUpdates`.
+During DFA construction, rune-based instructions are expanded into a series of byte transitions using a **UTF-8 Trie**. This ensures that:
+
+1. **Precision**: All rune boundaries and character class members are correctly separated at the byte level.
+2. **Determinism**: The DFA correctly handles overlapping byte prefixes (e.g., "あ" and "い" share the same lead byte `0xE3`).
+3. **Standard Compatibility**: `.` (dot) matches any valid UTF-8 character by following the trie paths.
 
 == 3. State Explosion Protection (Priority Uniquing)
 
@@ -78,4 +80,5 @@ A match is only finalized (`isBestMatch = true`) if **no other active NFA path**
 * **Memory Tracking**: Construction caches (`nfaToDfa`, `closureCache`) are tracked against `MaxMemory` to prevent OOM.
 
 === Ambiguous Dot Junctions
-Lead-Byte Warp (Jump Optimization) relies on the following bytes being part of a known multi-byte sequence. When a dot `.` is placed between multi-byte characters, the warp pointer calculation may conflict with physical byte boundaries, making deterministic transitions impossible without backtracking. In such cases, the engine prioritizes performance and DFA purity, returning false (InvalidState) for transitions that would require context-dependent consumption logic.
+
+Previously, placing a dot `.` between multi-byte characters was a known limitation. With the introduction of **Byte-level Trie Expansion**, this is no longer an issue. The DFA now correctly expands the dot into its constituent byte-level transitions, allowing for seamless transitions through any combination of single-byte and multi-byte characters with 100% standard library precision.

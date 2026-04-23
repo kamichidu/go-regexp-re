@@ -39,10 +39,11 @@ func (m *LiteralMatcher) Match(b []byte) bool {
 	return false
 }
 
-// FindSubmatchIndex returns the submatch indices for the literal pattern.
-func (m *LiteralMatcher) FindSubmatchIndex(b []byte) []int {
-	var matched bool
+// FindSubmatchIndexInto populates regs with the submatch indices for the literal pattern.
+// This is an allocation-free version of FindSubmatchIndex.
+func (m *LiteralMatcher) FindSubmatchIndexInto(b []byte, regs []int) bool {
 	var start int
+	var matched bool
 
 	switch m.Strategy {
 	case LiteralStrategyExact:
@@ -64,16 +65,29 @@ func (m *LiteralMatcher) FindSubmatchIndex(b []byte) []int {
 	}
 
 	if !matched {
-		return nil
+		return false
 	}
 
-	res := make([]int, len(m.CapTemplate))
+	if len(regs) < len(m.CapTemplate) {
+		return true
+	}
+
 	for i, offset := range m.CapTemplate {
 		if offset < 0 {
-			res[i] = -1
+			regs[i] = -1
 		} else {
-			res[i] = start + offset
+			regs[i] = start + offset
 		}
+	}
+	return true
+}
+
+// FindSubmatchIndex returns the submatch indices for the literal pattern.
+// Legacy method that still allocates for Go standard library compatibility.
+func (m *LiteralMatcher) FindSubmatchIndex(b []byte) []int {
+	res := make([]int, len(m.CapTemplate))
+	if !m.FindSubmatchIndexInto(b, res) {
+		return nil
 	}
 	return res
 }

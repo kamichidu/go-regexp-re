@@ -258,6 +258,11 @@ func (re *Regexp) Split(s string, n int) []string {
 	return result
 }
 
+// NumSubexp returns the number of parenthesized subexpressions in this Regexp.
+func (re *Regexp) NumSubexp() int {
+	return re.numSubexp
+}
+
 // SubexpNames returns the names of the parenthesized subexpressions in this Regexp.
 func (re *Regexp) SubexpNames() []string {
 	return re.subexpNames

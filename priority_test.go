@@ -1,6 +1,7 @@
 package regexp
 
 import (
+	goregexp "regexp"
 	"testing"
 )
 
@@ -10,7 +11,7 @@ func TestPriorityGreedyLoop(t *testing.T) {
 	re := MustCompile(`a*`)
 	input := []byte("aaa")
 	mc := &matchContext{}
-	mc.prepare(len(input))
+	mc.prepare(len(input), re.numSubexp)
 
 	regs := make([]int, (re.numSubexp+1)*2)
 	start, end, prio := re.findSubmatchIndexInternal(input, mc, regs)
@@ -28,32 +29,28 @@ func TestPriorityGreedyLoop(t *testing.T) {
 }
 
 func TestPriorityAlternation(t *testing.T) {
-	// (a|aa) leftmost-first loop behavior.
-	// In standard Go, 'a' is prioritized even if 'aa' follows, or longest match is preferred
-	// depending on the exact AST structure. syntax.Simplify might optimize it to (?:aa|a).
-	re := MustCompile(`a|aa`)
-	input := []byte("aa")
+	pattern := `a|aa`
+	input := "aa"
 
-	got := re.FindSubmatchIndex(input)
-	t.Logf("Pattern a|aa on 'aa': %v", got)
-	// Go standard: "a|aa" on "aa" -> "a" [0, 1]
-	if got[1] != 1 {
-		t.Errorf("Leftmost-first failed: expected end 1, got %d", got[1])
-	}
+	re := MustCompile(pattern)
+	got := re.FindSubmatchIndex([]byte(input))
+
+	stdRe := goregexp.MustCompile(pattern)
+	want := stdRe.FindSubmatchIndex([]byte(input))
+
+	validateSubmatchIndex(t, pattern, input, got, want)
 }
 
 func TestPriorityAbsoluteTracking(t *testing.T) {
 	// Mandate 2.12: Verification of Priority Normalization & Absolute Tracking
-	re := MustCompile(`(a*)b`)
-	input := []byte("aaab")
+	pattern := `(a*)b`
+	input := "aaab"
 
-	mc := &matchContext{}
-	mc.prepare(len(input))
-	start, end, prio := re.findSubmatchIndexInternal(input, mc, nil)
+	re := MustCompile(pattern)
+	got := re.FindSubmatchIndex([]byte(input))
 
-	t.Logf("Match (a*)b: [%d, %d], Prio: %d", start, end, prio)
+	stdRe := goregexp.MustCompile(pattern)
+	want := stdRe.FindSubmatchIndex([]byte(input))
 
-	if start != 0 || end != 4 {
-		t.Errorf("Absolute tracking failed: expected [0, 4], got [%d, %d]", start, end)
-	}
+	validateSubmatchIndex(t, pattern, input, got, want)
 }

@@ -10,6 +10,10 @@ import (
 	"github.com/kamichidu/go-regexp-re/syntax"
 )
 
+// UnsupportedError represents a valid regular expression pattern that is not
+// currently supported by the DFA engine due to structural limitations.
+type UnsupportedError = syntax.UnsupportedError
+
 type matchStrategy uint8
 
 const (
@@ -31,10 +35,15 @@ type Regexp struct {
 	literalMatcher *ir.LiteralMatcher
 	subexpNames    []string
 	strategy       matchStrategy
+	searchState    uint32
+	matchState     uint32
+	uIndices       []uint32
+	uPrioDeltas    []int32
 }
 
 type CompileOptions struct {
-	MaxMemory int
+	MaxMemory     int
+	forceStrategy matchStrategy // Internal use for testing (strategyFast or strategyExtended)
 }
 
 func Compile(expr string) (*Regexp, error) { return CompileContext(context.Background(), expr) }
@@ -54,12 +63,16 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 	subexpNames := s.CapNames()
 
 	s = syntax.Simplify(s)
+	s = syntax.Optimize(s)
 	prog, err := syntax.Compile(s)
 	if err != nil {
 		return nil, err
 	}
 
-	literalMatcher := ir.AnalyzeLiteralPattern(s, numSubexp+1)
+	var literalMatcher *ir.LiteralMatcher
+	if opts.forceStrategy == strategyNone {
+		literalMatcher = ir.AnalyzeLiteralPattern(s, numSubexp+1)
+	}
 	prefix, complete := calculateLiteralPrefix(s)
 
 	anchorStart := false
@@ -70,10 +83,29 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 	}
 
 	var dfa *ir.DFA
+	var searchState, matchState uint32
+	var uIndices []uint32
+	var uPrioDeltas []int32
 	if literalMatcher == nil {
-		dfa, err = ir.NewDFAWithMemoryLimit(ctx, prog, opts.MaxMemory, true)
+		dfa, err = ir.NewDFAWithMemoryLimit(ctx, s, prog, opts.MaxMemory, true)
 		if err != nil {
 			return nil, err
+		}
+		acc := dfa.Accepting()
+		searchState = uint32(dfa.SearchState())
+		if acc[searchState&ir.StateIDMask] {
+			searchState |= ir.AcceptingStateFlag
+		}
+		matchState = uint32(dfa.MatchState())
+		if acc[matchState&ir.StateIDMask] {
+			matchState |= ir.AcceptingStateFlag
+		}
+
+		uIndices = dfa.TagUpdateIndices()
+		tagUpdates := dfa.TagUpdates()
+		uPrioDeltas = make([]int32, len(tagUpdates))
+		for i, update := range tagUpdates {
+			uPrioDeltas[i] = update.BasePriority
 		}
 	}
 
@@ -87,8 +119,16 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 		dfa:            dfa,
 		literalMatcher: literalMatcher,
 		subexpNames:    subexpNames,
+		searchState:    searchState,
+		matchState:     matchState,
+		uIndices:       uIndices,
+		uPrioDeltas:    uPrioDeltas,
 	}
-	res.bindMatchStrategy()
+	if opts.forceStrategy != strategyNone {
+		res.strategy = opts.forceStrategy
+	} else {
+		res.bindMatchStrategy()
+	}
 	return res, nil
 }
 
@@ -155,29 +195,36 @@ func (re *Regexp) MatchString(s string) bool {
 
 func (re *Regexp) FindSubmatchIndex(b []byte) []int {
 	if re.strategy == strategyLiteral {
-		return re.literalMatcher.FindSubmatchIndex(b)
+		regs := make([]int, (re.numSubexp+1)*2)
+		for i := range regs {
+			regs[i] = -1
+		}
+		if !re.literalMatcher.FindSubmatchIndexInto(b, regs) {
+			return nil
+		}
+		return regs
 	}
 
 	mc := matchContextPool.Get().(*matchContext)
 	defer matchContextPool.Put(mc)
-	mc.prepare(len(b))
-
-	regs := make([]int, (re.numSubexp+1)*2)
-	for i := range regs {
-		regs[i] = -1
-	}
+	mc.prepare(len(b), re.numSubexp)
 
 	start, end, prio := re.submatch(b, mc)
 	if start < 0 {
 		return nil
 	}
 
+	regs := mc.regs
 	regs[0], regs[1] = start, end
 	if re.numSubexp > 0 {
 		re.sparseTDFA_PathSelection(mc, b, start, end, prio)
 		re.sparseTDFA_Recap(mc, b, start, end, prio, regs)
 	}
-	return regs
+
+	// Must return a copy because mc is returned to Pool
+	res := make([]int, len(regs))
+	copy(res, regs)
+	return res
 }
 
 func (re *Regexp) findSubmatchIndexInternal(b []byte, mc *matchContext, regs []int) (int, int, int) {
@@ -192,6 +239,7 @@ func (re *Regexp) findSubmatchIndexInternal(b []byte, mc *matchContext, regs []i
 		if mc == nil {
 			return re.match(b)
 		}
+		mc.prepare(len(b), re.numSubexp)
 		return re.submatch(b, mc)
 	}
 	return -1, -1, 0
@@ -207,12 +255,11 @@ func (re *Regexp) match(b []byte) (int, int, int) {
 func fastMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 	d := re.dfa
 	trans := d.Transitions()
-	accepting := d.Accepting()
 	guards := d.AcceptingGuards()
 	numStates := d.NumStates()
 	numBytes := len(b)
-	searchState := uint32(d.SearchState())
-	matchState := uint32(d.MatchState())
+	searchState := re.searchState
+	matchState := re.matchState
 
 	anchorStart := re.anchorStart
 	bestStart, bestEnd, bestPriority := -1, -1, 1<<60-1
@@ -225,29 +272,31 @@ func fastMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 	if len(trans) > 0 {
 		_ = trans[len(trans)-1]
 	}
-	if len(accepting) > 0 {
-		_ = accepting[len(accepting)-1]
+	if len(guards) > 0 {
 		_ = guards[len(guards)-1]
 	}
 
-	for i := 0; i <= numBytes; {
+	i := 0
+	for i < numBytes {
 		sidx := state & ir.StateIDMask
 
 		// SIMD Warp: skip to next prefix match if we are in search state and not anchored
-		if !anchorStart && (state&ir.StateIDMask) == (searchState&ir.StateIDMask) && len(re.prefix) > 0 && i < numBytes {
+		if !anchorStart && (state&ir.StateIDMask) == (searchState&ir.StateIDMask) && len(re.prefix) > 0 {
 			pos := bytes.Index(b[i:], re.prefix)
 			if pos < 0 {
+				i = numBytes
 				break
 			}
 			if pos > 0 {
 				i += pos
 				prio = i * ir.SearchRestartPenalty
+				continue
 			}
 		}
 
-		if int(sidx) < len(accepting) && accepting[sidx] {
+		if (state & ir.AcceptingStateFlag) != 0 {
 			req := guards[sidx]
-			if req == 0 || (ir.CalculateContext(b, i)&req) == req {
+			if req == 0 || (ir.VerifyEnd(b, i, numBytes, req) && ir.VerifyBegin(b, i, req) && ir.VerifyWord(b, i, numBytes, req)) {
 				p := prio + d.MatchPriority(sidx)
 				if p <= bestPriority {
 					bestPriority, bestEnd = p, i
@@ -262,55 +311,73 @@ func fastMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 				}
 			}
 		}
-		if i < numBytes {
-			byteVal := b[i]
-			if int(sidx) < numStates {
-				off := (int(sidx) << 8) | int(byteVal)
-				rawNext := trans[off]
-				if rawNext != ir.InvalidState {
-					if (rawNext & (ir.AnchorVerifyFlag | ir.TaggedStateFlag | ir.WarpStateFlag)) == 0 {
-						state = rawNext
-						i++
-						continue
-					}
 
-					// Handle special flags
-					if (rawNext & ir.AnchorVerifyFlag) != 0 {
-						req := syntax.EmptyOp((rawNext & ir.AnchorMask) >> 22)
-						if (ir.CalculateContext(b, i) & req) != req {
-							rawNext = ir.InvalidState
-						}
-					}
-					if rawNext != ir.InvalidState {
-						state = rawNext
-						i++
-						continue
+		byteVal := b[i]
+		if int(sidx) < numStates {
+			off := (int(sidx) << 8) | int(byteVal)
+			rawNext := trans[off]
+			if rawNext != ir.InvalidState {
+				if (rawNext & (ir.AnchorVerifyFlag | ir.TaggedStateFlag | ir.WarpStateFlag)) == 0 {
+					state = rawNext
+					i++
+					continue
+				}
+
+				// Handle special flags
+				if (rawNext & ir.AnchorVerifyFlag) != 0 {
+					req := syntax.EmptyOp((rawNext & ir.AnchorMask) >> 22)
+					if !(ir.VerifyEnd(b, i, numBytes, req) && ir.VerifyBegin(b, i, req) && ir.VerifyWord(b, i, numBytes, req)) {
+						rawNext = ir.InvalidState
 					}
 				}
+				if rawNext != ir.InvalidState {
+					state = rawNext
+					if (byteVal < 0x80) || (rawNext&ir.WarpStateFlag) == 0 {
+						i++
+					} else {
+						i += 1 + ir.GetTrailingByteCount(byteVal)
+					}
+					continue
+				}
 			}
-			if anchorStart {
-				break
+		}
+		if anchorStart {
+			return bestStart, bestEnd, bestPriority
+		}
+		i++
+		prio = i * ir.SearchRestartPenalty
+		state = searchState
+	}
+
+	// Final EOF check
+	sidx := state & ir.StateIDMask
+	if (state & ir.AcceptingStateFlag) != 0 {
+		req := guards[sidx]
+		if req == 0 || (ir.VerifyEnd(b, i, numBytes, req) && ir.VerifyBegin(b, i, req) && ir.VerifyWord(b, i, numBytes, req)) {
+			p := prio + d.MatchPriority(sidx)
+			if p <= bestPriority {
+				bestPriority, bestEnd = p, i
+				if anchorStart {
+					bestStart = 0
+				} else {
+					bestStart = p / ir.SearchRestartPenalty
+				}
 			}
-			i++
-			prio = i * ir.SearchRestartPenalty
-			state = searchState
-		} else {
-			break
 		}
 	}
 	return bestStart, bestEnd, bestPriority
 }
+
 func extendedMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 	d := re.dfa
 	trans := d.Transitions()
-	accepting := d.Accepting()
 	guards := d.AcceptingGuards()
 	numStates := d.NumStates()
 	numBytes := len(b)
-	uIndices := d.TagUpdateIndices()
-	uUpdates := d.TagUpdates()
-	searchState := uint32(d.SearchState())
-	matchState := uint32(d.MatchState())
+	uIndices := re.uIndices
+	uPrioDeltas := re.uPrioDeltas
+	searchState := re.searchState
+	matchState := re.matchState
 
 	anchorStart := re.anchorStart
 	bestStart, bestEnd, bestPriority := -1, -1, 1<<60-1
@@ -323,29 +390,31 @@ func extendedMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 	if len(trans) > 0 {
 		_ = trans[len(trans)-1]
 	}
-	if len(accepting) > 0 {
-		_ = accepting[len(accepting)-1]
+	if len(guards) > 0 {
 		_ = guards[len(guards)-1]
 	}
 
-	for i := 0; i <= numBytes; {
+	i := 0
+	for i < numBytes {
 		sidx := state & ir.StateIDMask
 
 		// SIMD Warp: skip to next prefix match if we are in search state and not anchored
-		if !anchorStart && (state&ir.StateIDMask) == (searchState&ir.StateIDMask) && len(re.prefix) > 0 && i < numBytes {
+		if !anchorStart && (state&ir.StateIDMask) == (searchState&ir.StateIDMask) && len(re.prefix) > 0 {
 			pos := bytes.Index(b[i:], re.prefix)
 			if pos < 0 {
+				i = numBytes
 				break
 			}
 			if pos > 0 {
 				i += pos
 				prio = i * ir.SearchRestartPenalty
+				continue
 			}
 		}
 
-		if int(sidx) < len(accepting) && accepting[sidx] {
+		if (state & ir.AcceptingStateFlag) != 0 {
 			req := guards[sidx]
-			if req == 0 || (ir.CalculateContext(b, i)&req) == req {
+			if req == 0 || (ir.VerifyEnd(b, i, numBytes, req) && ir.VerifyBegin(b, i, req) && ir.VerifyWord(b, i, numBytes, req)) {
 				p := prio + d.MatchPriority(sidx)
 				if p <= bestPriority {
 					bestPriority, bestEnd = p, i
@@ -360,45 +429,60 @@ func extendedMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 				}
 			}
 		}
-		if i < numBytes {
-			byteVal := b[i]
-			if int(sidx) < numStates {
-				off := (int(sidx) << 8) | int(byteVal)
-				rawNext := trans[off]
-				if rawNext != ir.InvalidState {
-					if (rawNext & ir.AnchorVerifyFlag) != 0 {
-						req := syntax.EmptyOp((rawNext & ir.AnchorMask) >> 22)
-						if (ir.CalculateContext(b, i) & req) != req {
-							rawNext = ir.InvalidState
-						}
-					}
-					if rawNext != ir.InvalidState {
-						if (rawNext & ir.TaggedStateFlag) != 0 {
-							if off < len(uIndices) {
-								uIdx := uIndices[off]
-								if int(uIdx) < len(uUpdates) {
-									prio += int(uUpdates[uIdx].BasePriority)
-								}
-							}
-						}
-						state = rawNext
-						if byteVal < 0x80 || (rawNext&ir.WarpStateFlag) == 0 {
-							i++
-						} else {
-							i += 1 + ir.GetTrailingByteCount(byteVal)
-						}
-						continue
+
+		byteVal := b[i]
+		if int(sidx) < numStates {
+			off := (int(sidx) << 8) | int(byteVal)
+			rawNext := trans[off]
+			if rawNext != ir.InvalidState {
+				// Handle special flags
+				if (rawNext & ir.AnchorVerifyFlag) != 0 {
+					req := syntax.EmptyOp((rawNext & ir.AnchorMask) >> 22)
+					if !(ir.VerifyEnd(b, i, numBytes, req) && ir.VerifyBegin(b, i, req) && ir.VerifyWord(b, i, numBytes, req)) {
+						rawNext = ir.InvalidState
 					}
 				}
+				if rawNext != ir.InvalidState {
+					if (rawNext & ir.TaggedStateFlag) != 0 {
+						if off < len(uIndices) {
+							uIdx := uIndices[off]
+							if int(uIdx) < len(uPrioDeltas) {
+								prio += int(uPrioDeltas[uIdx])
+							}
+						}
+					}
+					state = rawNext
+					if (byteVal < 0x80) || (rawNext&ir.WarpStateFlag) == 0 {
+						i++
+					} else {
+						i += 1 + ir.GetTrailingByteCount(byteVal)
+					}
+					continue
+				}
 			}
-			if anchorStart {
-				break
+		}
+		if anchorStart {
+			return bestStart, bestEnd, bestPriority
+		}
+		i++
+		prio = i * ir.SearchRestartPenalty
+		state = searchState
+	}
+
+	// Final EOF check
+	sidx := state & ir.StateIDMask
+	if (state & ir.AcceptingStateFlag) != 0 {
+		req := guards[sidx]
+		if req == 0 || (ir.VerifyEnd(b, i, numBytes, req) && ir.VerifyBegin(b, i, req) && ir.VerifyWord(b, i, numBytes, req)) {
+			p := prio + d.MatchPriority(sidx)
+			if p <= bestPriority {
+				bestPriority, bestEnd = p, i
+				if anchorStart {
+					bestStart = 0
+				} else {
+					bestStart = p / ir.SearchRestartPenalty
+				}
 			}
-			i++
-			prio = i * ir.SearchRestartPenalty
-			state = searchState
-		} else {
-			break
 		}
 	}
 	return bestStart, bestEnd, bestPriority
@@ -412,14 +496,13 @@ func (re *Regexp) submatch(b []byte, mc *matchContext) (int, int, int) {
 func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int, int) {
 	d := re.dfa
 	trans := d.Transitions()
-	accepting := d.Accepting()
 	guards := d.AcceptingGuards()
 	numStates := d.NumStates()
 	numBytes := len(b)
-	uIndices := d.TagUpdateIndices()
-	uUpdates := d.TagUpdates()
-	searchState := uint32(d.SearchState())
-	matchState := uint32(d.MatchState())
+	uIndices := re.uIndices
+	uPrioDeltas := re.uPrioDeltas
+	searchState := re.searchState
+	matchState := re.matchState
 
 	anchorStart := re.anchorStart
 	bestStart, bestEnd, bestPriority := -1, -1, 1<<60-1
@@ -432,19 +515,20 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 	if len(trans) > 0 {
 		_ = trans[len(trans)-1]
 	}
-	if len(accepting) > 0 {
-		_ = accepting[len(accepting)-1]
+	if len(guards) > 0 {
 		_ = guards[len(guards)-1]
 	}
 	_ = mc.history[len(mc.history)-1]
 
-	for i := 0; i <= numBytes; {
+	i := 0
+	for i < numBytes {
 		sidx := state & ir.StateIDMask
 
 		// SIMD Warp: skip to next prefix match if we are in search state and not anchored
-		if !anchorStart && (state&ir.StateIDMask) == (searchState&ir.StateIDMask) && len(re.prefix) > 0 && i < numBytes {
+		if !anchorStart && (state&ir.StateIDMask) == (searchState&ir.StateIDMask) && len(re.prefix) > 0 {
 			pos := bytes.Index(b[i:], re.prefix)
 			if pos < 0 {
+				i = numBytes
 				break
 			}
 			if pos > 0 {
@@ -453,13 +537,14 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 				}
 				i += pos
 				prio = i * ir.SearchRestartPenalty
+				continue
 			}
 		}
 
 		mc.history[i] = sidx
-		if int(sidx) < len(accepting) && accepting[sidx] {
+		if (state & ir.AcceptingStateFlag) != 0 {
 			req := guards[sidx]
-			if (ir.CalculateContext(b, i) & req) == req {
+			if req == 0 || (ir.VerifyEnd(b, i, numBytes, req) && ir.VerifyBegin(b, i, req) && ir.VerifyWord(b, i, numBytes, req)) {
 				p := prio + d.MatchPriority(sidx)
 				if p <= bestPriority {
 					bestPriority, bestEnd = p, i
@@ -474,49 +559,65 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 				}
 			}
 		}
-		if i < numBytes {
-			byteVal := b[i]
-			if int(sidx) < numStates {
-				off := (int(sidx) << 8) | int(byteVal)
-				rawNext := trans[off]
-				if rawNext != ir.InvalidState {
-					if (rawNext & ir.AnchorVerifyFlag) != 0 {
-						req := syntax.EmptyOp((rawNext & ir.AnchorMask) >> 22)
-						if (ir.CalculateContext(b, i) & req) != req {
-							rawNext = ir.InvalidState
-						}
-					}
-					if rawNext != ir.InvalidState {
-						if (rawNext & ir.TaggedStateFlag) != 0 {
-							if off < len(uIndices) {
-								uIdx := uIndices[off]
-								if int(uIdx) < len(uUpdates) {
-									prio += int(uUpdates[uIdx].BasePriority)
-								}
-							}
-						}
-						state = rawNext
-						if byteVal < 0x80 || (rawNext&ir.WarpStateFlag) == 0 {
-							i++
-						} else {
-							step := 1 + ir.GetTrailingByteCount(byteVal)
-							for k := 1; k < step; k++ {
-								mc.history[i+k] = state & ir.StateIDMask
-							}
-							i += step
-						}
-						continue
+
+		byteVal := b[i]
+		if int(sidx) < numStates {
+			off := (int(sidx) << 8) | int(byteVal)
+			rawNext := trans[off]
+			if rawNext != ir.InvalidState {
+				// Handle special flags
+				if (rawNext & ir.AnchorVerifyFlag) != 0 {
+					req := syntax.EmptyOp((rawNext & ir.AnchorMask) >> 22)
+					if !(ir.VerifyEnd(b, i, numBytes, req) && ir.VerifyBegin(b, i, req) && ir.VerifyWord(b, i, numBytes, req)) {
+						rawNext = ir.InvalidState
 					}
 				}
+				if rawNext != ir.InvalidState {
+					if (rawNext & ir.TaggedStateFlag) != 0 {
+						if off < len(uIndices) {
+							uIdx := uIndices[off]
+							if int(uIdx) < len(uPrioDeltas) {
+								prio += int(uPrioDeltas[uIdx])
+							}
+						}
+					}
+					state = rawNext
+					if (byteVal < 0x80) || (rawNext&ir.WarpStateFlag) == 0 {
+						i++
+					} else {
+						step := 1 + ir.GetTrailingByteCount(byteVal)
+						for k := 1; k < step; k++ {
+							mc.history[i+k] = state & ir.StateIDMask
+						}
+						i += step
+					}
+					continue
+				}
 			}
-			if anchorStart {
-				break
+		}
+		if anchorStart {
+			return bestStart, bestEnd, bestPriority
+		}
+		i++
+		prio = i * ir.SearchRestartPenalty
+		state = searchState
+	}
+
+	// Final EOF check
+	sidx := state & ir.StateIDMask
+	mc.history[numBytes] = sidx
+	if (state & ir.AcceptingStateFlag) != 0 {
+		req := guards[sidx]
+		if req == 0 || (ir.VerifyEnd(b, numBytes, numBytes, req) && ir.VerifyBegin(b, numBytes, req) && ir.VerifyWord(b, numBytes, numBytes, req)) {
+			p := prio + d.MatchPriority(sidx)
+			if p <= bestPriority {
+				bestPriority, bestEnd = p, numBytes
+				if anchorStart {
+					bestStart = 0
+				} else {
+					bestStart = p / ir.SearchRestartPenalty
+				}
 			}
-			i++
-			prio = i * ir.SearchRestartPenalty
-			state = searchState
-		} else {
-			break
 		}
 	}
 	return bestStart, bestEnd, bestPriority
@@ -532,13 +633,7 @@ func (re *Regexp) sparseTDFA_PathSelection(mc *matchContext, b []byte, start, en
 	mc.pathHistory[end] = int32(currPrio)
 
 	for i := end - 1; i >= start; i-- {
-		// Only the lead byte of a multi-byte sequence (or ASCII) has a transition entry.
 		byteVal := b[i]
-		if (byteVal & 0xC0) == 0x80 {
-			mc.pathHistory[i] = mc.pathHistory[i+1]
-			continue
-		}
-
 		sidx := mc.history[i]
 		if sidx == ir.InvalidState {
 			mc.pathHistory[i] = int32(currPrio)
@@ -618,9 +713,6 @@ func (re *Regexp) sparseTDFA_Recap(mc *matchContext, b []byte, start, end, prio 
 			// We need to find entry where InputPriority == pathID - basePrio AND NextPriority == nextPathID
 			for _, entry := range recap.Transitions[off] {
 				if entry.InputPriority == int16(pathID)-basePrio && int32(entry.NextPriority) == nextPathID {
-					// Purely apply delta tags on the winning path identity.
-					// PreTags belong to position i (before byte),
-					// PostTags belong to position i+step (after byte).
 					re.applyRawTags(regs, entry.PreTags, i)
 					re.applyRawTags(regs, entry.PostTags, i+step)
 					break
@@ -700,9 +792,11 @@ type matchContext struct {
 	history        []uint32
 	pathHistoryBuf [1024]int32
 	pathHistory    []int32
+	regsBuf        [32]int
+	regs           []int
 }
 
-func (mc *matchContext) prepare(n int) {
+func (mc *matchContext) prepare(n int, numSubexp int) {
 	required := n + 1
 	if required > len(mc.historyBuf) {
 		if cap(mc.history) < required {
@@ -719,8 +813,19 @@ func (mc *matchContext) prepare(n int) {
 		mc.history = mc.historyBuf[:required]
 		mc.pathHistory = mc.pathHistoryBuf[:required]
 	}
-	for i := range mc.history {
-		mc.history[i] = ir.InvalidState
+
+	requiredRegs := (numSubexp + 1) * 2
+	if requiredRegs <= len(mc.regsBuf) {
+		mc.regs = mc.regsBuf[:requiredRegs]
+	} else {
+		if cap(mc.regs) < requiredRegs {
+			mc.regs = make([]int, requiredRegs)
+		} else {
+			mc.regs = mc.regs[:requiredRegs]
+		}
+	}
+	for i := range mc.regs {
+		mc.regs[i] = -1
 	}
 }
 

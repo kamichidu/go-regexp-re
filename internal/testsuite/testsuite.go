@@ -178,8 +178,6 @@ func (r *CompatibilityRegistry) record(engineName string, err error, passed bool
 			msg = "stack overflow"
 		} else if strings.Contains(msg, "pattern too large or ambiguous") {
 			msg = "pattern too large or ambiguous (state explosion)"
-		} else if strings.Contains(msg, "unsupported epsilon loop") {
-			msg = "DFA: unsupported epsilon loop"
 		}
 		r.incompat[msg]++
 		return
@@ -214,7 +212,7 @@ func (r *CompatibilityRegistry) Report() {
 			"POSIX",
 			"invalid repeat count",
 			"state explosion",
-			"unsupported epsilon loop",
+			"regexp: unsupported",
 		}
 
 		type entry struct {
@@ -373,7 +371,7 @@ func RunCompatibility(t *testing.T) {
 								registry.record(engine.Name, err, false)
 							}
 						}
-						t.Skipf("failed to compile %q: %v", pat, err)
+						handleCompileError(t, pat, err)
 						return
 					}
 
@@ -448,7 +446,7 @@ func RunSubmatchCompatibility(t *testing.T) {
 								registry.record(engine.Name, err, false)
 							}
 						}
-						t.Skipf("failed to compile %q: %v", pat, err)
+						handleCompileError(t, pat, err)
 						return
 					}
 
@@ -461,14 +459,14 @@ func RunSubmatchCompatibility(t *testing.T) {
 					for _, tc := range grouped[pat] {
 						want := refRe.FindStringSubmatchIndex(tc.text)
 						got := re.FindStringSubmatchIndex(tc.text)
+
+						// For registry/report purposes
 						passed := reflect.DeepEqual(got, want)
 						if EnableCompatibilityReport {
 							registry.record(engine.Name, nil, passed)
 						}
 
-						if !passed {
-							t.Errorf("FindStringSubmatchIndex() failed\npattern: %q\ninput:   %q\ngot:     %v\nwant:    %v", pat, tc.text, got, want)
-						}
+						validateSubmatchIndex(t, pat, tc.text, got, want)
 					}
 				})
 				// Periodic GC
@@ -506,7 +504,7 @@ func RunFowler(t *testing.T) {
 								if EnableCompatibilityReport {
 									registry.record(engine.Name, err, false)
 								}
-								t.Skipf("failed to compile %q: %v", tt.Pattern, err)
+								handleCompileError(t, tt.Pattern, err)
 								return
 							}
 							re, err := engine.getMatcher(tt.Pattern)
@@ -515,7 +513,7 @@ func RunFowler(t *testing.T) {
 								if EnableCompatibilityReport {
 									registry.record(engine.Name, err, false)
 								}
-								t.Skipf("failed to compile %q: %v", tt.Pattern, err)
+								handleCompileError(t, tt.Pattern, err)
 								return
 							}
 							if !tt.ShouldCompile {
@@ -553,6 +551,7 @@ func RunRE2Search(t *testing.T) {
 			for _, group := range re2SearchSet.Groups {
 				re, err := engine.getMatcher(group.Regexp)
 				if err != nil {
+					handleCompileError(t, group.Regexp, err)
 					continue
 				}
 				for _, tt := range group.Tests {

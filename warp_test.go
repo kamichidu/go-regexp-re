@@ -38,11 +38,10 @@ func TestWarpAndAnchors(t *testing.T) {
 		{"\\bあ\\b", "あ ", false, true},
 		{"\\bあ\\b", " あ", false, true},
 
-		// Dot Behavior (Defined as strict byte/class unit, not context-greedy)
-		// Junction dots return false to maintain O(1) DFA transitions.
-		{"^.+$", "あいう", true, true},    // Consecutive dots handled by Lead-Byte Warp
-		{"^あ.う$", "あいう", false, false}, // Junction dot is false by design
-		{"^.あ.$", "いあう", false, false}, // Junction dot is false by design
+		// Dot Behavior (Standard compliant byte-level DFA)
+		{"^.+$", "あいう", true, true},
+		{"^あ.う$", "あいう", true, true},
+		{"^.あ.$", "いあう", true, true},
 
 		// Nested/Sequential Anchors
 		{"^\\babc\\b$", "abc", true, true},
