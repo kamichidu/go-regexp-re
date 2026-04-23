@@ -11,7 +11,7 @@ func TestPriorityGreedyLoop(t *testing.T) {
 	re := MustCompile(`a*`)
 	input := []byte("aaa")
 	mc := &matchContext{}
-	mc.prepare(len(input))
+	mc.prepare(len(input), re.numSubexp)
 
 	regs := make([]int, (re.numSubexp+1)*2)
 	start, end, prio := re.findSubmatchIndexInternal(input, mc, regs)

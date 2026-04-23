@@ -37,6 +37,8 @@ type Regexp struct {
 	strategy       matchStrategy
 	searchState    uint32
 	matchState     uint32
+	uIndices       []uint32
+	uPrioDeltas    []int32
 }
 
 type CompileOptions struct {
@@ -82,6 +84,8 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 
 	var dfa *ir.DFA
 	var searchState, matchState uint32
+	var uIndices []uint32
+	var uPrioDeltas []int32
 	if literalMatcher == nil {
 		dfa, err = ir.NewDFAWithMemoryLimit(ctx, s, prog, opts.MaxMemory, true)
 		if err != nil {
@@ -95,6 +99,13 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 		matchState = uint32(dfa.MatchState())
 		if acc[matchState&ir.StateIDMask] {
 			matchState |= ir.AcceptingStateFlag
+		}
+
+		uIndices = dfa.TagUpdateIndices()
+		tagUpdates := dfa.TagUpdates()
+		uPrioDeltas = make([]int32, len(tagUpdates))
+		for i, update := range tagUpdates {
+			uPrioDeltas[i] = update.BasePriority
 		}
 	}
 
@@ -110,6 +121,8 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 		subexpNames:    subexpNames,
 		searchState:    searchState,
 		matchState:     matchState,
+		uIndices:       uIndices,
+		uPrioDeltas:    uPrioDeltas,
 	}
 	if opts.forceStrategy != strategyNone {
 		res.strategy = opts.forceStrategy
@@ -181,12 +194,11 @@ func (re *Regexp) MatchString(s string) bool {
 }
 
 func (re *Regexp) FindSubmatchIndex(b []byte) []int {
-	regs := make([]int, (re.numSubexp+1)*2)
-	for i := range regs {
-		regs[i] = -1
-	}
-
 	if re.strategy == strategyLiteral {
+		regs := make([]int, (re.numSubexp+1)*2)
+		for i := range regs {
+			regs[i] = -1
+		}
 		if !re.literalMatcher.FindSubmatchIndexInto(b, regs) {
 			return nil
 		}
@@ -195,19 +207,24 @@ func (re *Regexp) FindSubmatchIndex(b []byte) []int {
 
 	mc := matchContextPool.Get().(*matchContext)
 	defer matchContextPool.Put(mc)
-	mc.prepare(len(b))
+	mc.prepare(len(b), re.numSubexp)
 
 	start, end, prio := re.submatch(b, mc)
 	if start < 0 {
 		return nil
 	}
 
+	regs := mc.regs
 	regs[0], regs[1] = start, end
 	if re.numSubexp > 0 {
 		re.sparseTDFA_PathSelection(mc, b, start, end, prio)
 		re.sparseTDFA_Recap(mc, b, start, end, prio, regs)
 	}
-	return regs
+
+	// Must return a copy because mc is returned to Pool
+	res := make([]int, len(regs))
+	copy(res, regs)
+	return res
 }
 
 func (re *Regexp) findSubmatchIndexInternal(b []byte, mc *matchContext, regs []int) (int, int, int) {
@@ -222,6 +239,7 @@ func (re *Regexp) findSubmatchIndexInternal(b []byte, mc *matchContext, regs []i
 		if mc == nil {
 			return re.match(b)
 		}
+		mc.prepare(len(b), re.numSubexp)
 		return re.submatch(b, mc)
 	}
 	return -1, -1, 0
@@ -356,8 +374,8 @@ func extendedMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 	guards := d.AcceptingGuards()
 	numStates := d.NumStates()
 	numBytes := len(b)
-	uIndices := d.TagUpdateIndices()
-	uUpdates := d.TagUpdates()
+	uIndices := re.uIndices
+	uPrioDeltas := re.uPrioDeltas
 	searchState := re.searchState
 	matchState := re.matchState
 
@@ -428,8 +446,8 @@ func extendedMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 					if (rawNext & ir.TaggedStateFlag) != 0 {
 						if off < len(uIndices) {
 							uIdx := uIndices[off]
-							if int(uIdx) < len(uUpdates) {
-								prio += int(uUpdates[uIdx].BasePriority)
+							if int(uIdx) < len(uPrioDeltas) {
+								prio += int(uPrioDeltas[uIdx])
 							}
 						}
 					}
@@ -481,8 +499,8 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 	guards := d.AcceptingGuards()
 	numStates := d.NumStates()
 	numBytes := len(b)
-	uIndices := d.TagUpdateIndices()
-	uUpdates := d.TagUpdates()
+	uIndices := re.uIndices
+	uPrioDeltas := re.uPrioDeltas
 	searchState := re.searchState
 	matchState := re.matchState
 
@@ -558,8 +576,8 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 					if (rawNext & ir.TaggedStateFlag) != 0 {
 						if off < len(uIndices) {
 							uIdx := uIndices[off]
-							if int(uIdx) < len(uUpdates) {
-								prio += int(uUpdates[uIdx].BasePriority)
+							if int(uIdx) < len(uPrioDeltas) {
+								prio += int(uPrioDeltas[uIdx])
 							}
 						}
 					}
@@ -774,9 +792,11 @@ type matchContext struct {
 	history        []uint32
 	pathHistoryBuf [1024]int32
 	pathHistory    []int32
+	regsBuf        [32]int
+	regs           []int
 }
 
-func (mc *matchContext) prepare(n int) {
+func (mc *matchContext) prepare(n int, numSubexp int) {
 	required := n + 1
 	if required > len(mc.historyBuf) {
 		if cap(mc.history) < required {
@@ -792,6 +812,20 @@ func (mc *matchContext) prepare(n int) {
 	} else {
 		mc.history = mc.historyBuf[:required]
 		mc.pathHistory = mc.pathHistoryBuf[:required]
+	}
+
+	requiredRegs := (numSubexp + 1) * 2
+	if requiredRegs <= len(mc.regsBuf) {
+		mc.regs = mc.regsBuf[:requiredRegs]
+	} else {
+		if cap(mc.regs) < requiredRegs {
+			mc.regs = make([]int, requiredRegs)
+		} else {
+			mc.regs = mc.regs[:requiredRegs]
+		}
+	}
+	for i := range mc.regs {
+		mc.regs[i] = -1
 	}
 }
 
