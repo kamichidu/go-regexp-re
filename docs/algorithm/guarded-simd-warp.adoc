@@ -47,6 +47,7 @@ This allows address calculation using a simple bit shift: `state << 8 + byte`, e
   - Uses Bit 30 of the state transition ID as a flag.
   - When the SIMD search hits a match, it checks if this flag is set on the target state ID.
   - Only then does it verify the anchor condition using the preceding byte (`input[i-1]`).
+* **Warp-to-State Continuation**: Upon a successful prefix hit at position `pos > 0`, the engine immediately advances the index and resumes the search loop. This ensures that the first byte of the prefix is NOT redundantly re-processed by the DFA, maximizing SIMD throughput.
 * **Fallback**: If the condition is not met, the engine follows the standard transition table.
 
 == Advantages
