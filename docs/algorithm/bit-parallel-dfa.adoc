@@ -58,6 +58,11 @@ The BP-DFA uses pre-compiled `ContextMasks [64]uint64` and `MatchMasks [64]uint6
 === 2. Chunked Successor Lookups
 To handle general NFA graphs that cannot be expressed as simple shifts, the engine uses a chunked lookup table (`SuccessorTable [8][256]uint64`). This technique enables branchless transitions across the entire 64-bit state vector with only 8 memory loads (likely hitting L1) and 7 OR operations.
 
+=== 3. Boundary Matching (MatchesEmpty)
+Standard bit-parallel transitions occur *on* characters. To support patterns that match empty strings (e.g., `a*`) or depend purely on junction context (e.g., `^`, `$`), the engine uses a pre-calculated `MatchesEmpty [64]bool` array.
+* **Initial Check**: Before processing any bytes, the engine checks `MatchesEmpty[initialContext]`.
+* **Final Check**: After the last byte, if the search is unanchored, the engine checks `MatchesEmpty[finalContext]` to allow matches that start at the very end of the input.
+
 == Strategy Selection & SIMD Warp
 
 Small patterns (up to 64 instructions) are automatically specialized for BP-DFA.

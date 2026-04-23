@@ -70,8 +70,10 @@ To maintain the integrity of the NFA-free architecture, the engine MUST perform 
 ### 2.8 Architectural Shortcut (Compilation Efficiency)
 To minimize compilation overhead, the engine MUST use an **Architectural Shortcut** for simple patterns.
 - **Literal-Only Bypass**: If a pattern is identified as a literal-only or anchor-literal sequence, the engine MUST skip `ir.DFA` construction entirely and delegate all operations to the `LiteralMatcher`.
-- **Skip Heavy DFA**: If a pattern is simple (NFA nodes $\le 62$, no non-greedy, **and no anchors**), the engine MUST skip the heavy DFA transition table construction and only build the `BitParallelDFA`.
-- **ASCII Restriction**: BP-DFA is currently optimized for ASCII-only runes (0-127). Patterns requiring multi-byte UTF-8 support (e.g., non-ASCII runes or `.`) MUST fallback to the table-based DFA.
+- **Skip Heavy DFA (BP-DFA)**: If a pattern is simple (NFA nodes ≤ 64, ASCII-only, and no dots), the engine SHOULD build the `BitParallelDFA`.
+- **Match-Only Restriction**: BP-DFA MUST be used exclusively for match-only operations (`MatchString`, `Match`). It MUST NOT be used for submatch extraction or index tracking (`Find*`) because it cannot efficiently determine the true leftmost start position in unanchored searches.
+- **Context-Aware MatchesEmpty**: To correctly handle empty string matches and anchor-only patterns (e.g., `^`, `$`), BP-DFA MUST utilize a pre-calculated `MatchesEmpty[64]bool` array to verify match conditions at junction 0 and the final search position.
+
 
 ### 2.10 Prefix-Skip Optimization (SIMD Acceleration)
 - **Mandatory Prefix Extraction**: During compilation, the longest constant prefix is extracted to ensure `LiteralPrefix()` compatibility.

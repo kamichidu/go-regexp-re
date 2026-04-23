@@ -3,6 +3,7 @@ package regexp
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"sync"
 	"unsafe"
 
@@ -55,6 +56,23 @@ func CompileContext(ctx context.Context, expr string) (*Regexp, error) {
 	return CompileContextWithOptions(ctx, expr, CompileOptions{MaxMemory: ir.MaxDFAMemory})
 }
 
+func isASCIIOnly(prog *syntax.Prog) bool {
+	for _, inst := range prog.Inst {
+		switch inst.Op {
+		case syntax.InstRune, syntax.InstRune1:
+			for _, r := range inst.Rune {
+				if r > 127 {
+					return false
+				}
+			}
+		case syntax.InstRuneAny, syntax.InstRuneAnyNotNL:
+			// Dot matches multi-byte runes, not supported by simple BP-DFA
+			return false
+		}
+	}
+	return true
+}
+
 func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOptions) (*Regexp, error) {
 	s, err := syntax.Parse(expr, syntax.Perl)
 	if err != nil {
@@ -91,8 +109,17 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 
 	if literalMatcher == nil {
 		// Try BitParallelDFA for simple patterns to accelerate MatchString.
-		if len(prog.Inst) <= 64 {
+		// Mandate 2.8: ASCII-only and no dots.
+		canUseBP := len(prog.Inst) <= 64 && isASCIIOnly(prog)
+		if opts.forceStrategy == strategyBitParallel {
+			canUseBP = len(prog.Inst) <= 64 // Still limit to 64 states
+		}
+
+		if canUseBP {
 			bpDFA = ir.NewBitParallelDFA(prog)
+		}
+		if opts.forceStrategy == strategyBitParallel && bpDFA == nil {
+			return nil, fmt.Errorf("regexp: pattern too large for bit-parallel strategy")
 		}
 
 		// Always build the heavy DFA to support correct FindSubmatchIndex results
