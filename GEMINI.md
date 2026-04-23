@@ -126,6 +126,10 @@ Junction verification for anchors (`\b`, `^`, `$`) MUST NOT employ `utf8.DecodeR
 - **Two-Stage Submatch Evaluation**: Test validation MUST distinguish between engine search correctness and submatch extraction precision:
     - **Overall Match Mismatch**: (Indices 0, 1) If the engine fails to identify the correct match boundaries [start, end], it MUST be treated as a **FAIL**.
     - **Submatch Boundary Mismatch**: (Indices 2+) If the match boundaries are correct but internal group boundaries deviate from standard `regexp`, it MAY be treated as a **SKIP** (Known Limitation) to document 3-Pass TDFA boundary ambiguity.
+- **Error Compatibility Standard**: When evaluating compilation success:
+    - **Consistent Rejection**: If both the engine and Go standard `regexp` fail to parse a pattern (returning a `syntax.Error`), it MUST be treated as a **PASS** (Compatible).
+    - **Engine Limitation**: If the engine rejects a pattern that is valid in standard `regexp` (returning an `UnsupportedError`), it MUST be treated as a **SKIP** (Acknowledged Limitation).
+    - **Unexpected Error**: Any other compilation failure MUST be treated as a **FAIL**.
 - **Memory Accumulation Prevention**: Dispose of compiled `Regexp` objects promptly during mass testing.
 - **100% DFA Validation**: DFA match boundaries MUST strictly match the standard library's boundaries except where documented (e.g., Dot behavior).
 

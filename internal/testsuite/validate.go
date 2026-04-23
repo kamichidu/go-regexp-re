@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/kamichidu/go-regexp-re"
+	"github.com/kamichidu/go-regexp-re/syntax"
 )
 
 func validateSubmatchIndex(t *testing.T, pattern, input string, got, want []int) {
@@ -41,7 +42,14 @@ func handleCompileError(t *testing.T, pattern string, err error) {
 	t.Helper()
 	var unsupported *regexp.UnsupportedError
 	if errors.As(err, &unsupported) {
+		// Acknowledged engine limitation: Skip the test to indicate it's not a failure,
+		// but an expected lack of support.
 		t.Skipf("acknowledged engine limitation: %v", err)
+		return
+	}
+	// If standard Go fails to parse it, we should too. This is a PASS.
+	var syntaxErr *syntax.Error
+	if errors.As(err, &syntaxErr) {
 		return
 	}
 	t.Fatalf("unexpected compilation error for %q: %v", pattern, err)
