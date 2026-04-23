@@ -13,6 +13,9 @@ The core idea is to decouple match discovery from boundary extraction, using a *
 *   **Objective**: Determine the match boundaries `[start, end]` and record the state history.
 *   **Mechanism**: Uses a **Naked DFA** for match discovery.
     *   **State Identity via MatchPriority**: To prevent incorrect match boundary extensions (e.g., `aa|a` matching `aaaa` as `[0 4]`), Phase 1 DFA states include the **MatchPriority** (the highest priority NFA path in the state) in their identity key. This ensures that states with identical NFA IDs but different leftmost-first implications are physically separated.
+    *   **State-Resident Acceptance Flag**: To eliminate redundant slice lookups in the hot loop, the DFA state ID embeds the `AcceptingStateFlag` (Bit 28). This allows the engine to perform match detection using a single bitwise AND.
+    *   **Tiny Inlineable Verify Functions**: Anchor verification (e.g., `^`, `$`) is implemented as tiny, specialized functions (`VerifyBegin`, `VerifyEnd`) designed to be inlined by the Go compiler. This eliminates function call overhead and enables short-circuiting of anchor checks.
+    *   **Pre-calculated Initial States**: The starting `matchState` and `searchState` are pre-combined with their appropriate flags during compilation to minimize per-match setup cost.
 *   **Output**: A successful match window `[start, end]`, the final `MatchPriority`, and a `history []uint32` of DFA state IDs.
 
 === Phase 2: Path Identity Selection (Backward Trace)
@@ -54,5 +57,5 @@ Patterns that match empty strings in a loop (Epsilon Cycles) or contain ambiguou
 
 *   **NFA-Free Execution**: No runtime NFA simulation or backtracking.
 *   **Strict $O(n)$ Complexity**: All three passes are linear relative to input length.
-*   **Zero-Allocation Submatch Extraction**: Operates entirely on pre-allocated buffers and stack-resident state.
+*   **Zero-Allocation Submatch Extraction**: Operates entirely on pre-allocated buffers and stack-resident state. The `matchContext` provides a re-usable `regs` buffer for submatch indices to eliminate allocation of the result slice on every match.
 *   **100% Go Compatibility**: Guarantees leftmost-first match results identical to `regexp`.
