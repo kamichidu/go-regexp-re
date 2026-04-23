@@ -8,29 +8,31 @@ import (
 // These use exact syntax.EmptyOp bits to stay efficient and correct.
 
 func VerifyBegin(b []byte, i int, req syntax.EmptyOp) bool {
-	// EmptyBeginText(4) | EmptyBeginLine(1)
-	if (req & (syntax.EmptyBeginText | syntax.EmptyBeginLine)) == 0 {
-		return true
+	// If BeginText is requested but we are not at 0, fail.
+	if (req&syntax.EmptyBeginText) != 0 && i != 0 {
+		return false
 	}
-	if i == 0 {
-		// Text start satisfies both BeginText and BeginLine
-		return true
+	// If BeginLine is requested but we are not at 0 and not after \n, fail.
+	if (req & syntax.EmptyBeginLine) != 0 {
+		if i != 0 && b[i-1] != '\n' {
+			return false
+		}
 	}
-	// Line start only satisfies BeginLine
-	return (req&syntax.EmptyBeginLine) != 0 && b[i-1] == '\n'
+	return true
 }
 
 func VerifyEnd(b []byte, i int, numBytes int, req syntax.EmptyOp) bool {
-	// EmptyEndText(8) | EmptyEndLine(2)
-	if (req & (syntax.EmptyEndText | syntax.EmptyEndLine)) == 0 {
-		return true
+	// If EndText is requested but we are not at numBytes, fail.
+	if (req&syntax.EmptyEndText) != 0 && i != numBytes {
+		return false
 	}
-	if i == numBytes {
-		// Text end satisfies both EndText and EndLine
-		return true
+	// If EndLine is requested but we are not at numBytes and not before \n, fail.
+	if (req & syntax.EmptyEndLine) != 0 {
+		if i != numBytes && b[i] != '\n' {
+			return false
+		}
 	}
-	// Line end only satisfies EndLine
-	return (req&syntax.EmptyEndLine) != 0 && b[i] == '\n'
+	return true
 }
 
 func VerifyWord(b []byte, i int, numBytes int, req syntax.EmptyOp) bool {
