@@ -362,6 +362,11 @@ func bitParallelMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 		}
 	}
 
+	// Final check for search restart at the end of input
+	if !anchorStart && bp.MatchesEmpty[ctx&63] {
+		return 0, numBytes, 0
+	}
+
 	return -1, -1, 0
 }
 func fastMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
