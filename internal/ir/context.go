@@ -79,42 +79,55 @@ func CalculateContextByClass(c1, c2 RuneClass) syntax.EmptyOp {
 
 // CalculateContext determines the empty-width assertions at junction i.
 // Strictly Byte-Oriented: No rune decoding, no loops.
-func CalculateContext(b []byte, i int) syntax.EmptyOp {
+// Optimized: Only performs checks required by the 'req' bitmask.
+func CalculateContext(b []byte, i int, req syntax.EmptyOp) syntax.EmptyOp {
 	var op syntax.EmptyOp
-	var wordLeft, wordRight bool
 
 	// Junction Left Analysis
-	if i == 0 {
-		op |= syntax.EmptyBeginText | syntax.EmptyBeginLine
-	} else {
-		prev := b[i-1]
-		if prev == '\n' {
-			op |= syntax.EmptyBeginLine
-		}
-		// ASCII Word Char check: 0x80+ are always Non-Word.
-		if prev < 0x80 && syntax.IsWordChar(rune(prev)) {
-			wordLeft = true
+	if (req & (syntax.EmptyBeginText | syntax.EmptyBeginLine | syntax.EmptyWordBoundary | syntax.EmptyNoWordBoundary)) != 0 {
+		if i == 0 {
+			op |= syntax.EmptyBeginText | syntax.EmptyBeginLine
+		} else {
+			prev := b[i-1]
+			if (req&syntax.EmptyBeginLine) != 0 && prev == '\n' {
+				op |= syntax.EmptyBeginLine
+			}
 		}
 	}
 
 	// Junction Right Analysis
-	if i == len(b) {
-		op |= syntax.EmptyEndText | syntax.EmptyEndLine
-	} else {
-		curr := b[i]
-		if curr == '\n' {
-			op |= syntax.EmptyEndLine
-		}
-		// ASCII Word Char check: 0x80+ are always Non-Word.
-		if curr < 0x80 && syntax.IsWordChar(rune(curr)) {
-			wordRight = true
+	if (req & (syntax.EmptyEndText | syntax.EmptyEndLine | syntax.EmptyWordBoundary | syntax.EmptyNoWordBoundary)) != 0 {
+		if i == len(b) {
+			op |= syntax.EmptyEndText | syntax.EmptyEndLine
+		} else {
+			curr := b[i]
+			if (req&syntax.EmptyEndLine) != 0 && curr == '\n' {
+				op |= syntax.EmptyEndLine
+			}
 		}
 	}
 
-	if wordLeft != wordRight {
-		op |= syntax.EmptyWordBoundary
-	} else {
-		op |= syntax.EmptyNoWordBoundary
+	// Word Boundary Analysis (only if requested)
+	if (req & (syntax.EmptyWordBoundary | syntax.EmptyNoWordBoundary)) != 0 {
+		var wordLeft, wordRight bool
+		if i > 0 {
+			prev := b[i-1]
+			if prev < 0x80 && syntax.IsWordChar(rune(prev)) {
+				wordLeft = true
+			}
+		}
+		if i < len(b) {
+			curr := b[i]
+			if curr < 0x80 && syntax.IsWordChar(rune(curr)) {
+				wordRight = true
+			}
+		}
+
+		if wordLeft != wordRight {
+			op |= syntax.EmptyWordBoundary
+		} else {
+			op |= syntax.EmptyNoWordBoundary
+		}
 	}
 	return op
 }

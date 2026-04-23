@@ -17,12 +17,13 @@ type StateID uint32
 
 const (
 	InvalidState uint32 = 0xFFFFFFFF
-	// Fixed Canonical Layout: [31: Tagged] [30: Anchor] [29: Warp] [28-22: AnchorMask] [21-0: StateIndex]
-	TaggedStateFlag  uint32 = 0x80000000
-	AnchorVerifyFlag uint32 = 0x40000000
-	WarpStateFlag    uint32 = 0x20000000
-	AnchorMask       uint32 = 0x1FC00000
-	StateIDMask      uint32 = 0x003FFFFF
+	// Fixed Canonical Layout: [31: Tagged] [30: Anchor] [29: Warp] [28: Accepting] [27-22: AnchorMask] [21-0: StateIndex]
+	TaggedStateFlag    uint32 = 0x80000000
+	AnchorVerifyFlag   uint32 = 0x40000000
+	WarpStateFlag      uint32 = 0x20000000
+	AcceptingStateFlag uint32 = 0x10000000
+	AnchorMask         uint32 = 0x0FC00000
+	StateIDMask        uint32 = 0x003FFFFF
 )
 
 const MaxDFAMemory = 64 * 1024 * 1024
@@ -308,8 +309,14 @@ func (d *DFA) build(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, ma
 
 	startRes := getCachedClosure([]NFAPath{{ID: uint32(prog.Start), Priority: 0}})
 	d.matchState = addDfaState(startRes.NextClosure, startRes.Updates, startRes.MatchAnchors, false)
+	if d.accepting[d.matchState] {
+		d.matchState |= AcceptingStateFlag
+	}
 	d.startUpdates = startRes.Updates
 	d.searchState = addDfaState(startRes.NextClosure, startRes.Updates, startRes.MatchAnchors, true)
+	if d.accepting[d.searchState] {
+		d.searchState |= AcceptingStateFlag
+	}
 
 	d.recapTables = []GroupRecapTable{{Transitions: make([][]RecapEntry, 0, 1024)}}
 	d.tagUpdateIndices = make([]uint32, 0, 1024)
@@ -483,11 +490,16 @@ func (d *DFA) build(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, ma
 			}
 
 			nextDfaID := addDfaState(nextRes.NextClosure, nextRes.Updates, nextRes.MatchAnchors, d.stateIsSearch[i])
+
 			idx := (int(i) << 8) | b
 			rawNext := nextDfaID
+			if d.accepting[nextDfaID] {
+				rawNext |= AcceptingStateFlag
+			}
 			if preGuard != 0 {
 				rawNext |= AnchorVerifyFlag | (uint32(preGuard) << 22)
 			}
+
 			if isWarpable {
 				rawNext |= WarpStateFlag
 			}
