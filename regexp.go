@@ -382,7 +382,12 @@ func bitParallelMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 			return 0, i, 0
 		}
 
-		// 5. Update current state and add start states for unanchored search restart
+		// 5. Empty match check at current junction (for unanchored search like \B)
+		if !anchorStart && bp.MatchesEmpty[ctx&63] {
+			return 0, i, 0
+		}
+
+		// 6. Update current state and add start states for unanchored search restart
 		curr = (next & contextMasks[ctx&63])
 		if !anchorStart {
 			curr |= startMasks[ctx&63]

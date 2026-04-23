@@ -52,6 +52,8 @@ func TestBitParallelDFA_Exhaustive(t *testing.T) {
 		{"\\babc\\b", "abcx", false},
 		{"\\Babc\\B", "xabcy", true},
 		{"\\Babc\\B", " abc ", false},
+		{"\\B", "xx", true},
+		{"\\B", "x x", false},
 
 		// Character Classes
 		{"[a-z]+", "123abc456", true},
