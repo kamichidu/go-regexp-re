@@ -52,12 +52,13 @@ To minimize redundant scanning, the engine employs an early-exit strategy called
 *   **Greedy Preservation**: In a loop like `a*`, the exit transition typically has a lower priority (higher value) than the loop transition. Therefore, `IsBestMatch` remains false until the loop can no longer be taken, ensuring the longest possible match.
 
 === 4. Hot-Loop Monomorphization (Manual Inlining)
-The engine provides three physically distinct execution loops: `bitParallelExecLoop`, `fastExecLoop`, and `extendedExecLoop`.
+The engine provides three physically distinct execution loops: `bitParallelExecLoop` (deprecated), `fastExecLoop`, and `extendedExecLoop`.
 * **Problem**: Go generics (introduced in 1.18) can introduce runtime dictionary lookups for function shapes (`GCShape`), and standard polymorphism can prevent aggressive constant folding.
 * **Solution**: By manually duplicating and specializing these loops (Monomorphization), the engine ensures that the Go compiler can:
   - Completely eliminate unreachable branches (e.g., `if hasAnchors`) during compilation.
   - Apply aggressive register allocation specific to the complexity of the loop.
   - Avoid any runtime indirection within the most critical performance path.
+* **Warp Specialization**: This principle is also applied to **SWAR Warp Kernels**. Instead of checking the kernel type (`switch`) inside the 8-byte skip loop, the `switch` is performed once before entering a specialized, kernel-specific loop.
 
 === 5. Byte-Level UTF-8 Trie Expansion
 Unlike many engines that decode UTF-8 into runes (`int32`) during execution, `go-regexp-re` processes raw bytes.

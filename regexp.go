@@ -294,69 +294,47 @@ func fastMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 		// Priority 1: CCWarp (SWAR 8-byte skip)
 		if (state&ir.CCWarpFlag) != 0 && i+8 <= numBytes {
 			info := ccWarps[sidx]
-			v := binary.LittleEndian.Uint64(b[i:])
-			match := false
 			switch info.Kernel {
 			case ir.CCWarpSingleRange:
-				if ((v+0x7f7f7f7f7f7f7f7f-info.High)|(v-info.Low))&0x8080808080808080 == 0 {
-					match = true
-				}
-			case ir.CCWarpAnyExceptNL:
-				diff := v ^ 0x0A0A0A0A0A0A0A0A
-				if (diff-0x0101010101010101)&(^diff)&0x8080808080808080 == 0 {
-					match = true
-				}
-			case ir.CCWarpBitmask:
-				if v&0x8080808080808080 == 0 {
-					ok := true
-					for k := 0; k < 8; k++ {
-						bv := byte(v >> (k * 8))
-						if (info.Mask[bv>>6] & (1 << (bv & 63))) == 0 {
-							ok = false
-							break
-						}
-					}
-					match = ok
-				}
-			}
-
-			if match {
-				i += 8
+				low, high := info.Low, info.High
 				for i+8 <= numBytes {
-					v = binary.LittleEndian.Uint64(b[i:])
-					match = false
-					switch info.Kernel {
-					case ir.CCWarpSingleRange:
-						if ((v+0x7f7f7f7f7f7f7f7f-info.High)|(v-info.Low))&0x8080808080808080 == 0 {
-							match = true
-						}
-					case ir.CCWarpAnyExceptNL:
-						diff := v ^ 0x0A0A0A0A0A0A0A0A
-						if (diff-0x0101010101010101)&(^diff)&0x8080808080808080 == 0 {
-							match = true
-						}
-					case ir.CCWarpBitmask:
-						ok := true
-						if v&0x8080808080808080 == 0 {
-							for k := 0; k < 8; k++ {
-								bv := byte(v >> (k * 8))
-								if (info.Mask[bv>>6] & (1 << (bv & 63))) == 0 {
-									ok = false
-									break
-								}
-							}
-						} else {
-							ok = false
-						}
-						match = ok
-					}
-					if !match {
+					v := binary.LittleEndian.Uint64(b[i:])
+					if ((v+0x7f7f7f7f7f7f7f7f-high)|(v-low))&0x8080808080808080 != 0 {
 						break
 					}
 					i += 8
 				}
-				continue
+			case ir.CCWarpAnyExceptNL:
+				for i+8 <= numBytes {
+					v := binary.LittleEndian.Uint64(b[i:])
+					diff := v ^ 0x0A0A0A0A0A0A0A0A
+					if (diff-0x0101010101010101)&(^diff)&0x8080808080808080 != 0 {
+						break
+					}
+					i += 8
+				}
+			case ir.CCWarpBitmask:
+				mask := info.Mask
+				for i+8 <= numBytes {
+					v := binary.LittleEndian.Uint64(b[i:])
+					if v&0x8080808080808080 != 0 {
+						break
+					}
+					ok := true
+					for k := 0; k < 8; k++ {
+						bv := byte(v >> (k * 8))
+						if (mask[bv>>6] & (1 << (bv & 63))) == 0 {
+							ok = false
+							break
+						}
+					}
+					if !ok {
+						break
+					}
+					i += 8
+				}
 			}
+			continue
 		}
 
 		// SIMD Warp: skip to next prefix match if we are in search state and not anchored
@@ -481,69 +459,47 @@ func extendedMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 		// Priority 1: CCWarp (SWAR 8-byte skip)
 		if (state&ir.CCWarpFlag) != 0 && i+8 <= numBytes {
 			info := ccWarps[sidx]
-			v := binary.LittleEndian.Uint64(b[i:])
-			match := false
 			switch info.Kernel {
 			case ir.CCWarpSingleRange:
-				if ((v+0x7f7f7f7f7f7f7f7f-info.High)|(v-info.Low))&0x8080808080808080 == 0 {
-					match = true
-				}
-			case ir.CCWarpAnyExceptNL:
-				diff := v ^ 0x0A0A0A0A0A0A0A0A
-				if (diff-0x0101010101010101)&(^diff)&0x8080808080808080 == 0 {
-					match = true
-				}
-			case ir.CCWarpBitmask:
-				if v&0x8080808080808080 == 0 {
-					ok := true
-					for k := 0; k < 8; k++ {
-						bv := byte(v >> (k * 8))
-						if (info.Mask[bv>>6] & (1 << (bv & 63))) == 0 {
-							ok = false
-							break
-						}
-					}
-					match = ok
-				}
-			}
-
-			if match {
-				i += 8
+				low, high := info.Low, info.High
 				for i+8 <= numBytes {
-					v = binary.LittleEndian.Uint64(b[i:])
-					match = false
-					switch info.Kernel {
-					case ir.CCWarpSingleRange:
-						if ((v+0x7f7f7f7f7f7f7f7f-info.High)|(v-info.Low))&0x8080808080808080 == 0 {
-							match = true
-						}
-					case ir.CCWarpAnyExceptNL:
-						diff := v ^ 0x0A0A0A0A0A0A0A0A
-						if (diff-0x0101010101010101)&(^diff)&0x8080808080808080 == 0 {
-							match = true
-						}
-					case ir.CCWarpBitmask:
-						ok := true
-						if v&0x8080808080808080 == 0 {
-							for k := 0; k < 8; k++ {
-								bv := byte(v >> (k * 8))
-								if (info.Mask[bv>>6] & (1 << (bv & 63))) == 0 {
-									ok = false
-									break
-								}
-							}
-						} else {
-							ok = false
-						}
-						match = ok
-					}
-					if !match {
+					v := binary.LittleEndian.Uint64(b[i:])
+					if ((v+0x7f7f7f7f7f7f7f7f-high)|(v-low))&0x8080808080808080 != 0 {
 						break
 					}
 					i += 8
 				}
-				continue
+			case ir.CCWarpAnyExceptNL:
+				for i+8 <= numBytes {
+					v := binary.LittleEndian.Uint64(b[i:])
+					diff := v ^ 0x0A0A0A0A0A0A0A0A
+					if (diff-0x0101010101010101)&(^diff)&0x8080808080808080 != 0 {
+						break
+					}
+					i += 8
+				}
+			case ir.CCWarpBitmask:
+				mask := info.Mask
+				for i+8 <= numBytes {
+					v := binary.LittleEndian.Uint64(b[i:])
+					if v&0x8080808080808080 != 0 {
+						break
+					}
+					ok := true
+					for k := 0; k < 8; k++ {
+						bv := byte(v >> (k * 8))
+						if (mask[bv>>6] & (1 << (bv & 63))) == 0 {
+							ok = false
+							break
+						}
+					}
+					if !ok {
+						break
+					}
+					i += 8
+				}
 			}
+			continue
 		}
 
 		// SIMD Warp: skip to next prefix match if we are in search state and not anchored
@@ -676,66 +632,12 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 		// Priority 1: CCWarp (SWAR 8-byte skip)
 		if (state&ir.CCWarpFlag) != 0 && i+8 <= numBytes {
 			info := ccWarps[sidx]
-			v := binary.LittleEndian.Uint64(b[i:])
-			match := false
 			switch info.Kernel {
 			case ir.CCWarpSingleRange:
-				if ((v+0x7f7f7f7f7f7f7f7f-info.High)|(v-info.Low))&0x8080808080808080 == 0 {
-					match = true
-				}
-			case ir.CCWarpAnyExceptNL:
-				diff := v ^ 0x0A0A0A0A0A0A0A0A
-				if (diff-0x0101010101010101)&(^diff)&0x8080808080808080 == 0 {
-					match = true
-				}
-			case ir.CCWarpBitmask:
-				if v&0x8080808080808080 == 0 {
-					ok := true
-					for k := 0; k < 8; k++ {
-						bv := byte(v >> (k * 8))
-						if (info.Mask[bv>>6] & (1 << (bv & 63))) == 0 {
-							ok = false
-							break
-						}
-					}
-					match = ok
-				}
-			}
-
-			if match {
-				for k := 0; k < 8; k++ {
-					mc.history[i+k] = sidx
-				}
-				i += 8
+				low, high := info.Low, info.High
 				for i+8 <= numBytes {
-					v = binary.LittleEndian.Uint64(b[i:])
-					match = false
-					switch info.Kernel {
-					case ir.CCWarpSingleRange:
-						if ((v+0x7f7f7f7f7f7f7f7f-info.High)|(v-info.Low))&0x8080808080808080 == 0 {
-							match = true
-						}
-					case ir.CCWarpAnyExceptNL:
-						diff := v ^ 0x0A0A0A0A0A0A0A0A
-						if (diff-0x0101010101010101)&(^diff)&0x8080808080808080 == 0 {
-							match = true
-						}
-					case ir.CCWarpBitmask:
-						ok := true
-						if v&0x8080808080808080 == 0 {
-							for k := 0; k < 8; k++ {
-								bv := byte(v >> (k * 8))
-								if (info.Mask[bv>>6] & (1 << (bv & 63))) == 0 {
-									ok = false
-									break
-								}
-							}
-						} else {
-							ok = false
-						}
-						match = ok
-					}
-					if !match {
+					v := binary.LittleEndian.Uint64(b[i:])
+					if ((v+0x7f7f7f7f7f7f7f7f-high)|(v-low))&0x8080808080808080 != 0 {
 						break
 					}
 					for k := 0; k < 8; k++ {
@@ -743,8 +645,43 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 					}
 					i += 8
 				}
-				continue
+			case ir.CCWarpAnyExceptNL:
+				for i+8 <= numBytes {
+					v := binary.LittleEndian.Uint64(b[i:])
+					diff := v ^ 0x0A0A0A0A0A0A0A0A
+					if (diff-0x0101010101010101)&(^diff)&0x8080808080808080 != 0 {
+						break
+					}
+					for k := 0; k < 8; k++ {
+						mc.history[i+k] = sidx
+					}
+					i += 8
+				}
+			case ir.CCWarpBitmask:
+				mask := info.Mask
+				for i+8 <= numBytes {
+					v := binary.LittleEndian.Uint64(b[i:])
+					if v&0x8080808080808080 != 0 {
+						break
+					}
+					ok := true
+					for k := 0; k < 8; k++ {
+						bv := byte(v >> (k * 8))
+						if (mask[bv>>6] & (1 << (bv & 63))) == 0 {
+							ok = false
+							break
+						}
+					}
+					if !ok {
+						break
+					}
+					for k := 0; k < 8; k++ {
+						mc.history[i+k] = sidx
+					}
+					i += 8
+				}
 			}
+			continue
 		}
 
 		// SIMD Warp: skip to next prefix match if we are in search state and not anchored

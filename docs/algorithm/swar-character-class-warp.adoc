@@ -33,23 +33,32 @@ During the DFA optimization phase, a state $S$ is marked for `CCWarp` if it meet
 3. **Determinism**: $C$ matches one of the predefined SWAR kernels (e.g., a single range `[0-9]` or "any-except-newline" for `.*`).
 
 === 3. Runtime: Hybrid Warp Strategy
-Execution loops (e.g., `fastMatchExecLoop`) attempt skipping in the following order of priority:
+Execution loops (e.g., `fastMatchExecLoop`) attempt skipping in the following order of priority. Note that the kernel selection (`switch`) is performed **outside** the inner warp loop to minimize branch mispredictions and maximize instruction throughput.
 
 [source,go]
 ----
 // Priority 1: SWAR Warp (8-byte parallel)
 if state & CCWarpFlag != 0 && i+8 <= len(b) {
-    v := binary.LittleEndian.Uint64(b[i:])
-    if swarKernel(v, stateParams) {
-        i += 8
+    info := ccWarps[sidx]
+    switch info.Kernel {
+    case ir.CCWarpSingleRange:
+        low, high := info.Low, info.High
         for i+8 <= len(b) {
-            v = binary.LittleEndian.Uint64(b[i:])
-            if !swarKernel(v, stateParams) { break }
+            v := binary.LittleEndian.Uint64(b[i:])
+            if ((v + 0x7f... - high) | (v - low)) & 0x80... != 0 { break }
             i += 8
         }
-        continue
+    case ir.CCWarpAnyExceptNL:
+        for i+8 <= len(b) {
+            v := binary.LittleEndian.Uint64(b[i:])
+            if containsNewline(v) { break }
+            i += 8
+        }
+    // ... other kernels
     }
+    continue
 }
+----
 
 // Priority 2: UTF-8 Warp (1-character skip)
 if state & WarpStateFlag != 0 {
@@ -95,4 +104,23 @@ Measured throughput for 256MB input on Intel(R) Xeon(R) CPU @ 2.80GHz (`reproduc
 | **SWAR Range Check**
 | **3.61 GB/s**
 | **8-byte parallel check via uint64. ~8.8x faster than DFA.**
+|===
+
+== Real-World Performance
+Measured via `BenchmarkCCWarp` (Integrated Engine vs Go Standard `regexp`):
+
+|===
+| Pattern | Improvement | Throughput (Re)
+
+| Digits (`[0-9]+`)
+| **1.55x**
+| 98.63 MB/s
+
+| Word (`\w+`)
+| **2.00x**
+| 102.00 MB/s
+
+| Dot (`.*`)
+| **1.32x**
+| 99.50 MB/s
 |===
