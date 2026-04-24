@@ -144,6 +144,20 @@ To minimize environmental noise and provide a flat evaluation of engine performa
     - `PureDFA`: Table-based transition logic (NFA-free).
     - `SIMDWarp`: Prefix skipping (`bytes.Index`).
 
+### 4.2 Benchmark Persistence & History
+To enable long-term performance auditing, the project maintains a historical record of benchmark results.
+- **Latest Baseline**: The most recent results from the `main` branch MUST be stored at `benchmarks/baseline/benchmark-main.txt` on the `gh-pages` branch for CI comparison.
+- **Historical Archive**: Every merge to `main` MUST archive its full benchmark results in `benchmarks/history/benchmark-YYYYMMDD-HHMMSS-SHA.txt` on the `gh-pages` branch.
+- **Relative Auditing**: Performance regressions MUST be evaluated relative to the `Latest Baseline` within the same CI runner environment to cancel out hardware noise.
+
+### 4.3 Continuous Integration & Quality Audit
+The project maintains a multi-layered automated verification suite to ensure that performance optimizations do not compromise correctness or Go compatibility.
+- **Unit Test Mandate**: All packages MUST pass `go test ./...` on every PR. This ensures the structural and behavioral integrity of individual components.
+- **Compatibility Audit**: Every change MUST be evaluated against the standard library using the `Compatibility Audit`. 
+    - **Zero Unexpected Regression**: Any "Unexpected Incompatibility" (mismatched match results or unexpected errors) is treated as a critical regression and MUST be fixed.
+    - **Visibility**: Compatibility rates (Passed %) MUST be reported in the CI summary to provide transparency on the engine's maturity.
+- **Hierarchy of Verification**: Correctness (Unit Tests) > Parity (Compatibility Audit) > Efficiency (Benchmarks). A faster engine that fails correctness or loses parity is considered a failure.
+
 ## 5. Coding Conventions
 - **Explicit Aliasing**:
   - `regexp` -> `goregexp`

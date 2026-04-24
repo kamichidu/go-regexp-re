@@ -20,46 +20,56 @@ jobs:
         with:
           go-version-file: 'go.mod'
 
-      - name: Run Go standard regexp benchmark
+      - name: Run Full Audit Benchmarks
         run: |
           cd internal/benchmark
-          go test -bench . -benchmem -tags goregexp -count 5 | tee ../../benchmark-std.txt
-
-      - name: Run go-regexp-re benchmark
-        run: |
-          cd internal/benchmark
-          go test -bench . -benchmem -tags goregexpre -count 5 | tee ../../benchmark-re.txt
+          # Run both engines in one go for precise comparison
+          go test -bench . -benchmem -tags goregexp,goregexpre -count 5 | tee ../../benchmark-main.txt
 
       - name: Compare results
         run: |
-          go tool benchstat benchmark-std.txt benchmark-re.txt | tee comparison.txt
-          echo "### Benchmark Comparison: Go Standard vs go-regexp-re" >> $GITHUB_STEP_SUMMARY
-          echo "The following comparison uses \`benchstat\` to show the performance difference." >> $GITHUB_STEP_SUMMARY
+          # Use -col to show Standard vs Ours in the summary
+          go tool benchstat -col /GoRegexp/GoRegexpRe benchmark-main.txt | tee comparison.txt
+
+          echo "### 📊 Official Benchmark Audit: Go Standard vs go-regexp-re" >> $GITHUB_STEP_SUMMARY
+          echo "This report shows the official performance metrics of the \`main\` branch." >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
           cat comparison.txt >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
 
-      - name: Store and Push Benchmark Trend
-        uses: benchmark-action/github-action-benchmark@v1
-        with:
-          name: go-regexp-re Benchmark Trend
-          tool: 'go'
-          output-file-path: benchmark-re.txt
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          auto-push: true
-          # Alert when performance drops by 10% (1.1x degradation)
-          alert-threshold: '110%'
-          comment-on-commit: true
-          # Fail the CI if performance regresses to catch issues early
-          fail-on-alert: true
-          gh-pages-branch: gh-pages
-          benchmark-data-dir-path: results/trend
+      - name: Deploy Baseline and History to gh-pages
+        run: |
+          # Checkout gh-pages in a separate directory
+          git clone --depth 1 --branch gh-pages https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git gh-pages
 
+          # 1. Update Latest Baseline
+          mkdir -p gh-pages/benchmarks/baseline
+          cp benchmark-main.txt gh-pages/benchmarks/baseline/benchmark-main.txt
+
+          # 2. Add to History
+          mkdir -p gh-pages/benchmarks/history
+          TIMESTAMP=$(date +'%Y%m%d-%H%M%S')
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          HISTORY_FILE="benchmark-${TIMESTAMP}-${SHORT_SHA}.txt"
+          cp benchmark-main.txt gh-pages/benchmarks/history/${HISTORY_FILE}
+
+          cd gh-pages
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add benchmarks/baseline/benchmark-main.txt
+          git add benchmarks/history/${HISTORY_FILE}
+
+          # Only commit and push if there are changes
+          if ! git diff --cached --quiet; then
+            git commit -m "Update benchmark baseline and history: ${SHORT_SHA}"
+            git push origin gh-pages
+          else
+            echo "No changes in benchmark results."
+          fi
       - name: Upload results as artifacts
         uses: actions/upload-artifact@v4
         with:
           name: benchmark-results
           path: |
-            benchmark-std.txt
-            benchmark-re.txt
+            benchmark-main.txt
             comparison.txt

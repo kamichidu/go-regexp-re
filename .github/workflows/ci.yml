@@ -1,0 +1,51 @@
+name: CI / Quality Audit
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    name: Unit Tests & Compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Run Unit Tests
+        run: |
+          # Run all tests in the repository to ensure basic correctness
+          go test -v ./...
+
+      - name: Run Compatibility Audit
+        run: |
+          # Run specialized compatibility tests and capture the report.
+          # We run this separately to extract the summary report.
+          go test -v ./internal/compat | tee compatibility_report.txt
+
+      - name: Extract and Post Compatibility Report
+        run: |
+          echo "### 🧪 Compatibility Audit Report" >> $GITHUB_STEP_SUMMARY
+          echo "This report shows the compatibility rate of \`go-regexp-re\` against the Go standard library." >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          # Extract the portion between "--- Compatibility Report ---" and "----------------------------"
+          sed -n '/--- Compatibility Report ---/,/----------------------------/p' compatibility_report.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+          # Check for unexpected failures to alert in the summary
+          if grep -q "\[Unexpected Incompatibilities\]" compatibility_report.txt; then
+            echo "⚠️ **Warning: Unexpected incompatibilities detected!** Please review the report." >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Upload Report Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: compatibility-report
+          path: compatibility_report.txt
