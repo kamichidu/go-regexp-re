@@ -40,38 +40,45 @@ jobs:
 
       - name: Relative Performance Analysis
         run: |
-          echo "### 🚀 Relative Performance Analysis (vs Standard Library)" > pr_comment.md
-          echo "This report compares our engine against the standard library, adjusted for CI runner noise." >> pr_comment.md
+          echo "### 📊 Performance Comparison Summary" > pr_comment.md
+          echo "To cancel out CI runner noise, we use the standard library as a reference clock." >> pr_comment.md
 
           if [ -s benchmark-main.txt ]; then
-            echo "#### 1. Baseline (Main) Ratio" >> pr_comment.md
-            echo '```' >> pr_comment.md
-            go tool benchstat -col /GoRegexp/GoRegexpRe benchmark-main.txt | tee comparison-main.txt >> pr_comment.md
-            echo '```' >> pr_comment.md
-          else
-            echo "⚠️ No baseline found on \`gh-pages\`. Skipping baseline ratio." >> pr_comment.md
+            # Filter baseline to only include what we measured in PR
+            grep "BenchmarkSynthetic" benchmark-main.txt > filtered-main.txt || touch filtered-main.txt
           fi
 
-          echo "#### 2. Candidate (PR) Ratio" >> pr_comment.md
-          echo '```' >> pr_comment.md
-          go tool benchstat -col /GoRegexp/GoRegexpRe benchmark-pr.txt | tee comparison-pr.txt >> pr_comment.md
-          echo '```' >> pr_comment.md
-
-          if [ -s benchmark-main.txt ]; then
-            echo "#### 3. Delta Analysis (Main vs PR)" >> pr_comment.md
-            echo "Direct comparison between Main and PR. Look for regressions in \`GoRegexpRe\` that exceed noise in \`GoRegexp\`." >> pr_comment.md
+          if [ -s filtered-main.txt ]; then
+            echo "#### 1. Delta Analysis (Main vs PR)" >> pr_comment.md
+            echo "Comparison of both engines between \`main\` and this \`PR\`. If \`GoRegexpRe\` slows down more than \`GoRegexp\`, it's a regression." >> pr_comment.md
             echo '```' >> pr_comment.md
-            go tool benchstat benchmark-main.txt benchmark-pr.txt | tee delta.txt >> pr_comment.md
+            # Direct comparison shows how each engine's performance changed
+            go tool benchstat filtered-main.txt benchmark-pr.txt | tee delta.txt >> pr_comment.md
             echo '```' >> pr_comment.md
 
-            # Regression Detection Logic:
-            # Look for lines containing GoRegexpRe that show a positive delta of 10% or more with statistical significance (p < 0.05).
-            # benchstat format: "GoRegexpRe/Synthetic/SearchWarp-2  314µs ± 1%  345µs ± 2%  +9.87%  (p=0.012 n=5)"
+            # Regression Detection Logic
             if grep "GoRegexpRe/" delta.txt | grep -E "\+([1-9][0-9]|[1-9][0-9][0-9]+)\.[0-9]+%" | grep -v "~" | grep -q "p="; then
               echo "REGRESSION_DETECTED=true" >> $GITHUB_ENV
             fi
           fi
 
+          echo "#### 2. Speedup Factor (vs Standard Library)" >> pr_comment.md
+          echo "How much faster our engine is compared to \`regexp\` in this PR." >> pr_comment.md
+          echo '<details><summary>Click to view detailed PR ratios</summary>' >> pr_comment.md
+          echo '' >> pr_comment.md
+          echo '```' >> pr_comment.md
+          go tool benchstat -col /GoRegexp/GoRegexpRe benchmark-pr.txt | tee comparison-pr.txt >> pr_comment.md
+          echo '```' >> pr_comment.md
+          echo '</details>' >> pr_comment.md
+
+          if [ -s filtered-main.txt ]; then
+            echo '<details><summary>Click to view detailed Main ratios (Baseline)</summary>' >> pr_comment.md
+            echo '' >> pr_comment.md
+            echo '```' >> pr_comment.md
+            go tool benchstat -col /GoRegexp/GoRegexpRe filtered-main.txt | tee comparison-main.txt >> pr_comment.md
+            echo '```' >> pr_comment.md
+            echo '</details>' >> pr_comment.md
+          fi
       - name: Add Warning to Comment
         if: env.REGRESSION_DETECTED == 'true'
         run: |
