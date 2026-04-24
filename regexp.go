@@ -31,6 +31,7 @@ type Regexp struct {
 	prefix         []byte
 	complete       bool
 	anchorStart    bool
+	hasAnchors     bool
 	prog           *syntax.Prog
 	dfa            *ir.DFA
 	bitParallelDFA *ir.BitParallelDFA
@@ -152,6 +153,7 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 		prefix:         []byte(prefix),
 		complete:       complete,
 		anchorStart:    anchorStart,
+		hasAnchors:     hasAnchors(prog),
 		prog:           prog,
 		dfa:            dfa,
 		bitParallelDFA: bpDFA,
@@ -218,9 +220,9 @@ func (re *Regexp) bindMatchStrategy() {
 	}
 
 	if re.bitParallelDFA != nil {
-		// Mandate 2.4/Strategy 4: Use DFA for anchored patterns WITH long prefix
-		// to benefit from SIMD Warp. Otherwise, BP-DFA is faster.
-		if len(re.prefix) >= 4 {
+		// Mandate 2.4/Strategy 4: Use DFA for anchored patterns OR long prefix
+		// to benefit from SIMD Warp and efficient anchor handling.
+		if re.hasAnchors || len(re.prefix) >= 4 {
 			re.strategy = strategyFast
 		} else {
 			re.strategy = strategyBitParallel
@@ -308,24 +310,37 @@ func (re *Regexp) match(b []byte) (int, int, int) {
 	}
 }
 
+var isWordTable [256]bool
+
+func init() {
+	for i := 0; i < 256; i++ {
+		r := rune(i)
+		isWordTable[i] = 'A' <= r && r <= 'Z' || 'a' <= r && r <= 'z' || '0' <= r && r <= '9' || r == '_'
+	}
+}
+
 func getBPContext(b []byte, i int, numBytes int) int {
 	var op syntax.EmptyOp
 	if i == 0 {
 		op |= syntax.EmptyBeginText | syntax.EmptyBeginLine
-	} else if b[i-1] == '\n' {
-		op |= syntax.EmptyBeginLine
+	} else {
+		if b[i-1] == '\n' {
+			op |= syntax.EmptyBeginLine
+		}
 	}
 	if i == numBytes {
 		op |= syntax.EmptyEndText | syntax.EmptyEndLine
-	} else if b[i] == '\n' {
-		op |= syntax.EmptyEndLine
+	} else {
+		if b[i] == '\n' {
+			op |= syntax.EmptyEndLine
+		}
 	}
 
 	var wordLeft, wordRight bool
-	if i > 0 && b[i-1] < 0x80 && syntax.IsWordChar(rune(b[i-1])) {
+	if i > 0 && b[i-1] < 0x80 && isWordTable[b[i-1]] {
 		wordLeft = true
 	}
-	if i < numBytes && b[i] < 0x80 && syntax.IsWordChar(rune(b[i])) {
+	if i < numBytes && b[i] < 0x80 && isWordTable[b[i]] {
 		wordRight = true
 	}
 	if wordLeft != wordRight {
@@ -340,9 +355,13 @@ func bitParallelMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 	bp := re.bitParallelDFA
 	numBytes := len(b)
 	anchorStart := re.anchorStart
+	hasAnchors := re.hasAnchors
 
 	// Initial context at junction 0
-	ctx := getBPContext(b, 0, numBytes)
+	ctx := 0
+	if hasAnchors {
+		ctx = getBPContext(b, 0, numBytes)
+	}
 	curr := bp.StartMasks[ctx&63]
 
 	// Initial match check for empty string
@@ -351,25 +370,50 @@ func bitParallelMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 	}
 
 	for i := 0; i < numBytes; {
+		// SIMD Warp: skip to next prefix match if we are in search state and not anchored
+		if !anchorStart && len(re.prefix) > 0 && curr == bp.StartMasks[ctx&63] {
+			pos := bytes.Index(b[i:], re.prefix)
+			if pos < 0 {
+				break
+			}
+			if pos > 0 {
+				i += pos
+				// After skip, context might have changed
+				if hasAnchors {
+					ctx = getBPContext(b, i, numBytes)
+					curr = bp.StartMasks[ctx&63]
+				}
+				// Re-check matchesEmpty at new position
+				if bp.MatchesEmpty[ctx&63] {
+					return 0, i, 0
+				}
+			}
+		}
+
 		byteVal := b[i]
 
 		// 1. Character transition: mask by current byte
 		active := curr & bp.CharMasks[byteVal]
 
-		// 2. Successor transition: compute next states using pre-calculated table (branchless)
-		next := bp.SuccessorTable[0][active&0xFF] |
-			bp.SuccessorTable[1][(active>>8)&0xFF] |
-			bp.SuccessorTable[2][(active>>16)&0xFF] |
-			bp.SuccessorTable[3][(active>>24)&0xFF] |
-			bp.SuccessorTable[4][(active>>32)&0xFF] |
-			bp.SuccessorTable[5][(active>>40)&0xFF] |
-			bp.SuccessorTable[6][(active>>48)&0xFF] |
-			bp.SuccessorTable[7][(active>>56)&0xFF]
+		var next uint64
+		if active != 0 {
+			// 2. Successor transition: compute next states using pre-calculated table (branchless)
+			next = bp.SuccessorTable[0][active&0xFF] |
+				bp.SuccessorTable[1][(active>>8)&0xFF] |
+				bp.SuccessorTable[2][(active>>16)&0xFF] |
+				bp.SuccessorTable[3][(active>>24)&0xFF] |
+				bp.SuccessorTable[4][(active>>32)&0xFF] |
+				bp.SuccessorTable[5][(active>>40)&0xFF] |
+				bp.SuccessorTable[6][(active>>48)&0xFF] |
+				bp.SuccessorTable[7][(active>>56)&0xFF]
+		}
 
 		i++
 
 		// 3. Junction verification: filter by context at position i
-		ctx = getBPContext(b, i, numBytes)
+		if hasAnchors {
+			ctx = getBPContext(b, i, numBytes)
+		}
 
 		// 4. Accept check: if any path that matched the byte at i-1
 		// now satisfies the match condition AND the context at i.
@@ -390,8 +434,14 @@ func bitParallelMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 	}
 
 	// Final check for search restart at the end of input
-	if !anchorStart && bp.MatchesEmpty[ctx&63] {
-		return 0, numBytes, 0
+	if !anchorStart {
+		ctx := 0
+		if hasAnchors {
+			ctx = getBPContext(b, numBytes, numBytes)
+		}
+		if bp.MatchesEmpty[ctx&63] {
+			return 0, numBytes, 0
+		}
 	}
 
 	return -1, -1, 0
