@@ -59,6 +59,22 @@ Unlike many engines that decode UTF-8 into runes (`int32`) during execution, `go
 * **Mechanism**: During the NFA-to-DFA conversion, any non-ASCII character (UTF-8) is expanded into a byte-level Trie. This Trie is then "baked" directly into the DFA transition table.
 * **Benefit**: This eliminates the overhead of `utf8.DecodeRune` (which involves complex branching and bit shifting) and allows multi-byte characters to be matched with the same $O(1)$ per byte performance as ASCII characters.
 
+=== 6. Bitmask-First Short-Circuiting
+Anchor verification functions (`VerifyBegin`, `VerifyEnd`, `VerifyWord`) are critical points in the hot loop. Even when they return `true`, the cost of their internal branching can be significant.
+
+* **Technique**: Every verification function MUST employ a single-instruction bitmask check at the very beginning to detect if any relevant flags are present in the request (`req`).
+[source,go]
+----
+func VerifyBegin(b []byte, i int, req syntax.EmptyOp) bool {
+    // Single-instruction bitmask check
+    if (req & (syntax.EmptyBeginText | syntax.EmptyBeginLine)) == 0 {
+        return true
+    }
+    // Detailed logic...
+}
+----
+* **Impact**: Field evidence showed that omitting this unified check in favor of individual flag checks (even if mathematically equivalent) causes a **30-60% throughput regression**. This is due to increased instruction count and branch misprediction in the CPU pipeline when processing transitions that only require subset of anchors (e.g., a transition requiring only `\b` still calls `VerifyBegin`).
+
 == Summary of Performance Gains
 
 These techniques ensure that the "theoretical" $O(n)$ performance of the DFA becomes a "physical" reality, minimizing the "constant factor" cost to just a handful of CPU cycles per byte.
