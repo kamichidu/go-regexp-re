@@ -543,12 +543,39 @@ func (d *DFA) build(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, ma
 			// Always record updates in RecapTable to ensure Pass 2 can trace the path
 			if len(nextRes.Updates) > 0 {
 				uIdx := uint32(len(d.tagUpdates))
+				basePrio := minNextPrio - d.stateMinPriority[i]
 				d.tagUpdates = append(d.tagUpdates, TransitionUpdate{
-					BasePriority: minNextPrio - d.stateMinPriority[i],
+					BasePriority: basePrio,
 					PreUpdates:   nextRes.Updates,
 				})
 				d.tagUpdateIndices[idx] = uIdx
-				rawNext |= TaggedStateFlag
+
+				hasRealTags := basePrio != 0
+				if !hasRealTags {
+					for _, u := range nextRes.Updates {
+						if u.Tags != 0 {
+							hasRealTags = true
+							break
+						}
+					}
+					if !hasRealTags {
+						// Also check if any PreTags in the recap entry would be non-zero
+						for _, u := range nextRes.Updates {
+							for _, eu := range d.stateEntryTags[i] {
+								if eu.NextPriority == u.RelativePriority && eu.Tags != 0 {
+									hasRealTags = true
+									break
+								}
+							}
+							if hasRealTags {
+								break
+							}
+						}
+					}
+				}
+				if hasRealTags {
+					rawNext |= TaggedStateFlag
+				}
 			}
 
 			d.transitions[idx] = rawNext
@@ -663,7 +690,7 @@ func (d *DFA) build(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, ma
 			}
 		}
 
-		if isSingleRange && low != -1 && (high-low) >= 3 { // Only warp for ranges of at least 4 chars
+		if isSingleRange && low != -1 && (high-low) >= 0 { // Allow single character ranges (e.g. a+)
 			splatLow := uint64(low) * 0x0101010101010101
 			splatHigh := uint64(high) * 0x0101010101010101
 			d.ccWarpTable[i] = CCWarpInfo{

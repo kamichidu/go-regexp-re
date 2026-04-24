@@ -298,6 +298,7 @@ func fastMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 		// Priority 1: CCWarp (SWAR 8-byte skip)
 		if (state&ir.CCWarpFlag) != 0 && i+8 <= numBytes {
 			info := ccWarps[sidx]
+			oldI := i
 			switch info.Kernel {
 			case ir.CCWarpSingleRange:
 				low, high := info.Low, info.High
@@ -338,7 +339,23 @@ func fastMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 					i += 8
 				}
 			}
-			continue
+			if i > oldI {
+				if (state & ir.AcceptingStateFlag) != 0 {
+					p := prio + d.MatchPriority(sidx)
+					if p <= bestPriority {
+						bestPriority, bestEnd = p, i
+						if anchorStart {
+							bestStart = 0
+						} else {
+							bestStart = p / ir.SearchRestartPenalty
+						}
+						if d.IsBestMatch(sidx) {
+							return bestStart, bestEnd, bestPriority
+						}
+					}
+				}
+				continue
+			}
 		}
 
 		// SIMD Warp: skip to next prefix match if we are in search state and not anchored
@@ -501,6 +518,7 @@ func extendedMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 		// Priority 1: CCWarp (SWAR 8-byte skip)
 		if (state&ir.CCWarpFlag) != 0 && i+8 <= numBytes {
 			info := ccWarps[sidx]
+			oldI := i
 			switch info.Kernel {
 			case ir.CCWarpSingleRange:
 				low, high := info.Low, info.High
@@ -541,7 +559,23 @@ func extendedMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 					i += 8
 				}
 			}
-			continue
+			if i > oldI {
+				if (state & ir.AcceptingStateFlag) != 0 {
+					p := prio + d.MatchPriority(sidx)
+					if p <= bestPriority {
+						bestPriority, bestEnd = p, i
+						if anchorStart {
+							bestStart = 0
+						} else {
+							bestStart = p / ir.SearchRestartPenalty
+						}
+						if d.IsBestMatch(sidx) {
+							return bestStart, bestEnd, bestPriority
+						}
+					}
+				}
+				continue
+			}
 		}
 
 		// SIMD Warp: skip to next prefix match if we are in search state and not anchored
@@ -712,6 +746,7 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 		// Priority 1: CCWarp (SWAR 8-byte skip)
 		if (state&ir.CCWarpFlag) != 0 && i+8 <= numBytes {
 			info := ccWarps[sidx]
+			oldI := i
 			switch info.Kernel {
 			case ir.CCWarpSingleRange:
 				low, high := info.Low, info.High
@@ -761,7 +796,24 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 					i += 8
 				}
 			}
-			continue
+			if i > oldI {
+				if (state & ir.AcceptingStateFlag) != 0 {
+					p := prio + d.MatchPriority(sidx)
+					if p <= bestPriority {
+						mc.history[i] = sidx
+						bestPriority, bestEnd = p, i
+						if anchorStart {
+							bestStart = 0
+						} else {
+							bestStart = p / ir.SearchRestartPenalty
+						}
+						if d.IsBestMatch(sidx) {
+							return bestStart, bestEnd, bestPriority
+						}
+					}
+				}
+				continue
+			}
 		}
 
 		// SIMD Warp: skip to next prefix match if we are in search state and not anchored
