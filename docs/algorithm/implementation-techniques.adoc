@@ -81,6 +81,12 @@ func VerifyBegin(b []byte, i int, req syntax.EmptyOp) bool {
 ----
 * **Impact**: Field evidence showed that omitting this unified check in favor of individual flag checks (even if mathematically equivalent) causes a **30-60% throughput regression**. This is due to increased instruction count and branch misprediction in the CPU pipeline when processing transitions that only require subset of anchors (e.g., a transition requiring only `\b` still calls `VerifyBegin`).
 
+=== 7. Intelligent SWAR Pre-filtering
+While `bytes.Index` provides SIMD-accelerated prefix scanning, many regex patterns (e.g., `[0-9]+`) do not have a constant literal prefix.
+* **Technique**: The engine extracts the "Start Set" (all possible first bytes) of the pattern. If this set is sufficiently small (< 64 bytes), a specialized **SearchWarp** is generated.
+* **Mechanism**: At the start of a match attempt, if the current DFA state is the `searchState`, the engine uses SWAR kernels to skip blocks of 8 bytes that do not contain any byte from the Start Set.
+* **Safety**: This technique is automatically disabled for broad patterns (like `.*`) where the Start Set is too large, avoiding unnecessary overhead.
+
 == Summary of Performance Gains
 
 These techniques ensure that the "theoretical" $O(n)$ performance of the DFA becomes a "physical" reality, minimizing the "constant factor" cost to just a handful of CPU cycles per byte.

@@ -74,8 +74,8 @@ To minimize compilation overhead, the engine MUST use an **Architectural Shortcu
 
 
 ### 2.10 Prefix-Skip Optimization (SIMD Acceleration)
-- **Mandatory Prefix Extraction**: During compilation, the longest constant prefix is extracted to ensure `LiteralPrefix()` compatibility.
-- **SIMD-Accelerated Skipping**: All execution loops MUST use `bytes.Index` to rapidly skip non-matching segments (SIMD Warp).
+- **Mandatory Prefix/Start-Set Extraction**: During compilation, the engine MUST extract both the longest constant prefix (for `bytes.Index`) and the set of possible first bytes (Start Set).
+- **SIMD/SWAR-Accelerated Skipping**: All execution loops MUST use `bytes.Index` to rapidly skip non-matching segments (SIMD Warp). If no constant prefix exists, the engine MUST employ a **SWAR Pre-filter** to skip bytes that cannot start a match, provided the Start Set is specific enough (typically < 64 unique bytes).
 
 ### 2.11 Pure Go (No CGO)
 - **Zero Overhead**: Native Go only. CGO is strictly prohibited.
