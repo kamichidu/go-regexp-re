@@ -40,45 +40,40 @@ jobs:
 
       - name: Relative Performance Analysis
         run: |
-          echo "### 📊 Performance Comparison Summary" > pr_comment.md
-          echo "To cancel out CI runner noise, we use the standard library as a reference clock." >> pr_comment.md
+          echo "### 📊 Relative Speedup Analysis" > pr_comment.md
+          echo "This report compares the **Speedup Factor** (Re vs Std) between \`main\` and this \`PR\`. By normalizing against the standard library in each run, we eliminate VM noise." >> pr_comment.md
 
+          # Convert raw benchmarks to relative ratios (Re/Std)
           if [ -s benchmark-main.txt ]; then
-            # Filter baseline to only include what we measured in PR
-            grep "BenchmarkSynthetic" benchmark-main.txt > filtered-main.txt || touch filtered-main.txt
+            ./_scripts/bench-ratio.sh < benchmark-main.txt > main-ratio.txt
           fi
+          ./_scripts/bench-ratio.sh < benchmark-pr.txt > pr-ratio.txt
 
-          if [ -s filtered-main.txt ]; then
-            echo "#### 1. Delta Analysis (Main vs PR)" >> pr_comment.md
-            echo "Comparison of both engines between \`main\` and this \`PR\`. If \`GoRegexpRe\` slows down more than \`GoRegexp\`, it's a regression." >> pr_comment.md
+          if [ -s main-ratio.txt ]; then
+            echo "#### 1. Speedup Factor Delta (Main vs PR)" >> pr_comment.md
+            echo "Lower percentage means the PR is **faster relative to standard library** than main was." >> pr_comment.md
             echo '```' >> pr_comment.md
-            # Direct comparison shows how each engine's performance changed
-            go tool benchstat filtered-main.txt benchmark-pr.txt | tee delta.txt >> pr_comment.md
+            # Comparison of ratios. benchstat will show the % change in the ratio.
+            go tool benchstat main-ratio.txt pr-ratio.txt | tee delta.txt >> pr_comment.md
             echo '```' >> pr_comment.md
 
-            # Regression Detection Logic
-            if grep "GoRegexpRe/" delta.txt | grep -E "\+([1-9][0-9]|[1-9][0-9][0-9]+)\.[0-9]+%" | grep -v "~" | grep -q "p="; then
+            # Regression Detection
+            # In ratio-mode, a positive delta (e.g. +10%) means the RelativeTime increased, which is a regression.
+            if grep "BenchmarkSynthetic" delta.txt | grep -E "\+([1-9][0-9]|[1-9][0-9][0-9]+)\.[0-9]+%" | grep -v "~" | grep -q "p="; then
               echo "REGRESSION_DETECTED=true" >> $GITHUB_ENV
             fi
           fi
 
-          echo "#### 2. Speedup Factor (vs Standard Library)" >> pr_comment.md
-          echo "How much faster our engine is compared to \`regexp\` in this PR." >> pr_comment.md
-          echo '<details><summary>Click to view detailed PR ratios</summary>' >> pr_comment.md
+          echo "#### 2. PR Current Ratios (Standard vs Re)" >> pr_comment.md
+          echo '<details><summary>Click to view current speedup details</summary>' >> pr_comment.md
           echo '' >> pr_comment.md
           echo '```' >> pr_comment.md
-          go tool benchstat -col /GoRegexp/GoRegexpRe benchmark-pr.txt | tee comparison-pr.txt >> pr_comment.md
+          # Show the actual X-times faster table for the current PR
+          # We use the original names here for the column view
+          go tool benchstat -col /GoRegexp/GoRegexpRe benchmark-pr.txt >> pr_comment.md
           echo '```' >> pr_comment.md
           echo '</details>' >> pr_comment.md
 
-          if [ -s filtered-main.txt ]; then
-            echo '<details><summary>Click to view detailed Main ratios (Baseline)</summary>' >> pr_comment.md
-            echo '' >> pr_comment.md
-            echo '```' >> pr_comment.md
-            go tool benchstat -col /GoRegexp/GoRegexpRe filtered-main.txt | tee comparison-main.txt >> pr_comment.md
-            echo '```' >> pr_comment.md
-            echo '</details>' >> pr_comment.md
-          fi
       - name: Add Warning to Comment
         if: env.REGRESSION_DETECTED == 'true'
         run: |
@@ -110,4 +105,6 @@ jobs:
             benchmark-pr.txt
             comparison-main.txt
             comparison-pr.txt
+            main-ratio.txt
+            pr-ratio.txt
             delta.txt
