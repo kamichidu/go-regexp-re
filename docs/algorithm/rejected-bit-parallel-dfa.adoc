@@ -1,0 +1,39 @@
+= Rejected Idea: Bit-Parallel DFA (BP-DFA)
+:sectnums:
+
+== Summary
+
+A bit-parallel DFA (BP-DFA) based on the Glushkov construction was implemented to provide a memory-efficient alternative for small patterns (up to 64 states). However, performance benchmarks and profiling revealed that the pure table-based DFA is significantly faster in most scenarios on the Go `gc` compiler. Consequently, BP-DFA has been removed from the engine's core execution paths.
+
+== Investigation Goal
+
+The goal was to provide an "Express Pass" for small, simple patterns (e.g., ASCII-only, no dots) that could operate entirely within CPU registers using bitwise operations, bypassing heavy DFA construction and reducing memory footprint.
+
+== Technical Reasons for Rejection
+
+The decision to discard BP-DFA was based on three primary factors:
+
+=== 1. Memory Access vs. Computation Overhead
+In the current Go implementation, updating the 64-bit state vector requires splitting the vector into 8-bit chunks and performing **8 separate table lookups** (`SuccessorTable[8][256]`) to resolve the next state. In contrast, the standard **Pure DFA** requires only **1 table lookup** per byte. The overhead of multiple lookups and bitwise OR-ing in BP-DFA negates any advantage gained from register-resident states.
+
+=== 2. Dynamic Anchor Handling
+The BP-DFA implementation required calculating the matching context (anchors like `\b`, `^`, `$`) for every byte at runtime using `getBPContext`. This dynamic check introduced a massive bottleneck.
+The **Pure DFA** handles anchors by baking the requirements directly into the state transition table during compilation, resulting in zero overhead at match time.
+
+=== 3. Throughput Degradation
+Benchmarks showed significant regressions in patterns involving anchors and alternations when BP-DFA was selected:
+
+| Scenario | Pure DFA (Base) | BP-DFA (Initial) | BP-DFA (Optimized) |
+| :--- | :--- | :--- | :--- |
+| Large Alternation (Count=10) | 63.2 ns/op | 245.9 ns/op | 75.6 ns/op |
+| Word Boundaries (`\bGET\b`) | 228.8 ns/op | 494.8 ns/op | 275.6 ns/op |
+
+Even with aggressive optimizations (skipping context checks for anchor-free patterns and SIMD prefix skipping), BP-DFA struggled to match the performance of the highly optimized Pure DFA loop.
+
+== Documentation Transition
+
+The original design document for Bit-Parallel DFA has been archived or removed. This document serves as the final record of its rejection.
+
+== Conclusion
+
+While Bit-Parallel DFA is a powerful technique in environments where SIMD intrinsics are available (allowing for 16+ bytes to be processed in parallel), the "Pure Go" mandate and the efficiency of the engine's table-based DFA make it a redundant and less performant option for this project.

@@ -344,19 +344,19 @@ func TestSpecializationPath(t *testing.T) {
 
 	tests := []struct {
 		pattern string
-		want    string // "literal", "bit-parallel", "dfa", "dfa-anchor"
+		want    string // "literal", "dfa", "dfa-anchor"
 	}{
 		{"Tokyo", "literal"},
 		{"^abc$", "literal"},
 		{"abc$", "literal"},
 		{"^abc", "literal"},
-		{"a|b|c", "bit-parallel"},
-		{"[a-z]", "bit-parallel"},
-		{"a*", "bit-parallel"},
-		{"(a|b)*", "bit-parallel"},
+		{"a|b|c", "dfa"},
+		{"[a-z]", "dfa"},
+		{"a*", "dfa"},
+		{"(a|b)*", "dfa"},
 		{patternDFA, "dfa"},
-		{"^a|b$", "bit-parallel"},
-		{"\\bword\\b", "bit-parallel"},
+		{"^a|b$", "dfa-anchor"},
+		{"\\bword\\b", "dfa-anchor"},
 	}
 
 	for _, tt := range tests {
@@ -370,8 +370,6 @@ func TestSpecializationPath(t *testing.T) {
 		switch re.strategy {
 		case strategyLiteral:
 			got = "literal"
-		case strategyBitParallel:
-			got = "bit-parallel"
 		case strategyFast:
 			got = "dfa"
 		case strategyExtended:

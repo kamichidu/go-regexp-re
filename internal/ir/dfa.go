@@ -817,34 +817,6 @@ func NewDFAWithMemoryLimit(ctx context.Context, s *syntax.Regexp, prog *syntax.P
 	return d, nil
 }
 
-type BitParallelDFA struct {
-	CharMasks         [256]uint64
-	AnchorMasks       [6]uint64
-	ContextMasks      [64]uint64
-	SuccessorTable    [8][256]uint64
-	MatchMask         uint64
-	MatchMasks        [64]uint64
-	StartMasks        [64]uint64
-	CaptureMasks      [128]uint64
-	IsNonGreedy       bool
-	AltMatchMasks     uint64
-	EpsilonMasks      [64]uint64
-	PreEpsilonMasks   [64]uint64
-	ContextEpsMask    [64]uint64
-	ReachableToMatch  uint64
-	ReverseSuccessors [64]uint64
-	IsGreedy          bool
-}
-
-func (bp *BitParallelDFA) HasAnchors() bool {
-	for _, m := range bp.AnchorMasks {
-		if m != 0 {
-			return true
-		}
-	}
-	return false
-}
-func NewBitParallelDFA(prog *syntax.Prog) *BitParallelDFA { return nil }
 func (d *DFA) CanReachPriority(fromState, toState uint32, context syntax.EmptyOp, p_in, p_out int32) bool {
 	return false
 }

@@ -19,7 +19,6 @@ type matchStrategy uint8
 const (
 	strategyNone matchStrategy = iota
 	strategyLiteral
-	strategyBitParallel
 	strategyFast
 	strategyExtended
 )
@@ -30,6 +29,7 @@ type Regexp struct {
 	prefix         []byte
 	complete       bool
 	anchorStart    bool
+	hasAnchors     bool
 	prog           *syntax.Prog
 	dfa            *ir.DFA
 	literalMatcher *ir.LiteralMatcher
@@ -86,7 +86,10 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 	var searchState, matchState uint32
 	var uIndices []uint32
 	var uPrioDeltas []int32
+
 	if literalMatcher == nil {
+		// Always build the heavy DFA to support correct FindSubmatchIndex results
+		// and capture groups, unless forced otherwise.
 		dfa, err = ir.NewDFAWithMemoryLimit(ctx, s, prog, opts.MaxMemory, true)
 		if err != nil {
 			return nil, err
@@ -115,6 +118,7 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 		prefix:         []byte(prefix),
 		complete:       complete,
 		anchorStart:    anchorStart,
+		hasAnchors:     hasAnchors(prog),
 		prog:           prog,
 		dfa:            dfa,
 		literalMatcher: literalMatcher,
@@ -164,15 +168,18 @@ func calculateLiteralPrefix(re *syntax.Regexp) (string, bool) {
 	}
 }
 
+func hasAnchors(prog *syntax.Prog) bool {
+	for _, inst := range prog.Inst {
+		if inst.Op == syntax.InstEmptyWidth {
+			return true
+		}
+	}
+	return false
+}
+
 func (re *Regexp) bindMatchStrategy() {
 	if re.literalMatcher != nil {
 		re.strategy = strategyLiteral
-		return
-	}
-
-	// Threshold for bit-parallel is 62 instructions (Mandate 2.8)
-	if len(re.prog.Inst) <= 62 {
-		re.strategy = strategyBitParallel
 		return
 	}
 
@@ -222,8 +229,8 @@ func (re *Regexp) FindSubmatchIndex(b []byte) []int {
 	}
 
 	// Must return a copy because mc is returned to Pool
-	res := make([]int, len(regs))
-	copy(res, regs)
+	res := make([]int, len(mc.regs))
+	copy(res, mc.regs)
 	return res
 }
 
@@ -235,7 +242,7 @@ func (re *Regexp) findSubmatchIndexInternal(b []byte, mc *matchContext, regs []i
 			return -1, -1, 0
 		}
 		return res[0], res[1], 0
-	case strategyBitParallel, strategyFast, strategyExtended:
+	case strategyFast, strategyExtended:
 		if mc == nil {
 			return re.match(b)
 		}
@@ -246,10 +253,12 @@ func (re *Regexp) findSubmatchIndexInternal(b []byte, mc *matchContext, regs []i
 }
 
 func (re *Regexp) match(b []byte) (int, int, int) {
-	if re.strategy == strategyExtended {
+	switch re.strategy {
+	case strategyExtended:
 		return extendedMatchExecLoop(re, b)
+	default:
+		return fastMatchExecLoop(re, b)
 	}
-	return fastMatchExecLoop(re, b)
 }
 
 func fastMatchExecLoop(re *Regexp, b []byte) (int, int, int) {

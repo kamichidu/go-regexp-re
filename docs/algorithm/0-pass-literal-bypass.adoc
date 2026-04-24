@@ -27,4 +27,5 @@ To minimize the memory footprint and compilation time for simple patterns, the e
 
 * **Zero State Transition Cost**: No need to access DFA transition tables.
 * **Maximum SIMD Utilization**: Leverages Go's standard library, which utilizes CPU-specific instructions like `PCMPESTRI`.
+* **Zero-Allocation Execution**: By utilizing a pre-allocated results slice, the `LiteralMatcher` performs submatch extraction without any heap allocations.
 * **Submatch Extraction Speed**: Eliminates the overhead of loop-based tag recording by replacing it with simple addition.

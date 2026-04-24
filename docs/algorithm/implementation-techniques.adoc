@@ -12,22 +12,33 @@ The transition table stores "Packed State IDs" as 32-bit unsigned integers. Thes
 [source]
 ----
  32-bit Packed State ID (Canonical Layout):
- [31] [30] [29] [28-22] [21-0]
-  |    |    |      |      |
-  |    |    |      |      +--- State Index (up to 4,194,304 states)
-  |    |    |      |
-  |    |    |      +---------- Anchor Mask (EmptyOp requirements)
+ [31] [30] [29] [28] [27-22] [21-0]
+  |    |    |    |      |      |
+  |    |    |    |      |      +--- State Index (up to 4,194,304 states)
+  |    |    |    |      |
+  |    |    |    |      +---------- Anchor Mask (EmptyOp requirements)
+  |    |    |    |
+  |    |    |    +----------------- AcceptingStateFlag (Match found)
   |    |    |
-  |    |    +----------------- WarpStateFlag (Lead-byte jump)
+  |    |    +---------------------- WarpStateFlag (Lead-byte jump)
   |    |
-  |    +---------------------- AnchorVerifyFlag (Context check needed)
+  |    +--------------------------- AnchorVerifyFlag (Context check needed)
   |
-  +--------------------------- TaggedStateFlag (Priority/Tag updates)
-----
+  +-------------------------------- TaggedStateFlag (Priority/Tag updates)
 
 == Key Techniques
 
-=== 1. Early Exit Optimization (Strict Greedy Finality)
+=== 1. In-State Acceptance Detection
+Traditionally, a DFA engine lookups a separate boolean array to determine if a state is "accepting."
+* **Technique**: `go-regexp-re` embeds the `AcceptingStateFlag` (Bit 28) directly into the state ID.
+* **Benefit**: This allows the execution loop to detect matches using a bitwise AND on the existing state register, eliminating a memory load and a potential cache miss per byte.
+
+=== 2. Reusable Register Context (matchContext Pool)
+Submatch extraction requires a results slice (`[]int`). Allocating this on every match is a major performance bottleneck.
+* **Technique**: The engine uses a `sync.Pool` of `matchContext` objects. Each context contains a pre-allocated `regsBuf [32]int` (supporting up to 15 subexpressions) and can dynamically grow for larger patterns.
+* **Benefit**: This eliminates per-match heap allocations for most patterns, reducing GC pressure and stabilizing performance in high-throughput environments.
+
+=== 3. Early Exit Optimization (Strict Greedy Finality)
 To minimize redundant scanning, the engine employs an early-exit strategy called `IsBestMatch`. However, to remain compatible with Go's greedy matching rules (e.g., `a*` matching `aaa` rather than an empty string), this exit must be strictly guarded.
 
 *   **Logic**: A state is marked as having a "Best Match" if and only if:
@@ -35,7 +46,7 @@ To minimize redundant scanning, the engine employs an early-exit strategy called
 *   **Significance**: `MinPriority` represents the absolute highest priority (lowest numerical value) that can be reached from the current state through any future transitions. If the current match already meets this threshold, no further scanning can improve the result, allowing for a safe $O(1)$ exit.
 *   **Greedy Preservation**: In a loop like `a*`, the exit transition typically has a lower priority (higher value) than the loop transition. Therefore, `IsBestMatch` remains false until the loop can no longer be taken, ensuring the longest possible match.
 
-=== 2. Hot-Loop Monomorphization (Manual Inlining)
+=== 4. Hot-Loop Monomorphization (Manual Inlining)
 The engine provides three physically distinct execution loops: `bitParallelExecLoop`, `fastExecLoop`, and `extendedExecLoop`.
 * **Problem**: Go generics (introduced in 1.18) can introduce runtime dictionary lookups for function shapes (`GCShape`), and standard polymorphism can prevent aggressive constant folding.
 * **Solution**: By manually duplicating and specializing these loops (Monomorphization), the engine ensures that the Go compiler can:
@@ -43,15 +54,26 @@ The engine provides three physically distinct execution loops: `bitParallelExecL
   - Apply aggressive register allocation specific to the complexity of the loop.
   - Avoid any runtime indirection within the most critical performance path.
 
-=== 2. Byte-Level UTF-8 Trie Expansion
+=== 5. Byte-Level UTF-8 Trie Expansion
 Unlike many engines that decode UTF-8 into runes (`int32`) during execution, `go-regexp-re` processes raw bytes.
 * **Mechanism**: During the NFA-to-DFA conversion, any non-ASCII character (UTF-8) is expanded into a byte-level Trie. This Trie is then "baked" directly into the DFA transition table.
 * **Benefit**: This eliminates the overhead of `utf8.DecodeRune` (which involves complex branching and bit shifting) and allows multi-byte characters to be matched with the same $O(1)$ per byte performance as ASCII characters.
 
-=== 3. Branchless State ID Packing
-The state ID in the transition table is not just a pointer to a state; it's a packed 32-bit integer carrying metadata (e.g., `TaggedStateFlag`, `AnchorVerifyFlag`).
-* **Design**: By using Bit 31 and Bit 30 as flags, the engine can check for "special handling" (like tag updates or anchor verification) using a single signed integer comparison (`raw < 0` for Tagged) or a bitwise AND.
-* **Impact**: This ensures that the "Common Path" (simple transitions) remains perfectly straight and branch-predictor friendly.
+=== 6. Bitmask-First Short-Circuiting
+Anchor verification functions (`VerifyBegin`, `VerifyEnd`, `VerifyWord`) are critical points in the hot loop. Even when they return `true`, the cost of their internal branching can be significant.
+
+* **Technique**: Every verification function MUST employ a single-instruction bitmask check at the very beginning to detect if any relevant flags are present in the request (`req`).
+[source,go]
+----
+func VerifyBegin(b []byte, i int, req syntax.EmptyOp) bool {
+    // Single-instruction bitmask check
+    if (req & (syntax.EmptyBeginText | syntax.EmptyBeginLine)) == 0 {
+        return true
+    }
+    // Detailed logic...
+}
+----
+* **Impact**: Field evidence showed that omitting this unified check in favor of individual flag checks (even if mathematically equivalent) causes a **30-60% throughput regression**. This is due to increased instruction count and branch misprediction in the CPU pipeline when processing transitions that only require subset of anchors (e.g., a transition requiring only `\b` still calls `VerifyBegin`).
 
 == Summary of Performance Gains
 
