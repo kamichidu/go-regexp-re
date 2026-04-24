@@ -25,6 +25,10 @@ func BenchmarkCapturing(b *testing.B) {
 	testsuite.BenchmarkCapturing(b)
 }
 
+func BenchmarkSynthetic(b *testing.B) {
+	testsuite.BenchmarkSynthetic(b)
+}
+
 func BenchmarkNFAWorstCase(b *testing.B) {
 	testsuite.BenchmarkNFAWorstCase(b)
 }

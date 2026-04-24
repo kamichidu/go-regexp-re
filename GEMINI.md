@@ -131,6 +131,19 @@ Junction verification for anchors (`\b`, `^`, `$`) MUST NOT employ `utf8.DecodeR
 - **Memory Accumulation Prevention**: Dispose of compiled `Regexp` objects promptly during mass testing.
 - **100% DFA Validation**: DFA match boundaries MUST strictly match the standard library's boundaries except where documented (e.g., Dot behavior).
 
+### 4.1 Throughput-Oriented Benchmarking
+To minimize environmental noise and provide a flat evaluation of engine performance, the project employs a **Throughput-Oriented Benchmarking** strategy.
+- **Physical Metrics**: Benchmarks MUST use `b.SetBytes(int64(len(input)))` to report throughput in `MB/s` or `GB/s`.
+- **Steady-State Measurement**: Inputs for benchmarks SHOULD be scaled to at least **1MB** (using `scaleInput` or large corpora) to bury function call overhead and OS noise.
+- **Feature-Categorized Scan**: Benchmarks derived from external corpora (like `re2-search.txt`) MUST be categorized by feature (Literal, CharClass, Alternation, Anchored, Complex) to ensure a balanced evaluation across the engine's entire capability matrix.
+- **Noise-Interleaved Scaling**: To prevent unrealistic branch prediction saturation and cache-hit bias, scaled payloads MUST interleave target test cases with a representative noise block (typically ~1KB).
+- **Full-Scan Mandate**: To measure the engine's "cruising speed," benchmarks SHOULD use anchored patterns (e.g., `^...$`) or place matches at the end of the input to force a full scan of the payload.
+- **Layered Evaluation**: Utilize `BenchmarkSynthetic` to isolate and evaluate specific optimization layers:
+    - `SearchWarp`: Match start position searching (Pre-filter).
+    - `CCWarp`: Character class scanning (SWAR).
+    - `PureDFA`: Table-based transition logic (NFA-free).
+    - `SIMDWarp`: Prefix skipping (`bytes.Index`).
+
 ## 5. Coding Conventions
 - **Explicit Aliasing**:
   - `regexp` -> `goregexp`

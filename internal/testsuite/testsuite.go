@@ -584,39 +584,104 @@ func runOnEngines(b *testing.B, f func(b *testing.B, engine Engine)) {
 	}
 }
 
-// BenchmarkStandardSuite benchmarks engines using re2-search.txt.
+func scaleInput(s string, targetSize int) string {
+	if len(s) == 0 || len(s) >= targetSize {
+		return s
+	}
+	n := (targetSize + len(s) - 1) / len(s)
+	return strings.Repeat(s, n)
+}
+
+func categorize(pattern string) string {
+	hasSpecial := func(s string, chars string) bool {
+		return strings.ContainsAny(s, chars)
+	}
+
+	if hasSpecial(pattern, `^$\b`) {
+		return "Anchored"
+	}
+	if hasSpecial(pattern, `|`) {
+		return "Alternation"
+	}
+	if hasSpecial(pattern, `[]`) {
+		return "CharClass"
+	}
+	if hasSpecial(pattern, `*+?()`) {
+		return "Complex"
+	}
+	if !hasSpecial(pattern, `.\+*?()|[]{}^$\`) {
+		return "Literal"
+	}
+	return "Other"
+}
+
+func scaleWithNoise(base string, targetSize int) string {
+	if len(base) == 0 {
+		base = " "
+	}
+	// Generate ~1KB of noise to interleave
+	noise := "The quick brown fox jumps over the lazy dog. 1234567890!@#$%^&*() "
+	noise = scaleInput(noise, 1024)
+
+	var buf strings.Builder
+	for buf.Len() < targetSize {
+		buf.WriteString(base)
+		if buf.Len() < targetSize {
+			buf.WriteString(noise)
+		}
+	}
+	return buf.String()[:targetSize]
+}
+
+// BenchmarkStandardSuite benchmarks engines using re2-search.txt categorized by feature.
 func BenchmarkStandardSuite(b *testing.B) {
 	ensureRE2SearchSet()
 	if re2SearchSet == nil {
 		b.Skip("re2-search.txt not loaded")
 	}
 
-	// Sample cases: pick one case from each of the first 20 groups.
-	var cases []struct {
-		Regexp string
-		Text   string
-	}
+	// Select representative patterns for each category
+	selected := make(map[string]RE2TestGroup)
 	for _, group := range re2SearchSet.Groups {
-		if len(cases) >= 20 {
-			break
-		}
-		if len(group.Tests) > 0 {
-			cases = append(cases, struct {
-				Regexp string
-				Text   string
-			}{group.Regexp, group.Tests[0].Text})
+		cat := categorize(group.Regexp)
+		// Pick the group with the most tests to ensure diverse input
+		if current, ok := selected[cat]; !ok || len(group.Tests) > len(current.Tests) {
+			selected[cat] = group
 		}
 	}
 
 	runOnEngines(b, func(b *testing.B, engine Engine) {
 		defer engine.ClearCache()
-		for i, tc := range cases {
-			re, err := engine.getMatcher(tc.Regexp)
+		// Sort categories for stable output
+		var cats []string
+		for cat := range selected {
+			cats = append(cats, cat)
+		}
+		sort.Strings(cats)
+
+		for _, cat := range cats {
+			group := selected[cat]
+			re, err := engine.getMatcher(group.Regexp)
 			if err != nil {
 				continue
 			}
-			b.Run(fmt.Sprintf("Case%d", i), func(b *testing.B) {
-				input := tc.Text
+
+			// Construct diverse payload: concat all test texts
+			var baseBuf strings.Builder
+			for _, tc := range group.Tests {
+				baseBuf.WriteString(tc.Text)
+				baseBuf.WriteString(" ")
+			}
+			input := scaleWithNoise(baseBuf.String(), 1*1024*1024)
+
+			// Use a shorter name for the sub-benchmark
+			displayName := group.Regexp
+			if len(displayName) > 30 {
+				displayName = displayName[:27] + "..."
+			}
+
+			b.Run(fmt.Sprintf("%s/%s", cat, displayName), func(b *testing.B) {
+				b.SetBytes(int64(len(input)))
 				b.ResetTimer()
 				for i := 0; i < b.N; i++ {
 					re.MatchString(input)
@@ -643,7 +708,11 @@ func BenchmarkLargeAlternation(b *testing.B) {
 				}
 			}
 			pattern := strings.Join(patterns, "|")
-			payload := fmt.Sprintf("My postal code is %s.", patterns[count-1])
+
+			// Payload: 1MB of noise with the target postal code at the end
+			target := patterns[count-1]
+			noise := scaleInput("The quick brown fox jumps over the lazy dog. ", 1*1024*1024)
+			payload := noise + "My postal code is " + target + "."
 
 			var re Matcher
 			var compileErr error
@@ -655,6 +724,7 @@ func BenchmarkLargeAlternation(b *testing.B) {
 					b.Logf("Compile failed: %v", compileErr)
 					b.SkipNow()
 				}
+				b.SetBytes(int64(len(payload)))
 				b.ResetTimer()
 				for i := 0; i < b.N; i++ {
 					re.MatchString(payload)
@@ -677,6 +747,9 @@ func BenchmarkLiteralScan(b *testing.B) {
 		b.Skip("sherlock corpus not loaded")
 	}
 
+	// Scale Sherlock to at least 1MB to ensure stable throughput
+	input := scaleInput(sherlock, 1*1024*1024)
+
 	patterns := []string{
 		"Sherlock",                           // Simple
 		"The Adventure of the Speckled Band", // Long
@@ -690,9 +763,72 @@ func BenchmarkLiteralScan(b *testing.B) {
 				continue
 			}
 			b.Run(fmt.Sprintf("pat=%s", pattern), func(b *testing.B) {
+				b.SetBytes(int64(len(input)))
 				b.ResetTimer()
 				for i := 0; i < b.N; i++ {
-					re.MatchString(sherlock)
+					re.MatchString(input)
+				}
+			})
+		}
+	})
+}
+
+// BenchmarkSynthetic benchmarks specific optimization layers with synthetic data.
+func BenchmarkSynthetic(b *testing.B) {
+	scenarios := []struct {
+		name    string
+		pattern string
+		gen     func(int) string
+	}{
+		{
+			"SearchWarp",
+			`[0-9]+`,
+			func(n int) string {
+				// 1MB of alpha noise with digits at the end
+				noise := strings.Repeat("abcdefghijklmnopqrstuvwxyz", n/26)
+				return noise + "1234567890"
+			},
+		},
+		{
+			"CCWarp",
+			`^[a-z]+$`,
+			func(n int) string {
+				// 1MB of continuous lowercase
+				return strings.Repeat("abcdefghijklmnopqrstuvwxyz", n/26)
+			},
+		},
+		{
+			"PureDFA",
+			`^(ab|cd|ef|gh|ij|kl)+$`,
+			func(n int) string {
+				// 1MB of alternating pairs
+				return strings.Repeat("abcdefghijkl", n/12)
+			},
+		},
+		{
+			"SIMDWarp",
+			`CriticalError`,
+			func(n int) string {
+				// 1MB of noise with the prefix at the end
+				noise := strings.Repeat("Info: processing request... ", n/27)
+				return noise + "CriticalError"
+			},
+		},
+	}
+
+	runOnEngines(b, func(b *testing.B, engine Engine) {
+		defer engine.ClearCache()
+		for _, sc := range scenarios {
+			re, err := engine.getMatcher(sc.pattern)
+			if err != nil {
+				continue
+			}
+			input := sc.gen(1 * 1024 * 1024)
+			b.Run(sc.name, func(b *testing.B) {
+				b.SetBytes(int64(len(input)))
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					re.MatchString(input)
 				}
 			})
 		}
@@ -720,6 +856,7 @@ func BenchmarkAnchors(b *testing.B) {
 				continue
 			}
 			b.Run(fmt.Sprintf("pat=%s", pattern), func(b *testing.B) {
+				b.SetBytes(int64(len(httpLogs)))
 				b.ResetTimer()
 				for i := 0; i < b.N; i++ {
 					re.MatchString(httpLogs)
@@ -733,6 +870,7 @@ func BenchmarkAnchors(b *testing.B) {
 func BenchmarkCapturing(b *testing.B) {
 	// Use a sample input text for capturing
 	input := "Contact us at support@example.com or visit https://example.com/path?q=1#fragment"
+	scaledInput := scaleInput(input, 1*1024*1024)
 
 	patterns := []struct {
 		name string
@@ -750,9 +888,10 @@ func BenchmarkCapturing(b *testing.B) {
 				continue
 			}
 			b.Run(tc.name, func(b *testing.B) {
+				b.SetBytes(int64(len(scaledInput)))
 				b.ResetTimer()
 				for i := 0; i < b.N; i++ {
-					re.FindStringSubmatchIndex(input)
+					re.FindStringSubmatchIndex(scaledInput)
 				}
 			})
 		}
@@ -763,6 +902,7 @@ func BenchmarkCapturing(b *testing.B) {
 func BenchmarkNFAWorstCase(b *testing.B) {
 	pattern := `(a+)+b`
 	input := strings.Repeat("a", 25) + "c"
+	scaledInput := scaleInput(input, 1*1024*1024)
 
 	runOnEngines(b, func(b *testing.B, engine Engine) {
 		defer engine.ClearCache()
@@ -770,9 +910,10 @@ func BenchmarkNFAWorstCase(b *testing.B) {
 		if err != nil {
 			b.Skip()
 		}
+		b.SetBytes(int64(len(scaledInput)))
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			re.MatchString(input)
+			re.MatchString(scaledInput)
 		}
 	})
 }
