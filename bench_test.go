@@ -148,3 +148,45 @@ func BenchmarkIP(b *testing.B) {
 		})
 	}
 }
+
+func BenchmarkCCWarp(b *testing.B) {
+	cases := []struct {
+		name    string
+		pattern string
+		payload string
+	}{
+		{"Digits", `[0-9]+`, strings.Repeat("1234567890123456", 1024)}, // 16KB of digits
+		{"Word", `[a-zA-Z0-9_]+`, strings.Repeat("word1234_5678_word", 1024)},
+		{"Dot", `.*`, strings.Repeat("hello_swar_warp_8bytes", 1024)},
+	}
+
+	for _, c := range cases {
+		b.Run(c.name, func(b *testing.B) {
+			input := []byte(c.payload)
+			b.Run("Go", func(b *testing.B) {
+				r := goregexp.MustCompile(c.pattern)
+				b.ResetTimer()
+				b.SetBytes(int64(len(input)))
+				for i := 0; i < b.N; i++ {
+					r.Match(input)
+				}
+			})
+			b.Run("Re", func(b *testing.B) {
+				r := MustCompile(c.pattern)
+				b.ResetTimer()
+				b.SetBytes(int64(len(input)))
+				for i := 0; i < b.N; i++ {
+					r.Match(input)
+				}
+			})
+			b.Run("Re-Submatch", func(b *testing.B) {
+				r := MustCompile(c.pattern)
+				b.ResetTimer()
+				b.SetBytes(int64(len(input)))
+				for i := 0; i < b.N; i++ {
+					r.FindSubmatchIndex(input)
+				}
+			})
+		})
+	}
+}

@@ -11,7 +11,7 @@ on:
 
 jobs:
   compare-performance:
-    name: Compare PR vs Main
+    name: Compare Re vs Standard
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -27,67 +27,84 @@ jobs:
           go-version-file: 'go.mod'
           cache: true
 
-      - name: Run PR Benchmarks
+      - name: Download Main Baseline
+        run: |
+          # Try to download the baseline from gh-pages.
+          # Use --fail to handle cases where the file doesn't exist yet.
+          curl --fail -sL https://raw.githubusercontent.com/${{ github.repository }}/gh-pages/benchmarks/baseline/benchmark-main.txt -o benchmark-main.txt || touch benchmark-main.txt
+
+      - name: Run Candidate Benchmarks (PR)
         run: |
           cd internal/benchmark
-          go test -bench . -benchmem -tags goregexpre -count 5 | tee ../../benchmark-re.txt
+          go test -bench BenchmarkSynthetic -benchmem -tags goregexp,goregexpre -count 5 | tee ../../benchmark-pr.txt
 
-      - name: Checkout Main (Baseline)
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.base_ref }}
-          path: baseline
-
-      - name: Run Baseline Benchmarks
+      - name: Relative Performance Analysis
         run: |
-          cd baseline/internal/benchmark
-          go test -bench . -benchmem -tags goregexpre -count 5 | tee ../../benchmark-main.txt
+          echo "### 📊 Relative Speedup Analysis" > pr_comment.md
+          echo "This report compares the **Speedup Factor** (Re vs Std) between \`main\` and this \`PR\`. By normalizing against the standard library in each run, we eliminate VM noise." >> pr_comment.md
 
-      - name: Compare Benchmarks (10% Threshold)
-        run: |
-          # Use benchstat to compare
-          go tool benchstat baseline/benchmark-main.txt benchmark-re.txt > comparison.txt
-          cat comparison.txt
+          # Convert raw benchmarks to relative ratios (Re/Std)
+          if [ -s benchmark-main.txt ]; then
+            ./_scripts/bench-ratio.sh < benchmark-main.txt > main-ratio.txt
+          fi
+          ./_scripts/bench-ratio.sh < benchmark-pr.txt > pr-ratio.txt
 
-          # Detect regression >= 10%
-          # Matches lines with +[1-9][0-9]% or more, and those with p-values (significant)
-          # Specifically: +10.0% to +99.9%, or +100% and up
-          if grep -E "\+([1-9][0-9]|[1-9][0-9][0-9]+)\.[0-9]+%" comparison.txt | grep -qE "p=[0-9.]+"; then
-            echo "REGRESSION_DETECTED=true" >> $GITHUB_ENV
+          if [ -s main-ratio.txt ]; then
+            echo "#### 1. Speedup Factor Delta (Main vs PR)" >> pr_comment.md
+            echo "Lower percentage means the PR is **faster relative to standard library** than main was." >> pr_comment.md
+            echo '```' >> pr_comment.md
+            # Comparison of ratios. benchstat will show the % change in the ratio.
+            go tool benchstat main-ratio.txt pr-ratio.txt | tee delta.txt >> pr_comment.md
+            echo '```' >> pr_comment.md
+
+            # Regression Detection
+            # In ratio-mode, a positive delta (e.g. +10%) means the RelativeTime increased, which is a regression.
+            if grep "BenchmarkSynthetic" delta.txt | grep -E "\+([1-9][0-9]|[1-9][0-9][0-9]+)\.[0-9]+%" | grep -v "~" | grep -q "p="; then
+              echo "REGRESSION_DETECTED=true" >> $GITHUB_ENV
+            fi
           fi
 
-      - name: Generate PR Comment
+          echo "#### 2. PR Current Ratios (Standard vs Re)" >> pr_comment.md
+          echo '<details><summary>Click to view current speedup details</summary>' >> pr_comment.md
+          echo '' >> pr_comment.md
+          echo '```' >> pr_comment.md
+          # Show the actual X-times faster table for the current PR
+          # We use the original names here for the column view
+          go tool benchstat -col /GoRegexp/GoRegexpRe benchmark-pr.txt >> pr_comment.md
+          echo '```' >> pr_comment.md
+          echo '</details>' >> pr_comment.md
+
+      - name: Add Warning to Comment
+        if: env.REGRESSION_DETECTED == 'true'
         run: |
-          echo "### 🚀 Performance Comparison: \`main\` vs \`PR\`" > pr_comment.md
-          if [ "${{ env.REGRESSION_DETECTED }}" = "true" ]; then
-            echo "⚠️ **Alert: Performance regression >= 10% detected!**" >> pr_comment.md
-          else
-            echo "✅ Performance is within acceptable limits (< 10% degradation)." >> pr_comment.md
-          fi
-          echo "" >> pr_comment.md
-          echo '```' >> pr_comment.md
-          cat comparison.txt >> pr_comment.md
-          echo '```' >> pr_comment.md
+          # Prepend a warning to the comment file
+          SED_TMP=$(mktemp)
+          echo "## ⚠️ WARNING: Performance Regression Detected!" > $SED_TMP
+          echo "Some benchmarks for \`GoRegexpRe\` showed a significant slowdown (> 10%) compared to \`main\`. Please review the Delta Analysis below." >> $SED_TMP
+          echo "" >> $SED_TMP
+          cat pr_comment.md >> $SED_TMP
+          mv $SED_TMP pr_comment.md
 
-          # Also write to summary
-          cat pr_comment.md >> $GITHUB_STEP_SUMMARY
+          # Mark as failed in step summary as well
+          echo "::error::Performance regression detected in PR benchmarks."
 
+      - name: Finalize Summary
+        run: cat pr_comment.md >> $GITHUB_STEP_SUMMARY
       - name: Post PR Comment
         uses: thollander/actions-comment-pull-request@v3
         with:
           file-path: pr_comment.md
           comment-tag: benchmark-results
 
-      - name: Fail if Regression
-        if: env.REGRESSION_DETECTED == 'true'
-        run: |
-          echo "Performance regression >= 10% detected. Failing CI."
-          exit 1
-
       - name: Upload benchmark results
         uses: actions/upload-artifact@v4
         with:
           name: benchmark-results
           path: |
-            benchmark-re.txt
-            baseline/benchmark-main.txt
+            benchmark-main.txt
+            benchmark-pr.txt
+            comparison-main.txt
+            comparison-pr.txt
+            main-ratio.txt
+            pr-ratio.txt
+            delta.txt

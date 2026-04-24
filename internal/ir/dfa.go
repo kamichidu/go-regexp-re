@@ -17,14 +17,33 @@ type StateID uint32
 
 const (
 	InvalidState uint32 = 0xFFFFFFFF
-	// Fixed Canonical Layout: [31: Tagged] [30: Anchor] [29: Warp] [28: Accepting] [27-22: AnchorMask] [21-0: StateIndex]
+	// Fixed Canonical Layout:
+	// [31: Tagged] [30: Anchor] [29: Accepting] [28: CCWarp (SWAR)]
+	// [27-22: AnchorMask] [21: Warp (UTF-8)] [20: Reserved] [19-0: StateIndex]
 	TaggedStateFlag    uint32 = 0x80000000
 	AnchorVerifyFlag   uint32 = 0x40000000
-	WarpStateFlag      uint32 = 0x20000000
-	AcceptingStateFlag uint32 = 0x10000000
+	AcceptingStateFlag uint32 = 0x20000000
+	CCWarpFlag         uint32 = 0x10000000
 	AnchorMask         uint32 = 0x0FC00000
-	StateIDMask        uint32 = 0x003FFFFF
+	WarpStateFlag      uint32 = 0x00200000
+	StateIDMask        uint32 = 0x000FFFFF
 )
+
+type CCWarpKernel int
+
+const (
+	CCWarpNone CCWarpKernel = iota
+	CCWarpSingleRange
+	CCWarpBitmask
+	CCWarpAnyExceptNL
+)
+
+type CCWarpInfo struct {
+	Kernel CCWarpKernel
+	Low    uint64 // Splatted 8-byte low bound
+	High   uint64 // Splatted 8-byte high bound
+	Mask   [2]uint64
+}
 
 const MaxDFAMemory = 64 * 1024 * 1024
 const SearchRestartPenalty = 1000
@@ -83,6 +102,8 @@ type DFA struct {
 	startUpdates            []PathTagUpdate
 	stateEntryTags          [][]PathTagUpdate
 	hasAnchors              bool
+	ccWarpTable             []CCWarpInfo
+	searchWarp              CCWarpInfo
 }
 
 type NFAPathStorage interface {
@@ -120,7 +141,10 @@ func (s *memoryNfaSetStorage) Close() error { return nil }
 func (d *DFA) IsNaked() bool                  { return d.Naked }
 func (d *DFA) NumStates() int                 { return d.numStates }
 func (d *DFA) RecapTables() []GroupRecapTable { return d.recapTables }
+func (d *DFA) CCWarpTable() []CCWarpInfo      { return d.ccWarpTable }
+func (d *DFA) SearchWarp() CCWarpInfo         { return d.searchWarp }
 func (d *DFA) StateMinPriority(id uint32) int32 {
+
 	idx := int(id & StateIDMask)
 	if idx >= d.numStates {
 		return 0
@@ -557,6 +581,178 @@ func (d *DFA) build(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, ma
 
 		}
 	}
+
+	// Post-processing: Detect states that qualify for CCWarp (SWAR Warp).
+	d.ccWarpTable = make([]CCWarpInfo, d.numStates)
+	for i := 0; i < d.numStates; i++ {
+		// A state is CCWarp candidate if it has a large set of self-loops without tags/anchors.
+		var selfLoops [256]bool
+		count := 0
+		for b := 0; b < 128; b++ {
+			idx := (i << 8) | b
+			if idx >= len(d.transitions) {
+				continue
+			}
+			next := d.transitions[idx]
+			if next == InvalidState {
+				continue
+			}
+
+			// Condition: Self-loop to the same state (masking out flags)
+			if (next & StateIDMask) == uint32(i) {
+				// Condition: No tags or anchors on this transition
+				if (next & (TaggedStateFlag | AnchorVerifyFlag)) == 0 {
+					selfLoops[b] = true
+					count++
+				}
+			}
+		}
+
+		if count == 0 {
+			continue
+		}
+
+		// Try to identify a pattern in the self-loops for SWAR kernels.
+		// 1. Check for Any-Except-Newline (common for .*)
+		isAnyExceptNL := true
+		for b := 0; b < 128; b++ {
+			if b == '\n' {
+				if selfLoops[b] {
+					isAnyExceptNL = false
+					break
+				}
+			} else {
+				if !selfLoops[b] {
+					isAnyExceptNL = false
+					break
+				}
+			}
+		}
+		if isAnyExceptNL {
+			d.ccWarpTable[i] = CCWarpInfo{Kernel: CCWarpAnyExceptNL}
+			// Find all search/match states for this state and set the flag
+			for b := 0; b < 256; b++ {
+				idx := (i << 8) | b
+				if idx < len(d.transitions) && d.transitions[idx] != InvalidState {
+					if (d.transitions[idx] & StateIDMask) == uint32(i) {
+						d.transitions[idx] |= CCWarpFlag
+					}
+				}
+			}
+			continue
+		}
+
+		// 2. Check for single range [low, high]
+		low, high := -1, -1
+		isSingleRange := true
+		for b := 0; b < 128; b++ {
+			if selfLoops[b] {
+				if low == -1 {
+					low = b
+				}
+				high = b
+			} else if low != -1 {
+				// Check if there are more self-loops later (multi-range)
+				for j := b + 1; j < 128; j++ {
+					if selfLoops[j] {
+						isSingleRange = false
+						break
+					}
+				}
+				break
+			}
+		}
+
+		if isSingleRange && low != -1 && (high-low) >= 3 { // Only warp for ranges of at least 4 chars
+			splatLow := uint64(low) * 0x0101010101010101
+			splatHigh := uint64(high) * 0x0101010101010101
+			d.ccWarpTable[i] = CCWarpInfo{
+				Kernel: CCWarpSingleRange,
+				Low:    splatLow,
+				High:   splatHigh,
+			}
+			for b := 0; b < 256; b++ {
+				idx := (i << 8) | b
+				if idx < len(d.transitions) && d.transitions[idx] != InvalidState {
+					if (d.transitions[idx] & StateIDMask) == uint32(i) {
+						d.transitions[idx] |= CCWarpFlag
+					}
+				}
+			}
+			continue
+		}
+
+		// 3. Fallback to Bitmask (for complex classes like [a-zA-Z0-9_])
+		if count >= 4 {
+			var mask [2]uint64
+			for b := 0; b < 128; b++ {
+				if selfLoops[b] {
+					mask[b>>6] |= 1 << (b & 63)
+				}
+			}
+			d.ccWarpTable[i] = CCWarpInfo{
+				Kernel: CCWarpBitmask,
+				Mask:   mask,
+			}
+			for b := 0; b < 256; b++ {
+				idx := (i << 8) | b
+				if idx < len(d.transitions) && d.transitions[idx] != InvalidState {
+					if (d.transitions[idx] & StateIDMask) == uint32(i) {
+						d.transitions[idx] |= CCWarpFlag
+					}
+				}
+			}
+		}
+	}
+
+	// Calculate SearchWarp for the entire pattern (Pre-filter)
+	firstBytes := GetFirstBytes(s)
+	// Try to identify a pattern for SearchWarp kernels.
+	// We only use SearchWarp if the start set is relatively small/specific.
+	{
+		// 1. Check for single range [low, high]
+		low, high := -1, -1
+		isSingleRange := true
+		count := 0
+		for b := 0; b < 128; b++ {
+			if (firstBytes[b>>6] & (1 << (b & 63))) != 0 {
+				if low == -1 {
+					low = b
+				}
+				high = b
+				count++
+			} else if low != -1 {
+				for j := b + 1; j < 128; j++ {
+					if (firstBytes[j>>6] & (1 << (j & 63))) != 0 {
+						isSingleRange = false
+						break
+					}
+				}
+				break
+			}
+		}
+		// If it's a very broad range (like [^\n]), SearchWarp is counter-productive.
+		if isSingleRange && low != -1 && (high-low) >= 1 && (high-low) < 64 {
+			d.searchWarp = CCWarpInfo{
+				Kernel: CCWarpSingleRange,
+				Low:    uint64(low) * 0x0101010101010101,
+				High:   uint64(high) * 0x0101010101010101,
+			}
+		} else if count >= 2 && count < 64 {
+			// 2. Fallback to Bitmask
+			var mask [2]uint64
+			for b := 0; b < 128; b++ {
+				if (firstBytes[b>>6] & (1 << (b & 63))) != 0 {
+					mask[b>>6] |= 1 << (b & 63)
+				}
+			}
+			d.searchWarp = CCWarpInfo{
+				Kernel: CCWarpBitmask,
+				Mask:   mask,
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -903,48 +1099,48 @@ func isGreedyQuantifier(re *syntax.Regexp) bool {
 	return (re.Op == syntax.OpStar || re.Op == syntax.OpPlus || re.Op == syntax.OpQuest || re.Op == syntax.OpRepeat) && (re.Flags&syntax.NonGreedy == 0)
 }
 
-type byteSet [4]uint64 // 256 bits
+type ByteSet [4]uint64 // 256 bits
 
-func (s *byteSet) set(b byte) { s[b>>6] |= 1 << (b & 63) }
-func (s *byteSet) overlaps(other byteSet) bool {
+func (s *ByteSet) Set(b byte) { s[b>>6] |= 1 << (b & 63) }
+func (s *ByteSet) Overlaps(other ByteSet) bool {
 	return (s[0]&other[0]) != 0 || (s[1]&other[1]) != 0 || (s[2]&other[2]) != 0 || (s[3]&other[3]) != 0
 }
 
-func getFirstBytes(re *syntax.Regexp) byteSet {
-	var set byteSet
+func GetFirstBytes(re *syntax.Regexp) ByteSet {
+	var set ByteSet
 	switch re.Op {
 	case syntax.OpLiteral:
 		if len(re.Rune) > 0 {
 			var buf [4]byte
 			utf8.EncodeRune(buf[:], re.Rune[0])
-			set.set(buf[0])
+			set.Set(buf[0])
 		}
 	case syntax.OpCharClass:
 		for i := 0; i < len(re.Rune); i += 2 {
 			lo, hi := re.Rune[i], re.Rune[i+1]
 			if lo <= 0x7F && hi <= 0x7F {
 				for b := byte(lo); b <= byte(hi); b++ {
-					set.set(b)
+					set.Set(b)
 				}
 			} else {
 				var buf [4]byte
 				utf8.EncodeRune(buf[:], lo)
-				set.set(buf[0])
+				set.Set(buf[0])
 				if lo != hi {
 					utf8.EncodeRune(buf[:], hi)
-					set.set(buf[0])
+					set.Set(buf[0])
 				}
 			}
 		}
 	case syntax.OpAnyChar, syntax.OpAnyCharNotNL:
 		for b := 0; b < 256; b++ {
-			set.set(byte(b))
+			set.Set(byte(b))
 		}
 	case syntax.OpCapture, syntax.OpStar, syntax.OpPlus, syntax.OpQuest, syntax.OpRepeat:
-		return getFirstBytes(re.Sub[0])
+		return GetFirstBytes(re.Sub[0])
 	case syntax.OpConcat:
 		for _, sub := range re.Sub {
-			s := getFirstBytes(sub)
+			s := GetFirstBytes(sub)
 			for i := range set {
 				set[i] |= s[i]
 			}
@@ -954,7 +1150,7 @@ func getFirstBytes(re *syntax.Regexp) byteSet {
 		}
 	case syntax.OpAlternate:
 		for _, sub := range re.Sub {
-			s := getFirstBytes(sub)
+			s := GetFirstBytes(sub)
 			for i := range set {
 				set[i] |= s[i]
 			}
@@ -990,7 +1186,7 @@ func matchesEmpty(re *syntax.Regexp) bool {
 }
 
 func overlaps(a, b *syntax.Regexp) bool {
-	sa := getFirstBytes(a)
-	sb := getFirstBytes(b)
-	return sa.overlaps(sb)
+	sa := GetFirstBytes(a)
+	sb := GetFirstBytes(b)
+	return sa.Overlaps(sb)
 }
