@@ -1,0 +1,176 @@
+= Benchmark Strategy: Throughput-Oriented Performance Auditing
+:sectnums:
+:toc: left
+
+This document defines the methodology and infrastructure used to evaluate the performance of `go-regexp-re`.
+
+== Philosophy: Standard Library as a Reference Clock
+
+In modern CI environments (like GitHub Actions), absolute performance metrics (`ns/op`) are highly volatile due to CPU throttling, noisy neighbors, and varying VM generations.
+
+To achieve stable and scientific results, `go-regexp-re` employs a **Relative Auditing** strategy:
+- The Go standard library (`regexp`) is executed within the same process and same runner as a "Reference Clock".
+- All performance gains are expressed as a **Speedup Factor** (Ratio) relative to the standard library.
+- This effectively cancels out environment noise, as both engines are subject to the same hardware fluctuations.
+
+== Noise Suppression Techniques
+
+To eliminate micro-benchmark bias and branch prediction artifacts, we employ several advanced techniques in `internal/testsuite`.
+
+=== 1. MB-Scale Payloads
+Naive benchmarks often use tiny strings that fit entirely in L1 cache. We scale all inputs to **1MB+** to:
+- Stress the L1/L2/L3 cache hierarchy.
+- Better simulate real-world data processing scenarios.
+
+=== 2. Interleaved Noise Injection
+Simple repetitions of the same pattern can lead to unrealistic branch prediction success. We interleave the target match with **~1KB of random noise** to:
+- Force the engine to actually "search" through the data.
+- Disrupt the CPU's branch predictor, providing more realistic throughput figures.
+
+== The Hybrid Metric Protocol
+
+We categorize metrics into two types based on their stability and sensitivity to hardware noise.
+
+|===
+| Metric | Measurement Type | Rationale
+
+| **Time (ns/op)**
+| **Relative (Ratio)**
+| Highly sensitive to CPU load/frequency. Normalized as `Re / Std`.
+
+| **Throughput (MB/s)**
+| **Relative (Ratio)**
+| Directly derived from time. Normalized as `Re / Std`.
+
+| **Memory (B/op)**
+| **Absolute**
+| Deterministic. Does not change across different CPU architectures.
+
+| **Allocs (allocs/op)**
+| **Absolute**
+| Deterministic. Indicates code efficiency regardless of runner speed.
+|===
+
+== CI/CD Lifecycle & Persistence
+
+The project maintains a tiered benchmarking pipeline to ensure zero-regression and historical transparency.
+
+=== 1. PR-Level Delta Analysis (`benchmark-pr.yml`)
+- **Baseline Retrieval**: Downloads the latest `main` baseline from `gh-pages`.
+- **Ratio-of-Ratios**: Uses `internal/tools/bench-ratio` to compare the PR's speedup factor against the main's speedup factor.
+- **Regression Detection**: A PR is flagged if its relative performance (Ratio) degrades by more than **10%**, regardless of absolute execution time.
+
+=== 2. Main-Branch Audit (`benchmark.yml`)
+- **Latest Baseline**: Updates `benchmarks/baseline/benchmark-main.txt` on `gh-pages` for future PR comparisons.
+- **Historical Archive**: Saves timestamped results in `benchmarks/history/` to enable long-term performance trend analysis using `benchstat`.
+
+== Tooling & Usage
+
+=== `internal/tools/bench-ratio`
+A specialized Go tool that converts raw `go test -bench` output into a normalized ratio format.
+[source,bash]
+----
+# Generate relative performance data
+go test -bench . -tags goregexp,goregexpre | ./_scripts/bench-ratio.sh > results.txt
+----
+
+=== `benchstat` Integration
+We leverage `go tool benchstat` for all comparisons to ensure statistical significance (`p-value` and confidence intervals).
+
+[source,bash]
+----
+# Compare PR ratios against Main ratios
+go tool benchstat main-ratio.txt pr-ratio.txt
+----
+
+== Key Performance Indicators (KPIs)
+
+- **SearchWarp Efficiency**: Aiming for **50x-100x** speedup over standard library via SIMD/SWAR.
+- **PureDFA Throughput**: Maintaining **5x-10x** speedup while guaranteeing $O(n)$.
+- **Zero Allocation Scan**: Ensuring `allocs/op` is strictly `0` or `1` during the execution phase.
+
+== Measurement Scenarios
+
+We evaluate performance across several distinct categories to ensure broad coverage of regex features.
+
+=== 1. Core Feature Categories
+The engine's performance is automatically categorized based on the pattern structure:
+
+|===
+| Category | Pattern Example | Target Optimization
+
+| **Literal**
+| `foobar`
+| `0-Pass` (Literal Bypass) via `bytes.Index`.
+
+| **CharClass**
+| `[a-zA-Z0-9]`
+| `CCWarp` (SWAR) and monomorphized kernels.
+
+
+| **Alternation**
+| `apple|orange`
+| DFA state-transition efficiency.
+
+| **Anchored**
+| `^abc`, `xyz$`
+| Anchor-aware SIMD skipping (SearchWarp).
+
+| **Complex**
+| `a*(b|c)+`
+| 3-Pass TDFA submatch extraction and DFA kernel.
+|===
+
+=== 2. Synthetic Workload Scenarios (`BenchmarkSynthetic`)
+Specialized workloads designed to stress specific architectural layers.
+
+- **`SearchWarp`**: Tests the engine's ability to skip large segments of non-matching data using SIMD-accelerated prefix/suffix scanning.
+- **`CCWarp`**: Specifically targets SWAR-based character class scanning (e.g., matching common sets like `\w`, `\d`, or ranges).
+- **`PureDFA`**: Evaluates the raw throughput of the deterministic transition loop without SIMD acceleration.
+- **`Submatch`**: Measures the overhead of Phase 2 (Backward Trace) and Phase 3 (Forward Licking) compared to a naked match.
+
+=== 3. Specialized Benchmark Suites
+We use several specialized suites to evaluate performance in specific domains:
+
+|===
+| Suite | Corpus | Description
+
+| **`StandardSuite`**
+| `re2-search.txt`
+| Broad coverage of regex features categorized by type (Literal, CharClass, etc.).
+
+| **`LargeAlternation`**
+| `Postal Codes`
+| Stress test for DFA construction and throughput with 10k+ patterns.
+
+| **`LiteralScan`**
+| `Sherlock`
+| Long-string scanning efficiency for literal patterns.
+
+| **`Anchors`**
+| `HTTP Logs`
+| Performance of anchored searches (`^`, `$`) and word boundaries (`\b`) in logs.
+
+| **`Capturing`**
+| `Scaled Email/URI`
+| Submatch extraction performance for common structured patterns.
+
+| **`NFAWorstCase`**
+| `(a+)+b`
+| Pathological case that causes $O(2^n)$ in many engines, used to verify $O(n)$ DFA efficiency.
+|===
+
+=== 4. External Corpora Descriptions
+
+The following external data sets are automatically downloaded and cached during benchmarking:
+
+- **`re2-search.txt`**: The standard test set from Go's `regexp` package, containing hundreds of varied patterns and inputs.
+- **`Sherlock`**: The complete text of "The Adventures of Sherlock Holmes" (Project Gutenberg). Provides a realistic English text corpus for long-string scanning.
+- **`Postal Codes`**: A dataset of Japanese postal codes (`KEN_ALL.CSV`). Used to generate massive alternations (e.g., `(1000001|1000002|...)`).
+- **`HTTP Logs`**: Apache access logs. Used to simulate log analysis workloads where anchors and word boundaries are frequently used.
+
+=== 5. Scaled Payload Generation
+All scenarios use `scaleWithNoise` to generate test data:
+1. **Target**: The string that will actually match the pattern.
+2. **Noise**: A ~1KB block of varied ASCII characters.
+3. **Interleaving**: The target is repeated every 1KB within a **1MB+** total payload to simulate sparse matches in large data streams.
