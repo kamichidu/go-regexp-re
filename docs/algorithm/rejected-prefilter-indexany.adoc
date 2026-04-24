@@ -1,0 +1,51 @@
+= Rejected Idea: Character Class Pre-filtering via bytes.IndexAny
+:sectnums:
+
+== Summary
+
+A proposal was investigated to accelerate patterns starting with character classes (e.g., `\w`, `[a-z]`) by using `bytes.IndexAny` as a pre-filter, similar to how the `0-Pass` strategy uses `bytes.Index` for literal prefixes. However, simulations proved that the current DFA execution loop is already faster than `bytes.IndexAny` for most common character sets.
+
+== Investigation Goal
+
+The goal was to achieve $O(n/m)$-like skip performance for non-literal patterns by leveraging SIMD-accelerated scanning provided by the Go standard library's `bytes.IndexAny`.
+
+== Simulation Results
+
+The following benchmarks were conducted on an `amd64` (Go 1.25.1) environment, simulating a 1MB buffer scan where the match is located at the very end.
+
+|===
+| Strategy | Throughput (MB/s) | Note
+
+| `bytes.Index` (Literal Skip)
+| ~25,000 MB/s
+| Existing "0-Pass" strategy (SIMD)
+
+| **DFA Execution Loop**
+| **~2,400 MB/s**
+| **Current Pure DFA implementation**
+
+| BP-DFA Loop
+| ~1,300 MB/s
+| Current Bit-Parallel implementation
+
+| `bytes.IndexAny` (`\w`)
+| ~1,200 MB/s
+| Proposed Pre-filter for `[0-9A-Za-z_]`
+
+| `bytes.IndexAny` (Unicode Leads)
+| ~115 MB/s
+| Proposed Pre-filter for `0x80-0xFF`
+|===
+
+== Analysis of Failure
+
+The proposal was rejected for the following technical reasons:
+
+1. **DFA Efficiency**: The current DFA implementation uses a highly optimized execution loop (`table[(state << 8) | byte]`) that fits entirely within L1/L2 caches. At 2.4 GB/s, it outperforms the branching and setup logic required by `bytes.IndexAny`.
+2. **`bytes.IndexAny` Overhead**: Unlike `bytes.Index` which uses specialized SIMD instructions (like `PCMPESTRI` or AVX2), `bytes.IndexAny` in Go often employs a bitset lookup mechanism that, while faster than a naive loop, is still slower than a single table-indexed DFA transition.
+3. **High False Positive Rate**: Characters in common classes like `\w` appear frequently in natural text and code. A pre-filter that hits every second or third character provides no "skip" benefit and only adds overhead before entering the actual state machine.
+4. **Unicode Scalability**: For large character sets (like Unicode lead bytes), `bytes.IndexAny` performance degrades significantly, making it unsuitable for a high-performance engine.
+
+== Conclusion
+
+For character classes and `\w`, the engine will continue to rely on its **Fast-Path DFA** and **Bit-Parallel DFA** execution loops. Significant speedups for these patterns would require custom SIMD range-check assembly kernels, which falls outside the current "Pure Go" mandate of the project.

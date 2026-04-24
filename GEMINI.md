@@ -26,8 +26,7 @@ Every implementation must adhere to these pillars to ensure maximum performance:
 ### 2.4 Execution Switching Strategy
 To maximize throughput, the engine MUST select the most efficient execution loop based on pattern characteristics:
 - **0-Pass (Literal Bypass)**: Selected for pure constant strings and anchored literals (e.g., `^abc$`, `^abc`, `abc$`). Bypasses all regex engines using SIMD-accelerated standard library search (e.g., `bytes.Index`, `bytes.HasPrefix`). It utilizes a **unified, interface-free `LiteralMatcher` component** with a **Capture Template** to provide submatch indices with zero state-machine and zero dynamic-dispatch overhead. **When this strategy is selected, the engine MUST explicitly bypass all DFA construction to minimize compilation latency and memory footprint.**
-- **Bit-parallel Path (Glushkov BP-DFA)**: The **"Express Pass"** for small, simple patterns. Utilizes ultra-fast `uint64` bitwise operations to eliminate memory loads.
-- **Fast Path (Pure DFA)**: Automatically selected for larger patterns. It utilizes a minimalist table-based execution loop with **manual restarts and SIMD-accelerated prefix skipping**.
+- **Fast Path (Pure DFA)**: Selected for most patterns. It utilizes a minimalist table-based execution loop with **manual restarts and SIMD-accelerated prefix skipping**.
 - **Anchor-Aware Guarded SIMD Warp**: Selected for patterns with anchors. Utilizes a separate `anchorTransitions` table and **guarded warp points** to allow SIMD skipping even in the presence of anchors (e.g., `^`, `$`, `\b`).
 - **Explicit Hot-Loop Monomorphization**: To ensure zero-overhead, the engine MUST avoid Go generics (`GCShape` sharing) for the primary execution loops. Instead, it employs manually monomorphized functions (e.g., `fastMatchExecLoop`, `extendedMatchExecLoop`, `extendedSubmatchExecLoop`) to ensure the Go compiler can completely eliminate unreachable branches (like `if hasAnchors`) and avoid runtime dictionary lookups.
 - **State-Resident Acceptance Flag**: To eliminate redundant memory lookups in hot loops, DFA state IDs MUST embed the `AcceptingStateFlag` (Bit 28). This allows the execution loop to identify accepting states via a single bitwise AND operation on the current state variable.
@@ -38,7 +37,7 @@ To maximize throughput, the engine MUST select the most efficient execution loop
 The engine follows a **3-Pass Sparse TDFA** strategy to guarantee peak performance, $O(n)$ time complexity, and 100% Go-compatible precision.
 
 - **NFA-Free & Calculation-Free Mandate**: Runtime NFA simulation, backtracking, or dynamic priority comparison is **STRICTLY PROHIBITED**. All submatch extraction decisions MUST be pre-calculated and "burned into" the transition tables during compilation.
-- **Pass 1: Naked Discovery**: A high-speed scan (DFA or BP-DFA) determines match boundaries `[start, end]` and records a history of deterministic states.
+- **Pass 1: Naked Discovery**: A high-speed scan (DFA) determines match boundaries `[start, end]` and records a history of deterministic states.
     - **Priority Separation**: To prevent incorrect match boundary extensions (e.g., `aa|a` matching `aaaa` as `[0 4]`), Pass 1 DFA states MUST include the **MatchPriority** (the highest priority NFA path in the state) in their identity key. This ensures that states with the same NFA IDs but different leftmost-first implications are physically separated.
 - **Pass 2: Path Identity Selection**: Identifies the unique "winning NFA path" by **performing a backward trace** from the match end point. This leverages the `MatchPriority` determined in Pass 1 to reconstruct the priority identity sequence without lookahead or ambiguity. **To maintain submatch precision for multi-byte runes, Pass 2 MUST trace every byte transition in the history, ensuring that priority shifts occurring within continuation bytes are correctly captured.** If multiple paths lead to the same result, the one with the **minimum InputPriority** MUST be selected to satisfy Go's leftmost-first rule.
 - **Pass 3: Group-Specific Recap (Licking)**: Iterates forward along the confirmed winning path and applies delta tags from the `RecapTable`. This pass MUST be a pure, sequential update loop ("licking") where later tags on the path define the final boundaries. **When a Warp (jump) occurs, any tags bundled within the warped bytes MUST be applied at their relative offsets.**
@@ -70,9 +69,7 @@ To maintain the integrity of the NFA-free architecture, the engine MUST perform 
 ### 2.8 Architectural Shortcut (Compilation Efficiency)
 To minimize compilation overhead, the engine MUST use an **Architectural Shortcut** for simple patterns.
 - **Literal-Only Bypass**: If a pattern is identified as a literal-only or anchor-literal sequence, the engine MUST skip `ir.DFA` construction entirely and delegate all operations to the `LiteralMatcher`.
-- **Skip Heavy DFA (BP-DFA)**: If a pattern is simple (NFA nodes ≤ 64, ASCII-only, and no dots), the engine SHOULD build the `BitParallelDFA`.
-- **Match-Only Restriction**: BP-DFA MUST be used exclusively for match-only operations (`MatchString`, `Match`). It MUST NOT be used for submatch extraction or index tracking (`Find*`) because it cannot efficiently determine the true leftmost start position in unanchored searches.
-- **Context-Aware MatchesEmpty**: To correctly handle empty string matches and anchor-only patterns (e.g., `^`, `$`), BP-DFA MUST utilize a pre-calculated `MatchesEmpty[64]bool` array to verify match conditions at junction 0 and the final search position.
+- **ASCII Restriction**: DFA construction is currently optimized for ASCII-only runes (0-127) when possible. Patterns requiring multi-byte UTF-8 support (e.g., non-ASCII runes or `.`) MUST utilize the full table-based DFA with UTF-8 handling.
 
 
 ### 2.10 Prefix-Skip Optimization (SIMD Acceleration)
