@@ -1,10 +1,12 @@
 = go-regexp-re: Pure Go Byte-Oriented DFA Regex Engine
 :linkattrs:
 
-image:https://pkg.go.dev/badge/github.com/kamichidu/go-regexp-re.svg["Go Reference", link="https://pkg.go.dev/github.com/kamichidu/go-regexp-re"]
+image:https://github.com/kamichidu/go-regexp-re/actions/workflows/ci.yml/badge.svg?branch=main["CI / Quality Audit", link="https://github.com/kamichidu/go-regexp-re/actions/workflows/ci.yml"]
+image:https://github.com/kamichidu/go-regexp-re/actions/workflows/benchmark.yml/badge.svg?branch=main["Benchmark Status", link="https://github.com/kamichidu/go-regexp-re/actions/workflows/benchmark.yml"]
 image:https://goreportcard.com/badge/github.com/kamichidu/go-regexp-re["Go Report Card", link="https://goreportcard.com/report/github.com/kamichidu/go-regexp-re"]
-image:https://github.com/kamichidu/go-regexp-re/actions/workflows/benchmark.yml/badge.svg["Benchmark Status", link="https://github.com/kamichidu/go-regexp-re/actions/workflows/benchmark.yml"]
+image:https://pkg.go.dev/badge/github.com/kamichidu/go-regexp-re.svg["Go Reference", link="https://pkg.go.dev/github.com/kamichidu/go-regexp-re"]
 image:https://img.shields.io/github/license/kamichidu/go-regexp-re["License", link="https://github.com/kamichidu/go-regexp-re/blob/main/LICENSE"]
+
 
 [IMPORTANT]
 ====
