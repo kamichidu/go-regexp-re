@@ -40,6 +40,7 @@ type Regexp struct {
 	matchState     uint32
 	uIndices       []uint32
 	uPrioDeltas    []int32
+	searchWarp     ir.CCWarpInfo
 }
 
 type CompileOptions struct {
@@ -87,6 +88,7 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 	var searchState, matchState uint32
 	var uIndices []uint32
 	var uPrioDeltas []int32
+	var searchWarp ir.CCWarpInfo
 
 	if literalMatcher == nil {
 		// Always build the heavy DFA to support correct FindSubmatchIndex results
@@ -111,6 +113,7 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 		for i, update := range tagUpdates {
 			uPrioDeltas[i] = update.BasePriority
 		}
+		searchWarp = dfa.SearchWarp()
 	}
 
 	res := &Regexp{
@@ -128,6 +131,7 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 		matchState:     matchState,
 		uIndices:       uIndices,
 		uPrioDeltas:    uPrioDeltas,
+		searchWarp:     searchWarp,
 	}
 	if opts.forceStrategy != strategyNone {
 		res.strategy = opts.forceStrategy
@@ -338,16 +342,54 @@ func fastMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 		}
 
 		// SIMD Warp: skip to next prefix match if we are in search state and not anchored
-		if !anchorStart && (state&ir.StateIDMask) == (searchState&ir.StateIDMask) && len(re.prefix) > 0 {
-			pos := bytes.Index(b[i:], re.prefix)
-			if pos < 0 {
-				i = numBytes
-				break
-			}
-			if pos > 0 {
-				i += pos
-				prio = i * ir.SearchRestartPenalty
-				continue
+		if !anchorStart && (state&ir.StateIDMask) == (searchState&ir.StateIDMask) {
+			if len(re.prefix) > 0 {
+				pos := bytes.Index(b[i:], re.prefix)
+				if pos < 0 {
+					i = numBytes
+					break
+				}
+				if pos > 0 {
+					i += pos
+					prio = i * ir.SearchRestartPenalty
+					continue
+				}
+			} else if re.searchWarp.Kernel != ir.CCWarpNone && i+8 <= numBytes {
+				// Dedicated SWAR Pre-filter
+				info := re.searchWarp
+				oldI := i
+				switch info.Kernel {
+				case ir.CCWarpSingleRange:
+					low, high := info.Low, info.High
+					for i+8 <= numBytes {
+						v := binary.LittleEndian.Uint64(b[i:])
+						if ((v+0x7f7f7f7f7f7f7f7f-high)|(v-low))&0x8080808080808080 != 0x8080808080808080 {
+							break
+						}
+						i += 8
+					}
+				case ir.CCWarpBitmask:
+					mask := info.Mask
+					for i+8 <= numBytes {
+						v := binary.LittleEndian.Uint64(b[i:])
+						ok := false
+						for k := 0; k < 8; k++ {
+							bv := byte(v >> (k * 8))
+							if (mask[bv>>6] & (1 << (bv & 63))) != 0 {
+								ok = true
+								break
+							}
+						}
+						if ok {
+							break
+						}
+						i += 8
+					}
+				}
+				if i > oldI {
+					prio = i * ir.SearchRestartPenalty
+					continue // Re-evaluate from the new position i
+				}
 			}
 		}
 
@@ -503,16 +545,54 @@ func extendedMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 		}
 
 		// SIMD Warp: skip to next prefix match if we are in search state and not anchored
-		if !anchorStart && (state&ir.StateIDMask) == (searchState&ir.StateIDMask) && len(re.prefix) > 0 {
-			pos := bytes.Index(b[i:], re.prefix)
-			if pos < 0 {
-				i = numBytes
-				break
-			}
-			if pos > 0 {
-				i += pos
-				prio = i * ir.SearchRestartPenalty
-				continue
+		if !anchorStart && (state&ir.StateIDMask) == (searchState&ir.StateIDMask) {
+			if len(re.prefix) > 0 {
+				pos := bytes.Index(b[i:], re.prefix)
+				if pos < 0 {
+					i = numBytes
+					break
+				}
+				if pos > 0 {
+					i += pos
+					prio = i * ir.SearchRestartPenalty
+					continue
+				}
+			} else if re.searchWarp.Kernel != ir.CCWarpNone && i+8 <= numBytes {
+				// Dedicated SWAR Pre-filter
+				info := re.searchWarp
+				oldI := i
+				switch info.Kernel {
+				case ir.CCWarpSingleRange:
+					low, high := info.Low, info.High
+					for i+8 <= numBytes {
+						v := binary.LittleEndian.Uint64(b[i:])
+						if ((v+0x7f7f7f7f7f7f7f7f-high)|(v-low))&0x8080808080808080 != 0x8080808080808080 {
+							break
+						}
+						i += 8
+					}
+				case ir.CCWarpBitmask:
+					mask := info.Mask
+					for i+8 <= numBytes {
+						v := binary.LittleEndian.Uint64(b[i:])
+						ok := false
+						for k := 0; k < 8; k++ {
+							bv := byte(v >> (k * 8))
+							if (mask[bv>>6] & (1 << (bv & 63))) != 0 {
+								ok = true
+								break
+							}
+						}
+						if ok {
+							break
+						}
+						i += 8
+					}
+				}
+				if i > oldI {
+					prio = i * ir.SearchRestartPenalty
+					continue // Re-evaluate from the new position i
+				}
 			}
 		}
 
@@ -685,19 +765,63 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 		}
 
 		// SIMD Warp: skip to next prefix match if we are in search state and not anchored
-		if !anchorStart && (state&ir.StateIDMask) == (searchState&ir.StateIDMask) && len(re.prefix) > 0 {
-			pos := bytes.Index(b[i:], re.prefix)
-			if pos < 0 {
-				i = numBytes
-				break
-			}
-			if pos > 0 {
-				for k := 0; k < pos; k++ {
-					mc.history[i+k] = sidx
+		if !anchorStart && (state&ir.StateIDMask) == (searchState&ir.StateIDMask) {
+			if len(re.prefix) > 0 {
+				pos := bytes.Index(b[i:], re.prefix)
+				if pos < 0 {
+					i = numBytes
+					break
 				}
-				i += pos
-				prio = i * ir.SearchRestartPenalty
-				continue
+				if pos > 0 {
+					for k := 0; k < pos; k++ {
+						mc.history[i+k] = sidx
+					}
+					i += pos
+					prio = i * ir.SearchRestartPenalty
+					continue
+				}
+			} else if re.searchWarp.Kernel != ir.CCWarpNone && i+8 <= numBytes {
+				// Dedicated SWAR Pre-filter
+				info := re.searchWarp
+				oldI := i
+				switch info.Kernel {
+				case ir.CCWarpSingleRange:
+					low, high := info.Low, info.High
+					for i+8 <= numBytes {
+						v := binary.LittleEndian.Uint64(b[i:])
+						if ((v+0x7f7f7f7f7f7f7f7f-high)|(v-low))&0x8080808080808080 != 0x8080808080808080 {
+							break
+						}
+						for k := 0; k < 8; k++ {
+							mc.history[i+k] = sidx
+						}
+						i += 8
+					}
+				case ir.CCWarpBitmask:
+					mask := info.Mask
+					for i+8 <= numBytes {
+						v := binary.LittleEndian.Uint64(b[i:])
+						ok := false
+						for k := 0; k < 8; k++ {
+							bv := byte(v >> (k * 8))
+							if (mask[bv>>6] & (1 << (bv & 63))) != 0 {
+								ok = true
+								break
+							}
+						}
+						if ok {
+							break
+						}
+						for k := 0; k < 8; k++ {
+							mc.history[i+k] = sidx
+						}
+						i += 8
+					}
+				}
+				if i > oldI {
+					prio = i * ir.SearchRestartPenalty
+					continue
+				}
 			}
 		}
 

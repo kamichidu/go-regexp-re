@@ -103,6 +103,7 @@ type DFA struct {
 	stateEntryTags          [][]PathTagUpdate
 	hasAnchors              bool
 	ccWarpTable             []CCWarpInfo
+	searchWarp              CCWarpInfo
 }
 
 type NFAPathStorage interface {
@@ -141,7 +142,9 @@ func (d *DFA) IsNaked() bool                  { return d.Naked }
 func (d *DFA) NumStates() int                 { return d.numStates }
 func (d *DFA) RecapTables() []GroupRecapTable { return d.recapTables }
 func (d *DFA) CCWarpTable() []CCWarpInfo      { return d.ccWarpTable }
+func (d *DFA) SearchWarp() CCWarpInfo         { return d.searchWarp }
 func (d *DFA) StateMinPriority(id uint32) int32 {
+
 	idx := int(id & StateIDMask)
 	if idx >= d.numStates {
 		return 0
@@ -702,6 +705,54 @@ func (d *DFA) build(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, ma
 		}
 	}
 
+	// Calculate SearchWarp for the entire pattern (Pre-filter)
+	firstBytes := GetFirstBytes(s)
+	// Try to identify a pattern for SearchWarp kernels.
+	// We only use SearchWarp if the start set is relatively small/specific.
+	{
+		// 1. Check for single range [low, high]
+		low, high := -1, -1
+		isSingleRange := true
+		count := 0
+		for b := 0; b < 128; b++ {
+			if (firstBytes[b>>6] & (1 << (b & 63))) != 0 {
+				if low == -1 {
+					low = b
+				}
+				high = b
+				count++
+			} else if low != -1 {
+				for j := b + 1; j < 128; j++ {
+					if (firstBytes[j>>6] & (1 << (j & 63))) != 0 {
+						isSingleRange = false
+						break
+					}
+				}
+				break
+			}
+		}
+		// If it's a very broad range (like [^\n]), SearchWarp is counter-productive.
+		if isSingleRange && low != -1 && (high-low) >= 1 && (high-low) < 64 {
+			d.searchWarp = CCWarpInfo{
+				Kernel: CCWarpSingleRange,
+				Low:    uint64(low) * 0x0101010101010101,
+				High:   uint64(high) * 0x0101010101010101,
+			}
+		} else if count >= 2 && count < 64 {
+			// 2. Fallback to Bitmask
+			var mask [2]uint64
+			for b := 0; b < 128; b++ {
+				if (firstBytes[b>>6] & (1 << (b & 63))) != 0 {
+					mask[b>>6] |= 1 << (b & 63)
+				}
+			}
+			d.searchWarp = CCWarpInfo{
+				Kernel: CCWarpBitmask,
+				Mask:   mask,
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -1048,48 +1099,48 @@ func isGreedyQuantifier(re *syntax.Regexp) bool {
 	return (re.Op == syntax.OpStar || re.Op == syntax.OpPlus || re.Op == syntax.OpQuest || re.Op == syntax.OpRepeat) && (re.Flags&syntax.NonGreedy == 0)
 }
 
-type byteSet [4]uint64 // 256 bits
+type ByteSet [4]uint64 // 256 bits
 
-func (s *byteSet) set(b byte) { s[b>>6] |= 1 << (b & 63) }
-func (s *byteSet) overlaps(other byteSet) bool {
+func (s *ByteSet) Set(b byte) { s[b>>6] |= 1 << (b & 63) }
+func (s *ByteSet) Overlaps(other ByteSet) bool {
 	return (s[0]&other[0]) != 0 || (s[1]&other[1]) != 0 || (s[2]&other[2]) != 0 || (s[3]&other[3]) != 0
 }
 
-func getFirstBytes(re *syntax.Regexp) byteSet {
-	var set byteSet
+func GetFirstBytes(re *syntax.Regexp) ByteSet {
+	var set ByteSet
 	switch re.Op {
 	case syntax.OpLiteral:
 		if len(re.Rune) > 0 {
 			var buf [4]byte
 			utf8.EncodeRune(buf[:], re.Rune[0])
-			set.set(buf[0])
+			set.Set(buf[0])
 		}
 	case syntax.OpCharClass:
 		for i := 0; i < len(re.Rune); i += 2 {
 			lo, hi := re.Rune[i], re.Rune[i+1]
 			if lo <= 0x7F && hi <= 0x7F {
 				for b := byte(lo); b <= byte(hi); b++ {
-					set.set(b)
+					set.Set(b)
 				}
 			} else {
 				var buf [4]byte
 				utf8.EncodeRune(buf[:], lo)
-				set.set(buf[0])
+				set.Set(buf[0])
 				if lo != hi {
 					utf8.EncodeRune(buf[:], hi)
-					set.set(buf[0])
+					set.Set(buf[0])
 				}
 			}
 		}
 	case syntax.OpAnyChar, syntax.OpAnyCharNotNL:
 		for b := 0; b < 256; b++ {
-			set.set(byte(b))
+			set.Set(byte(b))
 		}
 	case syntax.OpCapture, syntax.OpStar, syntax.OpPlus, syntax.OpQuest, syntax.OpRepeat:
-		return getFirstBytes(re.Sub[0])
+		return GetFirstBytes(re.Sub[0])
 	case syntax.OpConcat:
 		for _, sub := range re.Sub {
-			s := getFirstBytes(sub)
+			s := GetFirstBytes(sub)
 			for i := range set {
 				set[i] |= s[i]
 			}
@@ -1099,7 +1150,7 @@ func getFirstBytes(re *syntax.Regexp) byteSet {
 		}
 	case syntax.OpAlternate:
 		for _, sub := range re.Sub {
-			s := getFirstBytes(sub)
+			s := GetFirstBytes(sub)
 			for i := range set {
 				set[i] |= s[i]
 			}
@@ -1135,7 +1186,7 @@ func matchesEmpty(re *syntax.Regexp) bool {
 }
 
 func overlaps(a, b *syntax.Regexp) bool {
-	sa := getFirstBytes(a)
-	sb := getFirstBytes(b)
-	return sa.overlaps(sb)
+	sa := GetFirstBytes(a)
+	sb := GetFirstBytes(b)
+	return sa.Overlaps(sb)
 }
