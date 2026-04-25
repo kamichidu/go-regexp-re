@@ -15,8 +15,8 @@ By combining $O(n)$ time complexity with advanced SIMD acceleration and bit-para
 === 1. xref:algorithm/0-pass-literal-bypass.adoc[0-Pass (Literal Bypass) & Capture Template]
 An $O(1)$ bypass strategy for pure literals and anchored fixed strings, extracting submatches without driving the state machine.
 
-=== 2. xref:algorithm/bit-parallel-dfa.adoc[Bit-parallel DFA (BP-DFA)]
-A specialized execution path for small patterns using `uint64` bit vectors to achieve branchless state transitions and anchor resolution.
+=== 2. xref:algorithm/rejected-bit-parallel-dfa.adoc[Bit-parallel DFA (BP-DFA) - Rejected]
+A previously explored execution path for small patterns. While conceptually fast, it was rejected in favor of the more flexible and scalable **SWAR Character Class Warp** strategy.
 
 === 3. xref:algorithm/guarded-simd-warp.adoc[Anchor-Aware Guarded SIMD Warp]
 A speculative SIMD skipping logic designed to maintain high-speed scanning even in the presence of anchors.
@@ -35,6 +35,12 @@ Pre-compilation AST rewriting and common sub-expression factoring to minimize st
 
 === 8. xref:algorithm/multibyte-warp-optimization.adoc[Multi-byte Warp Optimization & State Explosion Protection]
 A dual-purpose strategy for deterministically skipping multi-byte UTF-8 sequences and protecting against NFA path set divergence in loop structures.
+
+=== 9. xref:algorithm/swar-character-class-warp.adoc[SWAR Character Class Warp (Hybrid Strategy)]
+The engine's primary performance layer. It combines **SearchWarp** (SIMD-accelerated noise skipping) and **CCWarp** (SWAR-based match continuation) to achieve multi-gigabyte throughput for common patterns and repetitions (e.g., `a+`, `[0-9]+`).
+
+=== 10. xref:algorithm/rejected-prefilter-indexany.adoc[Character Class Pre-filtering via bytes.IndexAny - Rejected]
+A proposal to use `bytes.IndexAny` as a noise-skipping pre-filter. It was rejected because the engine's optimized DFA execution loops proved to be faster than the standard library's `IndexAny` for most common character sets.
 
 == Design Philosophy
 
