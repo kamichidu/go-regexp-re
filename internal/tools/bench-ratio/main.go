@@ -44,7 +44,7 @@ func run(r io.Reader, w io.Writer) error {
 			groupName := matches[1]
 			engine := matches[2]
 			testName := matches[3]
-			
+
 			m := Metric{}
 			m.Ns, _ = strconv.ParseFloat(matches[4], 64)
 			if matches[5] != "" {
@@ -93,9 +93,9 @@ func run(r io.Reader, w io.Writer) error {
 			count := len(reResults)
 			for i := 0; i < count; i++ {
 				re := reResults[i]
-				
+
 				fmt.Fprintf(tw, "Benchmark%s/%s\t1", groupName, testName)
-				
+
 				// Time & Throughput: Ratio (Noise-resistant)
 				if i < len(stdResults) {
 					std := stdResults[i]
@@ -106,7 +106,7 @@ func run(r io.Reader, w io.Writer) error {
 				} else {
 					fmt.Fprintf(tw, "\t0.000000 ns/op")
 				}
-				
+
 				// Memory & Allocs: Absolute
 				fmt.Fprintf(tw, "\t%.0f B/op", re.Bop)
 				fmt.Fprintf(tw, "\t%.0f allocs/op", re.Allocs)
