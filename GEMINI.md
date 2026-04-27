@@ -117,6 +117,7 @@ To achieve the $O(n)$ physical throughput goal, the engine MUST implement a hier
 - **Hierarchical Kernel Selection**: The engine MUST automatically select the most efficient kernel based on the character set complexity (Equal -> Range -> Set -> Bitmask).
 - **Sub-cube Decomposition**: For disjoint character sets (e.g., `[aeiou]`), the engine MUST employ Sub-cube Decomposition (pairing characters with Hamming distance 1) to enable parallel 8-byte matching with minimal XOR+OR chains.
 - **Arithmetic Range Checks**: Continuous ASCII ranges MUST be handled via arithmetic overflow/underflow tricks (1-shot 8-byte checks) instead of slower bit-by-bit comparisons.
+- **Two-Phase Warping & Inverted Logic**: The engine MUST distinguish between **SearchWarp** (finding match start) and **CCWarp** (continuing match). SearchWarp MUST skip noise (characters NOT in the start set) using **Inverted Kernel Logic**. To achieve 10 GB/s+ throughput, SearchWarp MUST prioritize SIMD-accelerated library functions (`bytes.IndexByte`, `bytes.IndexAny`) before falling back to custom SWAR kernels.
 - **Correctness via Self-Loop Restriction**: SWAR Warp MUST be strictly restricted to "Pure Self-Loops"—states that lead back to the same ID without updating capture tags—to prevent submatch boundary corruption.
 - **Physical Throughput Baseline**: The engine MUST aim for a baseline throughput of 3-5 GB/s for simple repetitions (`a+`, `.*`, `[0-9]+`) and 0.5-1 GB/s for disjoint sets on modern x86/ARM hardware.
 

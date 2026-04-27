@@ -13,9 +13,13 @@ The engine applies SWAR optimizations in two distinct phases to maximize through
 
 === 1. SearchWarp (Pre-filtering)
 When the engine is in the initial `searchState` (scanning for a match start), it uses the **SearchWarp** phase to skip "noise" characters. 
+
+- **Hybrid Strategy**: To achieve peak performance, SearchWarp prioritizes Go standard library SIMD-accelerated functions:
+    *   **Single Character**: Uses `bytes.IndexByte` (up to 15 GB/s).
+    *   **Small Set/Range**: Uses `bytes.IndexAny` with a pre-calculated character string.
+    *   **Large/Negated Set**: Falls back to specialized SWAR kernels (e.g., `CCWarpNotSingleRange`) to skip noise 8 bytes at a time.
 - **Goal**: Rapidly skip segments of text that cannot possibly start a match.
-- **Example**: For the pattern `[0-9]+`, SearchWarp skips all non-digit characters at 3.3 GB/s until it hits the first digit.
-- **Sharing**: It uses the same high-performance kernels as CCWarp but with inverted logic (skip while no match-start character is found).
+- **Sharing**: It shares the same kernel definitions as CCWarp but applies **inverted logic**: it skips as long as characters are NOT in the "Start Set".
 
 === 2. CCWarp (Match Fast-Forwarding)
 Once a match has begun and the DFA enters a self-looping state (like the `+` in `[0-9]+`), it switches to the **CCWarp** phase.
