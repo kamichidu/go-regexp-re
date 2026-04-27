@@ -39,7 +39,15 @@ type AnchorInfo struct {
 
 // ExtractAnchors traverses the AST and identifies all potential anchors.
 func ExtractAnchors(re *syntax.Regexp) []AnchorInfo {
+	// MANDATORY: If the pattern can match empty string, MAP rejection is unsafe.
+	if minLength(re) == 0 {
+		return nil
+	}
+
 	flatRE := stripCaptures(re)
+	if flatRE == nil {
+		return nil
+	}
 	anchors := extractAnchors(flatRE, 0, false)
 
 	// Suffix identification
@@ -48,7 +56,7 @@ func ExtractAnchors(re *syntax.Regexp) []AnchorInfo {
 		for i := range anchors {
 			anchorLen := len(anchors[i].Anchor)
 			if anchors[i].HasClass {
-				anchorLen = 1 // Class anchor is considered 1 byte for distance
+				anchorLen = 1
 			}
 			if anchors[i].Distance+anchorLen == totalMin {
 				if anchors[i].Type != AnchorPrefix {
@@ -94,11 +102,17 @@ func stripCaptures(re *syntax.Regexp) *syntax.Regexp {
 		var subs []*syntax.Regexp
 		for _, sub := range re.Sub {
 			s := stripCaptures(sub)
+			if s == nil {
+				continue
+			}
 			if s.Op == syntax.OpConcat {
 				subs = append(subs, s.Sub...)
 			} else {
 				subs = append(subs, s)
 			}
+		}
+		if len(subs) == 0 {
+			return nil
 		}
 		if len(subs) > 1 {
 			merged := []*syntax.Regexp{subs[0]}
@@ -120,16 +134,31 @@ func stripCaptures(re *syntax.Regexp) *syntax.Regexp {
 	case syntax.OpAlternate:
 		var subs []*syntax.Regexp
 		for _, sub := range re.Sub {
-			subs = append(subs, stripCaptures(sub))
+			s := stripCaptures(sub)
+			if s != nil {
+				subs = append(subs, s)
+			}
+		}
+		if len(subs) == 0 {
+			return nil
 		}
 		res.Sub = subs
 	case syntax.OpRepeat, syntax.OpQuest, syntax.OpPlus, syntax.OpStar:
-		res.Sub = []*syntax.Regexp{stripCaptures(re.Sub[0])}
+		s := stripCaptures(re.Sub[0])
+		if s == nil {
+			return nil
+		}
+		res.Sub = []*syntax.Regexp{s}
 	}
 	return &res
 }
 
-func extractAnchors(re *syntax.Regexp, offset int, inStar bool) []AnchorInfo {
+// extractAnchors identifies mandatory anchors.
+func extractAnchors(re *syntax.Regexp, offset int, inOptional bool) []AnchorInfo {
+	if inOptional || re == nil {
+		return nil
+	}
+
 	var anchors []AnchorInfo
 
 	switch re.Op {
@@ -151,7 +180,6 @@ func extractAnchors(re *syntax.Regexp, offset int, inStar bool) []AnchorInfo {
 		}
 	case syntax.OpCharClass:
 		if re.Flags&syntax.FoldCase == 0 {
-			// Single character class
 			if len(re.Rune) == 2 && re.Rune[0] == re.Rune[1] {
 				var b [utf8.UTFMax]byte
 				n := utf8.EncodeRune(b[:], re.Rune[0])
@@ -161,7 +189,6 @@ func extractAnchors(re *syntax.Regexp, offset int, inStar bool) []AnchorInfo {
 					Distance: offset,
 				})
 			} else if info, ok := toCCWarp(re); ok {
-				// SWAR-capable class anchor
 				anchors = append(anchors, AnchorInfo{
 					Class:    info,
 					HasClass: true,
@@ -170,13 +197,21 @@ func extractAnchors(re *syntax.Regexp, offset int, inStar bool) []AnchorInfo {
 				})
 			}
 		}
-	case syntax.OpRepeat, syntax.OpQuest, syntax.OpPlus:
-		anchors = append(anchors, extractAnchors(re.Sub[0], offset, inStar)...)
+	case syntax.OpRepeat:
+		if re.Min > 0 {
+			anchors = append(anchors, extractAnchors(re.Sub[0], offset, false)...)
+		}
+	case syntax.OpQuest, syntax.OpStar:
+		// Optional
+	case syntax.OpPlus:
+		anchors = append(anchors, extractAnchors(re.Sub[0], offset, false)...)
+	case syntax.OpCapture:
+		anchors = append(anchors, extractAnchors(re.Sub[0], offset, false)...)
 	case syntax.OpConcat:
 		currentOffset := offset
 		for i, sub := range re.Sub {
-			subAnchors := extractAnchors(sub, currentOffset, inStar)
-			if i == 0 && offset == 0 && !inStar {
+			subAnchors := extractAnchors(sub, currentOffset, false)
+			if i == 0 && offset == 0 {
 				for j := range subAnchors {
 					if subAnchors[j].Distance == 0 {
 						subAnchors[j].Type = AnchorPrefix
@@ -191,14 +226,17 @@ func extractAnchors(re *syntax.Regexp, offset int, inStar bool) []AnchorInfo {
 				currentOffset = 1000000
 			}
 		}
-	case syntax.OpStar:
-		anchors = append(anchors, extractAnchors(re.Sub[0], offset, true)...)
+	case syntax.OpAlternate:
+		// Mandatory in ALL branches? Too complex for now, skip.
 	}
 
 	return anchors
 }
 
 func minLength(re *syntax.Regexp) int {
+	if re == nil {
+		return 0
+	}
 	switch re.Op {
 	case syntax.OpEmptyMatch, syntax.OpBeginLine, syntax.OpEndLine, syntax.OpBeginText, syntax.OpEndText, syntax.OpWordBoundary, syntax.OpNoWordBoundary:
 		return 0
@@ -259,7 +297,7 @@ func ExtractConstraints(re *syntax.Regexp, anchor *AnchorInfo) {
 }
 
 func extractConstraints(re *syntax.Regexp, anchor *AnchorInfo) {
-	if re.Op != syntax.OpConcat {
+	if re == nil || re.Op != syntax.OpConcat {
 		return
 	}
 
@@ -350,6 +388,9 @@ func extractConstraints(re *syntax.Regexp, anchor *AnchorInfo) {
 }
 
 func isLiteral(re *syntax.Regexp) ([]byte, bool) {
+	if re == nil {
+		return nil, false
+	}
 	if re.Op == syntax.OpLiteral && re.Flags&syntax.FoldCase == 0 {
 		var buf []byte
 		for _, r := range re.Rune {
@@ -371,6 +412,9 @@ func isLiteral(re *syntax.Regexp) ([]byte, bool) {
 }
 
 func toCCWarp(re *syntax.Regexp) (CCWarpInfo, bool) {
+	if re == nil {
+		return CCWarpInfo{}, false
+	}
 	switch re.Op {
 	case syntax.OpLiteral:
 		if len(re.Rune) == 1 && re.Flags&syntax.FoldCase == 0 {
@@ -405,8 +449,7 @@ func SelectBestAnchor(anchors []AnchorInfo) *AnchorInfo {
 	for i := range anchors {
 		score := 0
 		if anchors[i].HasClass {
-			// Class anchors are good but not as fast as SIMD bytes.Index
-			score = 20 // Base score for a class
+			score = 20
 		} else {
 			score = len(anchors[i].Anchor) * 10
 		}
@@ -592,8 +635,6 @@ func warp(info CCWarpInfo, b []byte) int {
 	return i
 }
 
-// IndexClass finds the first byte in b that satisfies the CCWarpInfo kernel.
-// It returns the index of the first match, or -1 if not found.
 func IndexClass(info CCWarpInfo, b []byte) int {
 	i := 0
 	switch info.Kernel {
@@ -604,10 +645,7 @@ func IndexClass(info CCWarpInfo, b []byte) int {
 		low64, high64 := splat(uint64(low)), splat(uint64(high))
 		for i+8 <= len(b) {
 			v := binary.LittleEndian.Uint64(b[i:])
-			// bit set if in range: ((v+0x7f...-high)|(v-low))&0x80... == 0x80...
-			// we want to find if ANY byte is in range.
 			if ((v+0x7f7f7f7f7f7f7f7f-high64)|(v-low64))&0x8080808080808080 != 0 {
-				// At least one byte might match, fallback to byte-by-byte for exact index
 				break
 			}
 			i += 8
@@ -618,7 +656,6 @@ func IndexClass(info CCWarpInfo, b []byte) int {
 			}
 		}
 	case CCWarpAnyChar:
-		// Find first ASCII byte
 		for i < len(b) {
 			if b[i] < 0x80 {
 				return i
@@ -648,13 +685,17 @@ func splat(v uint64) uint64 {
 	return v * 0x0101010101010101
 }
 
-// HasComplexAnchors reports if the pattern contains anchors other than ^ or $.
 func HasComplexAnchors(re *syntax.Regexp) bool {
+	if re == nil {
+		return false
+	}
 	switch re.Op {
 	case syntax.OpBeginLine, syntax.OpEndLine, syntax.OpWordBoundary, syntax.OpNoWordBoundary:
 		return true
 	case syntax.OpCapture, syntax.OpRepeat, syntax.OpQuest, syntax.OpPlus, syntax.OpStar:
-		return HasComplexAnchors(re.Sub[0])
+		if len(re.Sub) > 0 {
+			return HasComplexAnchors(re.Sub[0])
+		}
 	case syntax.OpConcat, syntax.OpAlternate:
 		for _, sub := range re.Sub {
 			if HasComplexAnchors(sub) {
