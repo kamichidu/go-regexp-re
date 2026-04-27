@@ -1,7 +1,6 @@
 package regexp
 
 import (
-	"github.com/kamichidu/go-regexp-re/internal/ir"
 	"testing"
 )
 
@@ -56,9 +55,19 @@ func TestPass2PathBranching(t *testing.T) {
 	re.sparseTDFA_PathSelection(mc, input, start, end, prio)
 
 	// Path Selection should strictly follow the history and recap tables
-	for i := start; i <= end; i++ {
-		state := mc.history[i]
-		sidx := uint32(state) & uint32(ir.StateIDMask)
-		t.Logf("Pos %d: State %d, PathID %d", i, sidx, mc.pathHistory[i])
+	byteOffset := 0
+	for _, entry := range mc.history {
+		sidx := entry & histStateMask
+		length := 1
+		if (entry & histWarpMarker) != 0 {
+			length = int((entry & histLengthMask) >> histLengthShift)
+		}
+		for k := 0; k < length; k++ {
+			pos := byteOffset + k
+			if pos >= start && pos <= end {
+				t.Logf("Pos %d: State %d, PathID %d", pos, sidx, mc.pathHistory[pos])
+			}
+		}
+		byteOffset += length
 	}
 }

@@ -42,6 +42,9 @@ The engine's primary performance layer. It combines **SearchWarp** (SIMD-acceler
 === 10. xref:algorithm/rejected-prefilter-indexany.adoc[Character Class Pre-filtering via bytes.IndexAny - Rejected]
 A proposal to use `bytes.IndexAny` as a noise-skipping pre-filter. It was rejected because the engine's optimized DFA execution loops proved to be faster than the standard library's `IndexAny` for most common character sets.
 
+=== 11. xref:algorithm/hybrid-rle-history.adoc[Hybrid RLE History (Submatch Memory Optimization)]
+An advanced 32-bit bit-packing strategy that applies Run-Length Encoding (RLE) during SWAR skips. It reduces history buffer consumption by up to 99.9% for repetitive patterns and enables ultra-fast "Warp Jumps" during backward path selection.
+
 == Design Philosophy
 
 * **Pure Go (Zero CGO)**: Achieving maximum performance without sacrificing portability or introducing the overhead of C-interop.
