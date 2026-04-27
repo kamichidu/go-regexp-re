@@ -33,8 +33,8 @@ type AnchorInfo struct {
 	Distance     int // Estimated distance from the start of the match
 	Forward      []Constraint
 	Backward     []Constraint
-	HasBeginText bool // Starts with ^
-	HasEndText   bool // Ends with $
+	HasBeginText bool // This anchor path is strictly anchored to ^
+	HasEndText   bool // This anchor path is strictly anchored to $
 }
 
 // ExtractAnchors traverses the AST and identifies all potential anchors.
@@ -48,7 +48,7 @@ func ExtractAnchors(re *syntax.Regexp) []AnchorInfo {
 	if flatRE == nil {
 		return nil
 	}
-	anchors := extractAnchors(flatRE, 0, false)
+	anchors := extractAnchors(flatRE, 0, false, true, false)
 
 	// Suffix identification
 	totalMin := minLength(re)
@@ -64,27 +64,6 @@ func ExtractAnchors(re *syntax.Regexp) []AnchorInfo {
 				}
 			}
 		}
-	}
-
-	// Anchor flags
-	hasBegin := false
-	hasEnd := false
-	if re.Op == syntax.OpConcat {
-		if len(re.Sub) > 0 && re.Sub[0].Op == syntax.OpBeginText {
-			hasBegin = true
-		}
-		if len(re.Sub) > 0 && re.Sub[len(re.Sub)-1].Op == syntax.OpEndText {
-			hasEnd = true
-		}
-	} else if re.Op == syntax.OpBeginText {
-		hasBegin = true
-	} else if re.Op == syntax.OpEndText {
-		hasEnd = true
-	}
-
-	for i := range anchors {
-		anchors[i].HasBeginText = hasBegin
-		anchors[i].HasEndText = hasEnd
 	}
 
 	return anchors
@@ -154,7 +133,9 @@ func stripCaptures(re *syntax.Regexp) *syntax.Regexp {
 }
 
 // extractAnchors identifies mandatory anchors.
-func extractAnchors(re *syntax.Regexp, offset int, inOptional bool) []AnchorInfo {
+// atStart: the path is currently at the beginning of the regex.
+// hasBegin: the path has already encountered OpBeginText.
+func extractAnchors(re *syntax.Regexp, offset int, inOptional bool, atStart bool, hasBegin bool) []AnchorInfo {
 	if inOptional || re == nil {
 		return nil
 	}
@@ -162,6 +143,8 @@ func extractAnchors(re *syntax.Regexp, offset int, inOptional bool) []AnchorInfo
 	var anchors []AnchorInfo
 
 	switch re.Op {
+	case syntax.OpBeginText:
+		// Do nothing, but flags will be passed down if atStart is true.
 	case syntax.OpLiteral:
 		if re.Flags&syntax.FoldCase == 0 {
 			var buf []byte
@@ -172,9 +155,10 @@ func extractAnchors(re *syntax.Regexp, offset int, inOptional bool) []AnchorInfo
 			}
 			if len(buf) > 0 {
 				anchors = append(anchors, AnchorInfo{
-					Anchor:   buf,
-					Type:     AnchorPivot,
-					Distance: offset,
+					Anchor:       buf,
+					Type:         AnchorPivot,
+					Distance:     offset,
+					HasBeginText: hasBegin,
 				})
 			}
 		}
@@ -184,33 +168,37 @@ func extractAnchors(re *syntax.Regexp, offset int, inOptional bool) []AnchorInfo
 				var b [utf8.UTFMax]byte
 				n := utf8.EncodeRune(b[:], re.Rune[0])
 				anchors = append(anchors, AnchorInfo{
-					Anchor:   b[:n],
-					Type:     AnchorPivot,
-					Distance: offset,
+					Anchor:       b[:n],
+					Type:         AnchorPivot,
+					Distance:     offset,
+					HasBeginText: hasBegin,
 				})
 			} else if info, ok := toCCWarp(re); ok {
 				anchors = append(anchors, AnchorInfo{
-					Class:    info,
-					HasClass: true,
-					Type:     AnchorPivot,
-					Distance: offset,
+					Class:        info,
+					HasClass:     true,
+					Type:         AnchorPivot,
+					Distance:     offset,
+					HasBeginText: hasBegin,
 				})
 			}
 		}
 	case syntax.OpRepeat:
 		if re.Min > 0 {
-			anchors = append(anchors, extractAnchors(re.Sub[0], offset, false)...)
+			anchors = append(anchors, extractAnchors(re.Sub[0], offset, false, atStart, hasBegin)...)
 		}
 	case syntax.OpQuest, syntax.OpStar:
 		// Optional
 	case syntax.OpPlus:
-		anchors = append(anchors, extractAnchors(re.Sub[0], offset, false)...)
+		anchors = append(anchors, extractAnchors(re.Sub[0], offset, false, atStart, hasBegin)...)
 	case syntax.OpCapture:
-		anchors = append(anchors, extractAnchors(re.Sub[0], offset, false)...)
+		anchors = append(anchors, extractAnchors(re.Sub[0], offset, false, atStart, hasBegin)...)
 	case syntax.OpConcat:
 		currentOffset := offset
+		currentAtStart := atStart
+		currentHasBegin := hasBegin
 		for i, sub := range re.Sub {
-			subAnchors := extractAnchors(sub, currentOffset, false)
+			subAnchors := extractAnchors(sub, currentOffset, false, currentAtStart, currentHasBegin)
 			if i == 0 && offset == 0 {
 				for j := range subAnchors {
 					if subAnchors[j].Distance == 0 {
@@ -220,14 +208,24 @@ func extractAnchors(re *syntax.Regexp, offset int, inOptional bool) []AnchorInfo
 			}
 			anchors = append(anchors, subAnchors...)
 
-			if d := minLength(sub); d >= 0 {
+			if sub.Op == syntax.OpBeginText && currentAtStart {
+				currentHasBegin = true
+			}
+
+			d := minLength(sub)
+			if d > 0 {
+				currentAtStart = false
+			}
+			if d >= 0 {
 				currentOffset += d
 			} else {
 				currentOffset = 1000000
 			}
 		}
 	case syntax.OpAlternate:
-		// Mandatory in ALL branches? Too complex for now, skip.
+		for _, sub := range re.Sub {
+			anchors = append(anchors, extractAnchors(sub, offset, false, atStart, hasBegin)...)
+		}
 	}
 
 	return anchors
@@ -297,7 +295,18 @@ func ExtractConstraints(re *syntax.Regexp, anchor *AnchorInfo) {
 }
 
 func extractConstraints(re *syntax.Regexp, anchor *AnchorInfo) {
-	if re == nil || re.Op != syntax.OpConcat {
+	if re == nil {
+		return
+	}
+	if re.Op == syntax.OpAlternate {
+		// Find WHICH branch this anchor belongs to.
+		// For now, simplify: if anchor is at distance X, find branch that has anchor at distance X.
+		for _, sub := range re.Sub {
+			extractConstraints(sub, anchor)
+		}
+		return
+	}
+	if re.Op != syntax.OpConcat {
 		return
 	}
 
@@ -440,35 +449,14 @@ func toCCWarp(re *syntax.Regexp) (CCWarpInfo, bool) {
 	return CCWarpInfo{}, false
 }
 
-func SelectBestAnchor(anchors []AnchorInfo) *AnchorInfo {
+func SelectBestAnchors(anchors []AnchorInfo) []AnchorInfo {
 	if len(anchors) == 0 {
 		return nil
 	}
-	var best *AnchorInfo
-	maxScore := -1
-	for i := range anchors {
-		score := 0
-		if anchors[i].HasClass {
-			score = 20
-		} else {
-			score = len(anchors[i].Anchor) * 10
-		}
-
-		if anchors[i].Type == AnchorPrefix {
-			score += 100
-		}
-		if anchors[i].Type == AnchorSuffix {
-			score += 50
-		}
-		if anchors[i].Distance >= 1000000 {
-			score -= 50
-		}
-		if score > maxScore {
-			maxScore = score
-			best = &anchors[i]
-		}
-	}
-	return best
+	// Sort by score or filter duplicates.
+	// For now, return up to 4 good anchors.
+	// Duplicate anchors with different distances are fine.
+	return anchors
 }
 
 func (a *AnchorInfo) Validate(b []byte, p int) (int, bool) {

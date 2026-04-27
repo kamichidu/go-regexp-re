@@ -29,7 +29,7 @@ type Regexp struct {
 	uIndices       []uint32
 	uPrioDeltas    []int32
 	searchWarp     ir.CCWarpInfo
-	mapAnchor      *ir.AnchorInfo
+	mapAnchors     []ir.AnchorInfo
 }
 
 type CompileOptions struct {
@@ -125,15 +125,15 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 
 	if res.literalMatcher == nil && !ir.HasComplexAnchors(s) {
 		anchors := ir.ExtractAnchors(s)
-		res.mapAnchor = ir.SelectBestAnchor(anchors)
-		if res.mapAnchor != nil {
+		for i := range anchors {
 			// Disable MAP for multiline anchored patterns for now
-			if (res.mapAnchor.HasBeginText || res.mapAnchor.HasEndText) && (s.Flags&syntax.OneLine == 0) {
-				res.mapAnchor = nil
-			} else {
-				ir.ExtractConstraints(s, res.mapAnchor)
+			if (anchors[i].HasBeginText || anchors[i].HasEndText) && (s.Flags&syntax.OneLine == 0) {
+				continue
 			}
+			ir.ExtractConstraints(s, &anchors[i])
+			res.mapAnchors = append(res.mapAnchors, anchors[i])
 		}
+		res.mapAnchors = ir.SelectBestAnchors(res.mapAnchors)
 	}
 
 	if opts.forceStrategy != strategyNone {

@@ -25,7 +25,8 @@ Every implementation must adhere to these pillars to ensure maximum performance:
 
 ### 2.4 Execution Switching Strategy
 To maximize throughput, the engine MUST select the most efficient execution loop based on pattern characteristics. The core execution loops are implemented in **`exec_dfa.go`** and dispatched via **`exec_dispatch.go`**:
-- **0-Pass (Literal Bypass)**: Selected for pure constant strings and anchored literals (e.g., `^abc$`, `^abc`, `abc$`). Bypasses all regex engines using SIMD-accelerated standard library search (e.g., `bytes.Index`, `bytes.HasPrefix`). It utilizes a **unified, interface-free `LiteralMatcher` component** (in `internal/ir/literal.go`) with a **Capture Template** to provide submatch indices with zero state-machine and zero dynamic-dispatch overhead. **When this strategy is selected, the engine MUST explicitly bypass all DFA construction to minimize compilation latency and memory footprint.**
+- **Pass 0 (Multi-Point Anchored Constraint Propagation - MAP)**: The primary search phase. It identifies all mandatory paths and extracts multiple anchor candidates (**Prefix**, **Pivot**, or **Suffix**). It utilizes SIMD (`bytes.Index`) and SWAR (`IndexClass`) to find match candidates and validates path-specific constraints before invoking the DFA. This handles complex patterns like `(^|[abc])literal` by checking multiple entry points.
+- **0-Pass (Literal Bypass)**: Selected for pure constant strings and anchored literals (e.g., `^abc$`, `^abc`, `abc$`). Bypasses all regex engines using SIMD-accelerated standard library search. It utilizes a **unified, interface-free `LiteralMatcher` component** (in `internal/ir/literal.go`) with a **Capture Template** to provide submatch indices with zero state-machine and zero dynamic-dispatch overhead. **When this strategy is selected, the engine MUST explicitly bypass all DFA construction to minimize compilation latency and memory footprint.**
 - **Fast Path (Pure DFA)**: Automatically selected for larger patterns. It utilizes a minimalist table-based execution loop (`fastMatchExecLoop`) with **Two-Phase SWAR Warping** (SearchWarp for pre-filtering noise and CCWarp for match fast-forwarding).
 - **SWAR Character Class Warp (CCWarp)**: A specialized execution strategy for "Pure Self-Loops"—DFA states that transition back to themselves without updating capture tags. It treats 64-bit registers as SIMD vectors to process 8 bytes in parallel, achieving up to 5 GB/s throughput.
 - **Anchor-Aware Guarded SIMD Warp**: Selected for patterns with anchors. Utilizes a separate `anchorTransitions` table and **guarded warp points** to allow SIMD skipping even in the presence of anchors (e.g., `^`, `$`, `\b`).
@@ -34,7 +35,7 @@ To maximize throughput, the engine MUST select the most efficient execution loop
 - **State-Resident Acceptance Flag**: To eliminate redundant memory lookups in hot loops, DFA state IDs MUST embed the `AcceptingStateFlag` (Bit 29). This allows the execution loop to identify accepting states via a single bitwise AND operation on the current state variable.
 - **Inlining-Friendly Anchor Verification**: Anchor verification logic (e.g., `^`, `$`, `\b`) MUST be implemented as tiny, specialized functions (e.g., `VerifyBegin`, `VerifyEnd`) to guarantee inlining by the Go compiler. Complex junction analysis MUST be avoided in favor of short-circuiting these specialized checks to minimize call-stack overhead and branch misprediction.
 - **Bitmask-First Short-Circuiting Mandate**: Every verification function MUST employ a single-instruction bitmask check (e.g., `if (req & MASK) == 0 { return true }`) as its first operation. This ensures that any transition not requiring specific anchor checks can exit in $O(1)$ with minimal pipeline disturbance. Failure to follow this pattern has been proven to cause 30-60% throughput regressions.
-- **Pre-calculated Search/Match States**: The initial `searchState` and `matchState` MUST be pre-calculated during compilation with all relevant flags (Accepting, Tagged) already applied, eliminating per-match setup costs.
+- **Pre-calculated Search/Match States**: The initial `searchState` and `matchState` MUST be pre-calculated during compilation with all relevant flags already applied, eliminating per-match setup costs.
 
 ### 2.5 Submatch Extraction Architecture (3-Pass Sparse TDFA)
 The engine follows a **3-Pass Sparse TDFA** strategy (implemented in **`exec_tdfa.go`**) to guarantee peak performance, $O(n)$ time complexity, and 100% Go-compatible precision.
@@ -76,10 +77,13 @@ To minimize compilation overhead, the engine MUST use an **Architectural Shortcu
 - **Literal-Only Bypass**: If a pattern is identified as a literal-only or anchor-literal sequence, the engine MUST skip `ir.DFA` construction entirely and delegate all operations to the `LiteralMatcher`.
 - **ASCII Restriction**: DFA construction is currently optimized for ASCII-only runes (0-127) when possible. Patterns requiring multi-byte UTF-8 support (e.g., non-ASCII runes or `.`) MUST utilize the full table-based DFA with UTF-8 handling.
 
-
-### 2.10 Prefix-Skip Optimization (SIMD Acceleration)
-- **Mandatory Prefix/Start-Set Extraction**: During compilation, the engine MUST extract both the longest constant prefix (for `bytes.Index`) and the set of possible first bytes (Start Set).
-- **SIMD/SWAR-Accelerated Skipping**: All execution loops MUST use `bytes.Index` to rapidly skip non-matching segments (SIMD Warp). If no constant prefix exists, the engine MUST employ a **SWAR Pre-filter** to skip bytes that cannot start a match, provided the Start Set is specific enough (typically < 64 unique bytes).
+### 2.10 Multi-Point Anchor & Constraint Optimization (Pass 0 - MAP)
+The engine MUST extract the most selective anchors from all mandatory AST paths to minimize DFA activations.
+- **Multi-Entry Point Discovery**: The engine MUST traverse **`OpAlternate`** to identify all possible entry points. For each path, a candidate anchor is extracted (e.g., `^` anchored or `literal` anchored).
+- **Capture Transparency**: Anchor extraction MUST be **Capture-Stripped**—ignoring `OpCapture` boundaries to merge adjacent literals into longer, more efficient anchors (e.g., `abc(def)ghi` -> `abcdefghi`).
+- **SIMD/SWAR Discovery**: Use SIMD (`bytes.Index`) for literals and SWAR (`IndexClass`) for character classes. Anchors tied to `^` are validated at index 0 only, while pivot anchors search the entire buffer.
+- **Forward/Backward Constraint Guard**: Once an anchor candidate is found, validate surrounding character constraints (fixed-length or dynamic warps) using path-specific SWAR kernels before starting the DFA.
+- **Dynamic Warp Integration**: If a repetitive class follows an anchor, the MAP phase MUST use **SWAR Warp** to skip the entire segment before initiating Pass 1.
 
 ### 2.11 Pure Go (No CGO)
 - **Zero Overhead**: Native Go only. CGO is strictly prohibited.
@@ -123,6 +127,11 @@ To achieve the $O(n)$ physical throughput goal, the engine MUST implement a hier
 - **Two-Phase Warping & Inverted Logic**: The engine MUST distinguish between **SearchWarp** (finding match start) and **CCWarp** (continuing match). SearchWarp MUST skip noise (characters NOT in the start set) using **Inverted Kernel Logic**. To achieve 10 GB/s+ throughput, SearchWarp MUST prioritize SIMD-accelerated library functions (`bytes.IndexByte`, `bytes.IndexAny`) before falling back to custom SWAR kernels.
 - **Correctness via Self-Loop Restriction**: SWAR Warp MUST be strictly restricted to "Pure Self-Loops"—states that lead back to the same ID without updating capture tags—to prevent submatch boundary corruption.
 - **Physical Throughput Baseline**: The engine MUST aim for a baseline throughput of 3-5 GB/s for simple repetitions (`a+`, `.*`, `[0-9]+`) and 0.5-1 GB/s for disjoint sets on modern x86/ARM hardware.
+
+### 2.21 MAP Correctness & Safety Mandate
+To maintain 100% compatibility, MAP MUST adhere to safety constraints:
+- **Nullable Pattern Protection**: If a pattern can match an empty string (`minLength == 0`), Pass 0 (MAP rejection) MUST be **disabled** to prevent missing matches (e.g., `a*` matching `""`).
+- **Complex Anchor Fallback**: Context-dependent anchors (e.g., `\b`, multiline `^`/`$`) MUST be handled by the DFA; MAP MUST be disabled if safe validation is impossible.
 
 ## 3. Feature Selection Policy
 
@@ -194,6 +203,7 @@ To prevent file bloat and maintain long-term maintainability, the codebase MUST 
 ### 6.2 IR & Compiler (`internal/ir/`)
 - **`dfa.go`**: core `DFA` structure, StateID layout constants, and basic getter methods.
 - **`dfa_builder.go`**: The DFA compiler, including subset construction, epsilon closure with anchor verification, and SWAR kernel detection.
+- **`anchor.go`**: Multi-Point Anchor extraction, constraint folding, and Pass 0 discovery kernels.
 - **`recap.go`**: Definitions for tag-carrying transition tables (`GroupRecapTable`, `RecapEntry`).
 - **`storage.go`**: Abstractions and implementations for NFA path set storage (`NFAPathStorage`).
 - **`literal.go`**: The `LiteralMatcher` for 0-pass bypass.
