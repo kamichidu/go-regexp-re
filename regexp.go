@@ -29,6 +29,7 @@ type Regexp struct {
 	uIndices       []uint32
 	uPrioDeltas    []int32
 	searchWarp     ir.CCWarpInfo
+	mapAnchor      *ir.AnchorInfo
 }
 
 type CompileOptions struct {
@@ -121,6 +122,15 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 		uPrioDeltas:    uPrioDeltas,
 		searchWarp:     searchWarp,
 	}
+
+	if res.literalMatcher == nil && !res.hasAnchors {
+		anchors := ir.ExtractAnchors(s)
+		res.mapAnchor = ir.SelectBestAnchor(anchors)
+		if res.mapAnchor != nil {
+			ir.ExtractConstraints(s, res.mapAnchor)
+		}
+	}
+
 	if opts.forceStrategy != strategyNone {
 		res.strategy = opts.forceStrategy
 	} else {

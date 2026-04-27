@@ -67,7 +67,7 @@ func main() {
 
 func run(r io.Reader) error {
 	scanner := bufio.NewScanner(r)
-	
+
 	// testKey -> engine -> EngineData
 	data := make(map[string]map[string]*EngineData)
 	var testKeys []string
@@ -100,7 +100,7 @@ func run(r io.Reader) error {
 			if strings.HasSuffix(fullName, "/"+e) || strings.Contains(fullName, "/"+e+"-") {
 				engine = e
 				// Remove engine and anything after it (like -2)
-				re := regexp.MustCompile("/"+regexp.QuoteMeta(e)+"(?:-\\d+)?$")
+				re := regexp.MustCompile("/" + regexp.QuoteMeta(e) + "(?:-\\d+)?$")
 				testKey = re.ReplaceAllString(fullName, "")
 				foundEngine = true
 				break
@@ -184,7 +184,7 @@ func run(r io.Reader) error {
 	// 2. Output Mermaid Graphs
 	// One graph per scenario, engines on the x-axis
 	fmt.Println("\n## Performance Graphs (MB/s, higher is better)")
-	
+
 	for _, tk := range testKeys {
 		var activeEngines []string
 		var values []string
