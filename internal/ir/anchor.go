@@ -37,7 +37,9 @@ type AnchorInfo struct {
 
 // ExtractAnchors traverses the AST and identifies all potential literal anchors.
 func ExtractAnchors(re *syntax.Regexp) []AnchorInfo {
-	anchors := extractAnchors(re, 0, false)
+	// Create a virtual flat AST for anchor extraction (strip captures)
+	flatRE := stripCaptures(re)
+	anchors := extractAnchors(flatRE, 0, false)
 
 	// Suffix identification
 	totalMin := minLength(re)
@@ -75,6 +77,56 @@ func ExtractAnchors(re *syntax.Regexp) []AnchorInfo {
 	return anchors
 }
 
+func stripCaptures(re *syntax.Regexp) *syntax.Regexp {
+	if re == nil {
+		return nil
+	}
+
+	res := *re // shallow copy
+	switch re.Op {
+	case syntax.OpCapture:
+		return stripCaptures(re.Sub[0])
+	case syntax.OpConcat:
+		var subs []*syntax.Regexp
+		for _, sub := range re.Sub {
+			s := stripCaptures(sub)
+			if s.Op == syntax.OpConcat {
+				subs = append(subs, s.Sub...)
+			} else {
+				subs = append(subs, s)
+			}
+		}
+
+		// Merge adjacent literals
+		if len(subs) > 1 {
+			merged := []*syntax.Regexp{subs[0]}
+			for i := 1; i < len(subs); i++ {
+				last := merged[len(merged)-1]
+				curr := subs[i]
+				if last.Op == syntax.OpLiteral && curr.Op == syntax.OpLiteral && last.Flags == curr.Flags {
+					newLit := *last
+					newLit.Rune = append(append([]rune(nil), last.Rune...), curr.Rune...)
+					merged[len(merged)-1] = &newLit
+				} else {
+					merged = append(merged, curr)
+				}
+			}
+			res.Sub = merged
+		} else {
+			res.Sub = subs
+		}
+	case syntax.OpAlternate:
+		var subs []*syntax.Regexp
+		for _, sub := range re.Sub {
+			subs = append(subs, stripCaptures(sub))
+		}
+		res.Sub = subs
+	case syntax.OpRepeat, syntax.OpQuest, syntax.OpPlus, syntax.OpStar:
+		res.Sub = []*syntax.Regexp{stripCaptures(re.Sub[0])}
+	}
+	return &res
+}
+
 func extractAnchors(re *syntax.Regexp, offset int, inStar bool) []AnchorInfo {
 	var anchors []AnchorInfo
 
@@ -105,7 +157,7 @@ func extractAnchors(re *syntax.Regexp, offset int, inStar bool) []AnchorInfo {
 				Distance: offset,
 			})
 		}
-	case syntax.OpCapture, syntax.OpRepeat, syntax.OpQuest, syntax.OpPlus:
+	case syntax.OpRepeat, syntax.OpQuest, syntax.OpPlus:
 		anchors = append(anchors, extractAnchors(re.Sub[0], offset, inStar)...)
 	case syntax.OpConcat:
 		currentOffset := offset
@@ -189,6 +241,12 @@ func minLength(re *syntax.Regexp) int {
 }
 
 func ExtractConstraints(re *syntax.Regexp, anchor *AnchorInfo) {
+	// Re-flatten to ensure constraints are calculated relative to the same flat structure
+	flatRE := stripCaptures(re)
+	extractConstraints(flatRE, anchor)
+}
+
+func extractConstraints(re *syntax.Regexp, anchor *AnchorInfo) {
 	if re.Op != syntax.OpConcat {
 		return
 	}
@@ -213,12 +271,11 @@ func ExtractConstraints(re *syntax.Regexp, anchor *AnchorInfo) {
 		return
 	}
 
-	// Backward constraints (Only support fixed length for now)
 	backOffset := 0
 	for i := anchorIdx - 1; i >= 0; i-- {
 		sub := re.Sub[i]
 		if sub.Op == syntax.OpBeginText {
-			continue // Handled by HasBeginText
+			continue
 		}
 		d := minLength(sub)
 		if d < 0 {
@@ -236,15 +293,13 @@ func ExtractConstraints(re *syntax.Regexp, anchor *AnchorInfo) {
 		}
 	}
 
-	// Forward constraints (Support variable length skip/warp)
 	forwardOffset := len(anchor.Anchor)
 	for i := anchorIdx + 1; i < len(re.Sub); i++ {
 		sub := re.Sub[i]
 		if sub.Op == syntax.OpEndText {
-			continue // Handled by HasEndText
+			continue
 		}
 		d := minLength(sub)
-
 		isRepeat := false
 		if sub.Op == syntax.OpStar || sub.Op == syntax.OpPlus || (sub.Op == syntax.OpRepeat && sub.Max == -1) {
 			isRepeat = true
@@ -258,7 +313,6 @@ func ExtractConstraints(re *syntax.Regexp, anchor *AnchorInfo) {
 				Info:     info,
 			})
 			if isRepeat {
-				// After a repeat, we can't easily track fixed offsets anymore for Pass 0
 				break
 			}
 		} else {
@@ -344,10 +398,7 @@ func SelectBestAnchor(anchors []AnchorInfo) *AnchorInfo {
 	return best
 }
 
-// Validate checks if the constraints at the given anchor position P are satisfied.
-// It returns the estimated end of the validated region (for skipping forward).
 func (a *AnchorInfo) Validate(b []byte, p int) (int, bool) {
-	// Backward constraints
 	for _, c := range a.Backward {
 		start := p + c.Offset
 		if start < 0 {
@@ -358,7 +409,6 @@ func (a *AnchorInfo) Validate(b []byte, p int) (int, bool) {
 		}
 	}
 
-	// Forward constraints
 	endPos := p + len(a.Anchor)
 	for _, c := range a.Forward {
 		start := p + c.Offset
@@ -366,7 +416,6 @@ func (a *AnchorInfo) Validate(b []byte, p int) (int, bool) {
 			return p, false
 		}
 		if c.IsRepeat {
-			// Dynamic Skip (Warp)
 			skipped := warp(c.Info, b[start:])
 			endPos = start + skipped
 		} else {
