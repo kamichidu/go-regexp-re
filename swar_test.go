@@ -30,6 +30,13 @@ func TestCCWarp(t *testing.T) {
 
 		// 6. UTF-8 Edge (Warp should stop at multi-byte)
 		{"[a-z]+", "abcdあefgh", true, []int{0, 4}},
+
+		// 7. Negated Character Classes (SWAR NotEqual / NotEqualSet)
+		{`[^"]+`, "hello world", true, []int{0, 11}},
+		{`[^"]+`, `"`, false, nil},
+		{`[^ "]+`, "helloworld", true, []int{0, 10}},
+		{`[^ "]+`, " ", false, nil},
+		{`[^ "]+`, `"`, false, nil},
 	}
 
 	for _, tt := range tests {

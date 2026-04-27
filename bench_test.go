@@ -155,9 +155,12 @@ func BenchmarkCCWarp(b *testing.B) {
 		pattern string
 		payload string
 	}{
-		{"Digits", `[0-9]+`, strings.Repeat("1234567890123456", 1024)}, // 16KB of digits
-		{"Word", `[a-zA-Z0-9_]+`, strings.Repeat("word1234_5678_word", 1024)},
-		{"Dot", `.*`, strings.Repeat("hello_swar_warp_8bytes", 1024)},
+		{"SingleRange", `[0-9]+`, strings.Repeat("12345678", 2048)},
+		{"AnyExceptNL", `.*`, strings.Repeat("abcdefgh", 2048)},
+		{"Bitmask", `[a-zA-Z0-9_]+`, strings.Repeat("Word1234", 2048)},
+		{"NotEqual", `[^"]+`, strings.Repeat("NoQuotes", 2048)},
+		{"NotEqualSet", `[^ "]+`, strings.Repeat("NoSpaceQ", 2048)},
+		{"NotBitmask", `[^a-zA-Z]+`, strings.Repeat("12345678", 2048)},
 	}
 
 	for _, c := range cases {
@@ -165,26 +168,20 @@ func BenchmarkCCWarp(b *testing.B) {
 			input := []byte(c.payload)
 			b.Run("Go", func(b *testing.B) {
 				r := goregexp.MustCompile(c.pattern)
-				b.ResetTimer()
+				b.ReportAllocs()
 				b.SetBytes(int64(len(input)))
+				b.ResetTimer()
 				for i := 0; i < b.N; i++ {
 					r.Match(input)
 				}
 			})
 			b.Run("Re", func(b *testing.B) {
 				r := MustCompile(c.pattern)
-				b.ResetTimer()
+				b.ReportAllocs()
 				b.SetBytes(int64(len(input)))
+				b.ResetTimer()
 				for i := 0; i < b.N; i++ {
 					r.Match(input)
-				}
-			})
-			b.Run("Re-Submatch", func(b *testing.B) {
-				r := MustCompile(c.pattern)
-				b.ResetTimer()
-				b.SetBytes(int64(len(input)))
-				for i := 0; i < b.N; i++ {
-					r.FindSubmatchIndex(input)
 				}
 			})
 		})

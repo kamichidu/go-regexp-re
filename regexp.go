@@ -282,6 +282,14 @@ func fastMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 		state = matchState
 	}
 
+	// BCE hint
+	if len(trans) > 0 {
+		_ = trans[len(trans)-1]
+	}
+	if len(guards) > 0 {
+		_ = guards[len(guards)-1]
+	}
+
 	i := 0
 	ccWarps := d.CCWarpTable()
 	for i < numBytes {
@@ -320,45 +328,32 @@ func fastMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 						i += 8
 					}
 				case ir.CCWarpNotEqualSet:
-					b0, b1, b2, b3, b4, b5, b6, b7 := info.Splats[0], info.Splats[1], info.Splats[2], info.Splats[3], info.Splats[4], info.Splats[5], info.Splats[6], info.Splats[7]
+					s0, s1, s2, s3, s4, s5, s6, s7 := info.Splats[0], info.Splats[1], info.Splats[2], info.Splats[3], info.Splats[4], info.Splats[5], info.Splats[6], info.Splats[7]
 					m0, m1, m2, m3, m4, m5, m6, m7 := info.Masks[0], info.Masks[1], info.Masks[2], info.Masks[3], info.Masks[4], info.Masks[5], info.Masks[6], info.Masks[7]
 					for i+8 <= numBytes {
 						v := binary.LittleEndian.Uint64(b[i:])
-						res := ((v ^ b0) & ^m0)
-						res &= ((v ^ b1) & ^m1)
-						res &= ((v ^ b2) & ^m2)
-						res &= ((v ^ b3) & ^m3)
-						res &= ((v ^ b4) & ^m4)
-						res &= ((v ^ b5) & ^m5)
-						res &= ((v ^ b6) & ^m6)
-						res &= ((v ^ b7) & ^m7)
-						// Has any byte become zero?
-						if (res-0x0101010101010101)&(^res)&0x8080808080808080 != 0x8080808080808080 {
+						res0 := (v ^ s0) & ^m0
+						res1 := (v ^ s1) & ^m1
+						res2 := (v ^ s2) & ^m2
+						res3 := (v ^ s3) & ^m3
+						res4 := (v ^ s4) & ^m4
+						res5 := (v ^ s5) & ^m5
+						res6 := (v ^ s6) & ^m6
+						res7 := (v ^ s7) & ^m7
+						m := (res0 - 0x0101010101010101) & (^res0)
+						m |= (res1 - 0x0101010101010101) & (^res1)
+						m |= (res2 - 0x0101010101010101) & (^res2)
+						m |= (res3 - 0x0101010101010101) & (^res3)
+						m |= (res4 - 0x0101010101010101) & (^res4)
+						m |= (res5 - 0x0101010101010101) & (^res5)
+						m |= (res6 - 0x0101010101010101) & (^res6)
+						m |= (res7 - 0x0101010101010101) & (^res7)
+						if (m & 0x8080808080808080) != 0x8080808080808080 {
 							break
 						}
 						i += 8
 					}
 				case ir.CCWarpNotBitmask:
-					mask := info.Mask
-					for i+8 <= numBytes {
-						v := binary.LittleEndian.Uint64(b[i:])
-						if v&0x8080808080808080 != 0 {
-							break
-						}
-						allExcluded := true
-						for k := 0; k < 8; k++ {
-							bv := byte(v >> (k * 8))
-							if (mask[bv>>6] & (1 << (bv & 63))) == 0 {
-								allExcluded = false
-								break
-							}
-						}
-						if !allExcluded {
-							break
-						}
-						i += 8
-					}
-				case ir.CCWarpBitmask:
 					mask := info.Mask
 					for i+8 <= numBytes {
 						v := binary.LittleEndian.Uint64(b[i:])
@@ -374,6 +369,26 @@ func fastMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 							}
 						}
 						if !noneIncluded {
+							break
+						}
+						i += 8
+					}
+				case ir.CCWarpBitmask:
+					mask := info.Mask
+					for i+8 <= numBytes {
+						v := binary.LittleEndian.Uint64(b[i:])
+						if v&0x8080808080808080 != 0 {
+							break
+						}
+						allIncluded := true
+						for k := 0; k < 8; k++ {
+							bv := byte(v >> (k * 8))
+							if (mask[bv>>6] & (1 << (bv & 63))) == 0 {
+								allIncluded = false
+								break
+							}
+						}
+						if !allIncluded {
 							break
 						}
 						i += 8
@@ -423,24 +438,31 @@ func fastMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 					i += 8
 				}
 			case ir.CCWarpNotEqualSet:
-				b0, b1, b2, b3, b4, b5, b6, b7 := info.Splats[0], info.Splats[1], info.Splats[2], info.Splats[3], info.Splats[4], info.Splats[5], info.Splats[6], info.Splats[7]
+				s0, s1, s2, s3, s4, s5, s6, s7 := info.Splats[0], info.Splats[1], info.Splats[2], info.Splats[3], info.Splats[4], info.Splats[5], info.Splats[6], info.Splats[7]
 				m0, m1, m2, m3, m4, m5, m6, m7 := info.Masks[0], info.Masks[1], info.Masks[2], info.Masks[3], info.Masks[4], info.Masks[5], info.Masks[6], info.Masks[7]
 				for i+8 <= numBytes {
 					v := binary.LittleEndian.Uint64(b[i:])
-					res := ((v ^ b0) & ^m0)
-					res &= ((v ^ b1) & ^m1)
-					res &= ((v ^ b2) & ^m2)
-					res &= ((v ^ b3) & ^m3)
-					res &= ((v ^ b4) & ^m4)
-					res &= ((v ^ b5) & ^m5)
-					res &= ((v ^ b6) & ^m6)
-					res &= ((v ^ b7) & ^m7)
-					if (res-0x0101010101010101)&(^res)&0x8080808080808080 != 0 {
+					res0 := (v ^ s0) & ^m0
+					res1 := (v ^ s1) & ^m1
+					res2 := (v ^ s2) & ^m2
+					res3 := (v ^ s3) & ^m3
+					res4 := (v ^ s4) & ^m4
+					res5 := (v ^ s5) & ^m5
+					res6 := (v ^ s6) & ^m6
+					res7 := (v ^ s7) & ^m7
+					m := (res0 - 0x0101010101010101) & (^res0)
+					m |= (res1 - 0x0101010101010101) & (^res1)
+					m |= (res2 - 0x0101010101010101) & (^res2)
+					m |= (res3 - 0x0101010101010101) & (^res3)
+					m |= (res4 - 0x0101010101010101) & (^res4)
+					m |= (res5 - 0x0101010101010101) & (^res5)
+					m |= (res6 - 0x0101010101010101) & (^res6)
+					m |= (res7 - 0x0101010101010101) & (^res7)
+					if (m & 0x8080808080808080) != 0 {
 						break
 					}
 					i += 8
 				}
-
 			case ir.CCWarpNotBitmask:
 				mask := info.Mask
 				for i+8 <= numBytes {
@@ -448,15 +470,15 @@ func fastMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 					if v&0x8080808080808080 != 0 {
 						break
 					}
-					noneExcluded := true
+					noneIncluded := true
 					for k := 0; k < 8; k++ {
 						bv := byte(v >> (k * 8))
 						if (mask[bv>>6] & (1 << (bv & 63))) != 0 {
-							noneExcluded = false
+							noneIncluded = false
 							break
 						}
 					}
-					if !noneExcluded {
+					if !noneIncluded {
 						break
 					}
 					i += 8
@@ -487,11 +509,6 @@ func fastMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 					p := prio + d.MatchPriority(sidx)
 					if p <= bestPriority {
 						bestPriority, bestEnd = p, i
-						if anchorStart {
-							bestStart = 0
-						} else {
-							bestStart = p / ir.SearchRestartPenalty
-						}
 						if d.IsBestMatch(sidx) {
 							return bestStart, bestEnd, bestPriority
 						}
@@ -593,6 +610,14 @@ func extendedMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 		state = matchState
 	}
 
+	// BCE hint
+	if len(trans) > 0 {
+		_ = trans[len(trans)-1]
+	}
+	if len(guards) > 0 {
+		_ = guards[len(guards)-1]
+	}
+
 	i := 0
 	ccWarps := d.CCWarpTable()
 	for i < numBytes {
@@ -631,45 +656,32 @@ func extendedMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 						i += 8
 					}
 				case ir.CCWarpNotEqualSet:
-					b0, b1, b2, b3, b4, b5, b6, b7 := info.Splats[0], info.Splats[1], info.Splats[2], info.Splats[3], info.Splats[4], info.Splats[5], info.Splats[6], info.Splats[7]
+					s0, s1, s2, s3, s4, s5, s6, s7 := info.Splats[0], info.Splats[1], info.Splats[2], info.Splats[3], info.Splats[4], info.Splats[5], info.Splats[6], info.Splats[7]
 					m0, m1, m2, m3, m4, m5, m6, m7 := info.Masks[0], info.Masks[1], info.Masks[2], info.Masks[3], info.Masks[4], info.Masks[5], info.Masks[6], info.Masks[7]
 					for i+8 <= numBytes {
 						v := binary.LittleEndian.Uint64(b[i:])
-						res := ((v ^ b0) & ^m0)
-						res &= ((v ^ b1) & ^m1)
-						res &= ((v ^ b2) & ^m2)
-						res &= ((v ^ b3) & ^m3)
-						res &= ((v ^ b4) & ^m4)
-						res &= ((v ^ b5) & ^m5)
-						res &= ((v ^ b6) & ^m6)
-						res &= ((v ^ b7) & ^m7)
-						// Has any byte become zero?
-						if (res-0x0101010101010101)&(^res)&0x8080808080808080 != 0x8080808080808080 {
+						res0 := (v ^ s0) & ^m0
+						res1 := (v ^ s1) & ^m1
+						res2 := (v ^ s2) & ^m2
+						res3 := (v ^ s3) & ^m3
+						res4 := (v ^ s4) & ^m4
+						res5 := (v ^ s5) & ^m5
+						res6 := (v ^ s6) & ^m6
+						res7 := (v ^ s7) & ^m7
+						m := (res0 - 0x0101010101010101) & (^res0)
+						m |= (res1 - 0x0101010101010101) & (^res1)
+						m |= (res2 - 0x0101010101010101) & (^res2)
+						m |= (res3 - 0x0101010101010101) & (^res3)
+						m |= (res4 - 0x0101010101010101) & (^res4)
+						m |= (res5 - 0x0101010101010101) & (^res5)
+						m |= (res6 - 0x0101010101010101) & (^res6)
+						m |= (res7 - 0x0101010101010101) & (^res7)
+						if (m & 0x8080808080808080) != 0x8080808080808080 {
 							break
 						}
 						i += 8
 					}
 				case ir.CCWarpNotBitmask:
-					mask := info.Mask
-					for i+8 <= numBytes {
-						v := binary.LittleEndian.Uint64(b[i:])
-						if v&0x8080808080808080 != 0 {
-							break
-						}
-						allExcluded := true
-						for k := 0; k < 8; k++ {
-							bv := byte(v >> (k * 8))
-							if (mask[bv>>6] & (1 << (bv & 63))) == 0 {
-								allExcluded = false
-								break
-							}
-						}
-						if !allExcluded {
-							break
-						}
-						i += 8
-					}
-				case ir.CCWarpBitmask:
 					mask := info.Mask
 					for i+8 <= numBytes {
 						v := binary.LittleEndian.Uint64(b[i:])
@@ -685,6 +697,26 @@ func extendedMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 							}
 						}
 						if !noneIncluded {
+							break
+						}
+						i += 8
+					}
+				case ir.CCWarpBitmask:
+					mask := info.Mask
+					for i+8 <= numBytes {
+						v := binary.LittleEndian.Uint64(b[i:])
+						if v&0x8080808080808080 != 0 {
+							break
+						}
+						allIncluded := true
+						for k := 0; k < 8; k++ {
+							bv := byte(v >> (k * 8))
+							if (mask[bv>>6] & (1 << (bv & 63))) == 0 {
+								allIncluded = false
+								break
+							}
+						}
+						if !allIncluded {
 							break
 						}
 						i += 8
@@ -734,24 +766,31 @@ func extendedMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 					i += 8
 				}
 			case ir.CCWarpNotEqualSet:
-				b0, b1, b2, b3, b4, b5, b6, b7 := info.Splats[0], info.Splats[1], info.Splats[2], info.Splats[3], info.Splats[4], info.Splats[5], info.Splats[6], info.Splats[7]
+				s0, s1, s2, s3, s4, s5, s6, s7 := info.Splats[0], info.Splats[1], info.Splats[2], info.Splats[3], info.Splats[4], info.Splats[5], info.Splats[6], info.Splats[7]
 				m0, m1, m2, m3, m4, m5, m6, m7 := info.Masks[0], info.Masks[1], info.Masks[2], info.Masks[3], info.Masks[4], info.Masks[5], info.Masks[6], info.Masks[7]
 				for i+8 <= numBytes {
 					v := binary.LittleEndian.Uint64(b[i:])
-					res := ((v ^ b0) & ^m0)
-					res &= ((v ^ b1) & ^m1)
-					res &= ((v ^ b2) & ^m2)
-					res &= ((v ^ b3) & ^m3)
-					res &= ((v ^ b4) & ^m4)
-					res &= ((v ^ b5) & ^m5)
-					res &= ((v ^ b6) & ^m6)
-					res &= ((v ^ b7) & ^m7)
-					if (res-0x0101010101010101)&(^res)&0x8080808080808080 != 0 {
+					res0 := (v ^ s0) & ^m0
+					res1 := (v ^ s1) & ^m1
+					res2 := (v ^ s2) & ^m2
+					res3 := (v ^ s3) & ^m3
+					res4 := (v ^ s4) & ^m4
+					res5 := (v ^ s5) & ^m5
+					res6 := (v ^ s6) & ^m6
+					res7 := (v ^ s7) & ^m7
+					m := (res0 - 0x0101010101010101) & (^res0)
+					m |= (res1 - 0x0101010101010101) & (^res1)
+					m |= (res2 - 0x0101010101010101) & (^res2)
+					m |= (res3 - 0x0101010101010101) & (^res3)
+					m |= (res4 - 0x0101010101010101) & (^res4)
+					m |= (res5 - 0x0101010101010101) & (^res5)
+					m |= (res6 - 0x0101010101010101) & (^res6)
+					m |= (res7 - 0x0101010101010101) & (^res7)
+					if (m & 0x8080808080808080) != 0 {
 						break
 					}
 					i += 8
 				}
-
 			case ir.CCWarpNotBitmask:
 				mask := info.Mask
 				for i+8 <= numBytes {
@@ -759,15 +798,15 @@ func extendedMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 					if v&0x8080808080808080 != 0 {
 						break
 					}
-					noneExcluded := true
+					noneIncluded := true
 					for k := 0; k < 8; k++ {
 						bv := byte(v >> (k * 8))
 						if (mask[bv>>6] & (1 << (bv & 63))) != 0 {
-							noneExcluded = false
+							noneIncluded = false
 							break
 						}
 					}
-					if !noneExcluded {
+					if !noneIncluded {
 						break
 					}
 					i += 8
@@ -798,11 +837,6 @@ func extendedMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 					p := prio + d.MatchPriority(sidx)
 					if p <= bestPriority {
 						bestPriority, bestEnd = p, i
-						if anchorStart {
-							bestStart = 0
-						} else {
-							bestStart = p / ir.SearchRestartPenalty
-						}
 						if d.IsBestMatch(sidx) {
 							return bestStart, bestEnd, bestPriority
 						}
@@ -911,6 +945,15 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 		state = matchState
 	}
 
+	// BCE hint
+	if len(trans) > 0 {
+		_ = trans[len(trans)-1]
+	}
+	if len(guards) > 0 {
+		_ = guards[len(guards)-1]
+	}
+	_ = mc.history[len(mc.history)-1]
+
 	i := 0
 	ccWarps := d.CCWarpTable()
 	for i < numBytes {
@@ -930,11 +973,8 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 						mc.history[i+k] = sidx
 					}
 					i += pos
-					prio = i * ir.SearchRestartPenalty
-					continue
 				}
 			} else if re.searchWarp.Kernel != ir.CCWarpNone && i+8 <= numBytes {
-				// Dedicated SWAR Pre-filter
 				info := re.searchWarp
 				switch info.Kernel {
 				case ir.CCWarpSingleRange:
@@ -963,19 +1003,27 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 						i += 8
 					}
 				case ir.CCWarpNotEqualSet:
-					b0, b1, b2, b3, b4, b5, b6, b7 := info.Splats[0], info.Splats[1], info.Splats[2], info.Splats[3], info.Splats[4], info.Splats[5], info.Splats[6], info.Splats[7]
+					s0, s1, s2, s3, s4, s5, s6, s7 := info.Splats[0], info.Splats[1], info.Splats[2], info.Splats[3], info.Splats[4], info.Splats[5], info.Splats[6], info.Splats[7]
 					m0, m1, m2, m3, m4, m5, m6, m7 := info.Masks[0], info.Masks[1], info.Masks[2], info.Masks[3], info.Masks[4], info.Masks[5], info.Masks[6], info.Masks[7]
 					for i+8 <= numBytes {
 						v := binary.LittleEndian.Uint64(b[i:])
-						res := ((v ^ b0) & ^m0)
-						res &= ((v ^ b1) & ^m1)
-						res &= ((v ^ b2) & ^m2)
-						res &= ((v ^ b3) & ^m3)
-						res &= ((v ^ b4) & ^m4)
-						res &= ((v ^ b5) & ^m5)
-						res &= ((v ^ b6) & ^m6)
-						res &= ((v ^ b7) & ^m7)
-						if (res-0x0101010101010101)&(^res)&0x8080808080808080 != 0x8080808080808080 {
+						res0 := (v ^ s0) & ^m0
+						res1 := (v ^ s1) & ^m1
+						res2 := (v ^ s2) & ^m2
+						res3 := (v ^ s3) & ^m3
+						res4 := (v ^ s4) & ^m4
+						res5 := (v ^ s5) & ^m5
+						res6 := (v ^ s6) & ^m6
+						res7 := (v ^ s7) & ^m7
+						m := (res0 - 0x0101010101010101) & (^res0)
+						m |= (res1 - 0x0101010101010101) & (^res1)
+						m |= (res2 - 0x0101010101010101) & (^res2)
+						m |= (res3 - 0x0101010101010101) & (^res3)
+						m |= (res4 - 0x0101010101010101) & (^res4)
+						m |= (res5 - 0x0101010101010101) & (^res5)
+						m |= (res6 - 0x0101010101010101) & (^res6)
+						m |= (res7 - 0x0101010101010101) & (^res7)
+						if (m & 0x8080808080808080) != 0x8080808080808080 {
 							break
 						}
 						for k := 0; k < 8; k++ {
@@ -984,29 +1032,6 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 						i += 8
 					}
 				case ir.CCWarpNotBitmask:
-					mask := info.Mask
-					for i+8 <= numBytes {
-						v := binary.LittleEndian.Uint64(b[i:])
-						if v&0x8080808080808080 != 0 {
-							break
-						}
-						ok := true
-						for k := 0; k < 8; k++ {
-							bv := byte(v >> (k * 8))
-							if (mask[bv>>6] & (1 << (bv & 63))) != 0 {
-								ok = false
-								break
-							}
-						}
-						if !ok {
-							break
-						}
-						for k := 0; k < 8; k++ {
-							mc.history[i+k] = sidx
-						}
-						i += 8
-					}
-				case ir.CCWarpBitmask:
 					mask := info.Mask
 					for i+8 <= numBytes {
 						v := binary.LittleEndian.Uint64(b[i:])
@@ -1024,16 +1049,39 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 						if !noneIncluded {
 							break
 						}
+						i += 8
+					}
+				case ir.CCWarpBitmask:
+					mask := info.Mask
+					for i+8 <= numBytes {
+						v := binary.LittleEndian.Uint64(b[i:])
+						if v&0x8080808080808080 != 0 {
+							break
+						}
+						allIncluded := true
+						for k := 0; k < 8; k++ {
+							bv := byte(v >> (k * 8))
+							if (mask[bv>>6] & (1 << (bv & 63))) == 0 {
+								allIncluded = false
+								break
+							}
+						}
+						if !allIncluded {
+							break
+						}
 						for k := 0; k < 8; k++ {
 							mc.history[i+k] = sidx
 						}
 						i += 8
 					}
 				}
-				if i > oldI {
-					prio = i * ir.SearchRestartPenalty
-					continue
+			}
+			if i > oldI {
+				prio = i * ir.SearchRestartPenalty
+				if i >= numBytes {
+					break
 				}
+				sidx = state & ir.StateIDMask
 			}
 		}
 
@@ -1081,16 +1129,25 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 				}
 			case ir.CCWarpNotEqualSet:
 				s0, s1, s2, s3, s4, s5, s6, s7 := info.Splats[0], info.Splats[1], info.Splats[2], info.Splats[3], info.Splats[4], info.Splats[5], info.Splats[6], info.Splats[7]
+				m0, m1, m2, m3, m4, m5, m6, m7 := info.Masks[0], info.Masks[1], info.Masks[2], info.Masks[3], info.Masks[4], info.Masks[5], info.Masks[6], info.Masks[7]
 				for i+8 <= numBytes {
 					v := binary.LittleEndian.Uint64(b[i:])
-					m := ((v ^ s0) - 0x0101010101010101) & ^(v ^ s0)
-					m |= ((v ^ s1) - 0x0101010101010101) & ^(v ^ s1)
-					m |= ((v ^ s2) - 0x0101010101010101) & ^(v ^ s2)
-					m |= ((v ^ s3) - 0x0101010101010101) & ^(v ^ s3)
-					m |= ((v ^ s4) - 0x0101010101010101) & ^(v ^ s4)
-					m |= ((v ^ s5) - 0x0101010101010101) & ^(v ^ s5)
-					m |= ((v ^ s6) - 0x0101010101010101) & ^(v ^ s6)
-					m |= ((v ^ s7) - 0x0101010101010101) & ^(v ^ s7)
+					res0 := (v ^ s0) & ^m0
+					res1 := (v ^ s1) & ^m1
+					res2 := (v ^ s2) & ^m2
+					res3 := (v ^ s3) & ^m3
+					res4 := (v ^ s4) & ^m4
+					res5 := (v ^ s5) & ^m5
+					res6 := (v ^ s6) & ^m6
+					res7 := (v ^ s7) & ^m7
+					m := (res0 - 0x0101010101010101) & (^res0)
+					m |= (res1 - 0x0101010101010101) & (^res1)
+					m |= (res2 - 0x0101010101010101) & (^res2)
+					m |= (res3 - 0x0101010101010101) & (^res3)
+					m |= (res4 - 0x0101010101010101) & (^res4)
+					m |= (res5 - 0x0101010101010101) & (^res5)
+					m |= (res6 - 0x0101010101010101) & (^res6)
+					m |= (res7 - 0x0101010101010101) & (^res7)
 					if (m & 0x8080808080808080) != 0 {
 						break
 					}
@@ -1106,19 +1163,16 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 					if v&0x8080808080808080 != 0 {
 						break
 					}
-					ok := true
+					noneIncluded := true
 					for k := 0; k < 8; k++ {
 						bv := byte(v >> (k * 8))
 						if (mask[bv>>6] & (1 << (bv & 63))) != 0 {
-							ok = false
+							noneIncluded = false
 							break
 						}
 					}
-					if !ok {
+					if !noneIncluded {
 						break
-					}
-					for k := 0; k < 8; k++ {
-						mc.history[i+k] = sidx
 					}
 					i += 8
 				}
@@ -1129,15 +1183,15 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 					if v&0x8080808080808080 != 0 {
 						break
 					}
-					ok := true
+					allIncluded := true
 					for k := 0; k < 8; k++ {
 						bv := byte(v >> (k * 8))
 						if (mask[bv>>6] & (1 << (bv & 63))) == 0 {
-							ok = false
+							allIncluded = false
 							break
 						}
 					}
-					if !ok {
+					if !allIncluded {
 						break
 					}
 					for k := 0; k < 8; k++ {
@@ -1151,11 +1205,6 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 					p := prio + d.MatchPriority(sidx)
 					if p <= bestPriority {
 						bestPriority, bestEnd = p, i
-						if anchorStart {
-							bestStart = 0
-						} else {
-							bestStart = p / ir.SearchRestartPenalty
-						}
 						if d.IsBestMatch(sidx) {
 							return bestStart, bestEnd, bestPriority
 						}
