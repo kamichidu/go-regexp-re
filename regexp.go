@@ -1009,10 +1009,11 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 	if len(guards) > 0 {
 		_ = guards[len(guards)-1]
 	}
-	_ = mc.history[len(mc.history)-1]
 
 	i := 0
 	ccWarps := d.CCWarpTable()
+	mc.appendRaw(state & ir.StateIDMask) // Initial state at pos 0
+
 	for i < numBytes {
 		sidx := state & ir.StateIDMask
 
@@ -1022,13 +1023,12 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 			if len(re.prefix) > 0 {
 				pos := bytes.Index(b[i:], re.prefix)
 				if pos < 0 {
+					mc.appendWarp(sidx, numBytes-i)
 					i = numBytes
 					break
 				}
 				if pos > 0 {
-					for k := 0; k < pos; k++ {
-						mc.history[i+k] = sidx
-					}
+					mc.appendWarp(sidx, pos)
 					i += pos
 				}
 			} else if re.searchWarp.Kernel != ir.CCWarpNone && i < numBytes {
@@ -1038,13 +1038,11 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 					target := byte(info.V0)
 					pos := bytes.IndexByte(b[i:], target)
 					if pos < 0 {
-						for k := i; k < numBytes; k++ {
-							mc.history[k] = sidx
-						}
+						mc.appendWarp(sidx, numBytes-i)
 						i = numBytes
 					} else {
-						for k := 0; k < pos; k++ {
-							mc.history[i+k] = sidx
+						if pos > 0 {
+							mc.appendWarp(sidx, pos)
 						}
 						i += pos
 					}
@@ -1052,60 +1050,66 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 					if info.IndexAny != "" {
 						pos := bytes.IndexAny(b[i:], info.IndexAny)
 						if pos < 0 {
-							for k := i; k < numBytes; k++ {
-								mc.history[k] = sidx
-							}
+							mc.appendWarp(sidx, numBytes-i)
 							i = numBytes
 						} else {
-							for k := 0; k < pos; k++ {
-								mc.history[i+k] = sidx
+							if pos > 0 {
+								mc.appendWarp(sidx, pos)
 							}
 							i += pos
 						}
 						break
 					}
 					low, high := info.V0, info.V1
+					oldWarpI := i
 					for i < numBytes {
 						bv := b[i]
 						if bv >= byte(low) && bv <= byte(high) {
 							break
 						}
-						mc.history[i] = sidx
 						i++
+					}
+					if i > oldWarpI {
+						mc.appendWarp(sidx, i-oldWarpI)
 					}
 				case ir.CCWarpNotSingleRange:
 					low, high := info.V0, info.V1
+					oldWarpI := i
 					for i < numBytes {
 						bv := b[i]
 						if bv < byte(low) || bv > byte(high) {
 							break
 						}
-						mc.history[i] = sidx
 						i++
+					}
+					if i > oldWarpI {
+						mc.appendWarp(sidx, i-oldWarpI)
 					}
 				case ir.CCWarpNotEqual:
 					target := byte(info.V0)
+					oldWarpI := i
 					for i < numBytes && b[i] == target {
-						mc.history[i] = sidx
 						i++
+					}
+					if i > oldWarpI {
+						mc.appendWarp(sidx, i-oldWarpI)
 					}
 				case ir.CCWarpBitmask:
 					if info.IndexAny != "" {
 						pos := bytes.IndexAny(b[i:], info.IndexAny)
 						if pos < 0 {
-							for k := i; k < numBytes; k++ {
-								mc.history[k] = sidx
-							}
+							mc.appendWarp(sidx, numBytes-i)
 							i = numBytes
 						} else {
-							for k := 0; k < pos; k++ {
-								mc.history[i+k] = sidx
+							if pos > 0 {
+								mc.appendWarp(sidx, pos)
 							}
 							i += pos
 						}
 						break
 					}
 					m0, m1 := info.Extra[0], info.Extra[1]
+					oldWarpI := i
 					for i < numBytes {
 						bv := b[i]
 						if bv >= 128 {
@@ -1120,8 +1124,10 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 								break
 							}
 						}
-						mc.history[i] = sidx
 						i++
+					}
+					if i > oldWarpI {
+						mc.appendWarp(sidx, i-oldWarpI)
 					}
 				}
 			}
@@ -1146,9 +1152,7 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 					if v != target {
 						break
 					}
-					for k := 0; k < 8; k++ {
-						mc.history[i+k] = sidx
-					}
+					mc.appendWarp(sidx, 8)
 					i += 8
 				}
 			case ir.CCWarpSingleRange:
@@ -1158,9 +1162,7 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 					if ((v+0x7f7f7f7f7f7f7f7f-high)|(v-low))&0x8080808080808080 != 0 {
 						break
 					}
-					for k := 0; k < 8; k++ {
-						mc.history[i+k] = sidx
-					}
+					mc.appendWarp(sidx, 8)
 					i += 8
 				}
 			case ir.CCWarpNotSingleRange:
@@ -1170,9 +1172,7 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 					if ((v+0x7f7f7f7f7f7f7f7f-high)|(v-low))&0x8080808080808080 != 0x8080808080808080 {
 						break
 					}
-					for k := 0; k < 8; k++ {
-						mc.history[i+k] = sidx
-					}
+					mc.appendWarp(sidx, 8)
 					i += 8
 				}
 			case ir.CCWarpAnyChar:
@@ -1181,9 +1181,7 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 					if v&0x8080808080808080 != 0 {
 						break
 					}
-					for k := 0; k < 8; k++ {
-						mc.history[i+k] = sidx
-					}
+					mc.appendWarp(sidx, 8)
 					i += 8
 				}
 			case ir.CCWarpAnyExceptNL:
@@ -1193,9 +1191,7 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 					if (diff-0x0101010101010101)&(^diff)&0x8080808080808080 != 0 {
 						break
 					}
-					for k := 0; k < 8; k++ {
-						mc.history[i+k] = sidx
-					}
+					mc.appendWarp(sidx, 8)
 					i += 8
 				}
 			case ir.CCWarpNotEqual:
@@ -1206,9 +1202,7 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 					if (diff-0x0101010101010101)&(^diff)&0x8080808080808080 != 0 {
 						break
 					}
-					for k := 0; k < 8; k++ {
-						mc.history[i+k] = sidx
-					}
+					mc.appendWarp(sidx, 8)
 					i += 8
 				}
 			case ir.CCWarpNotEqualSet:
@@ -1223,9 +1217,7 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 					if (match & 0x8080808080808080) != 0 {
 						break
 					}
-					for k := 0; k < 8; k++ {
-						mc.history[i+k] = sidx
-					}
+					mc.appendWarp(sidx, 8)
 					i += 8
 				}
 			case ir.CCWarpEqualSet:
@@ -1240,9 +1232,7 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 					if (match & 0x8080808080808080) != 0x8080808080808080 {
 						break
 					}
-					for k := 0; k < 8; k++ {
-						mc.history[i+k] = sidx
-					}
+					mc.appendWarp(sidx, 8)
 					i += 8
 				}
 			case ir.CCWarpNotBitmask:
@@ -1263,9 +1253,7 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 					if !noneIncluded {
 						break
 					}
-					for k := 0; k < 8; k++ {
-						mc.history[i+k] = sidx
-					}
+					mc.appendWarp(sidx, 8)
 					i += 8
 				}
 			case ir.CCWarpBitmask:
@@ -1293,9 +1281,7 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 					if !allIncluded {
 						break
 					}
-					for k := 0; k < 8; k++ {
-						mc.history[i+k] = sidx
-					}
+					mc.appendWarp(sidx, 8)
 					i += 8
 				}
 			}
@@ -1318,7 +1304,6 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 			}
 		}
 
-		mc.history[i] = sidx
 		if (state & ir.AcceptingStateFlag) != 0 {
 			req := guards[sidx]
 			if req == 0 || (ir.VerifyEnd(b, i, numBytes, req) && ir.VerifyBegin(b, i, req) && ir.VerifyWord(b, i, numBytes, req)) {
@@ -1362,11 +1347,12 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 					i++
 				} else {
 					step := 1 + ir.GetTrailingByteCount(byteVal)
-					for k := 1; k < step; k++ {
-						mc.history[i+k] = state & ir.StateIDMask
+					if step > 1 {
+						mc.appendWarp(state&ir.StateIDMask, step-1)
 					}
 					i += step
 				}
+				mc.appendRaw(state & ir.StateIDMask)
 				continue
 			}
 		}
@@ -1376,11 +1362,11 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 		i++
 		prio = i * ir.SearchRestartPenalty
 		state = searchState
+		mc.appendRaw(state & ir.StateIDMask)
 	}
 
 	// Final EOF check
 	sidx := state & ir.StateIDMask
-	mc.history[numBytes] = sidx
 	if (state & ir.AcceptingStateFlag) != 0 {
 		req := guards[sidx]
 		if req == 0 || (ir.VerifyEnd(b, numBytes, numBytes, req) && ir.VerifyBegin(b, numBytes, req) && ir.VerifyWord(b, numBytes, numBytes, req)) {
@@ -1403,43 +1389,121 @@ func (re *Regexp) sparseTDFA_PathSelection(mc *matchContext, b []byte, start, en
 	recap := d.RecapTables()[0]
 	uIndices, uUpdates := d.TagUpdateIndices(), d.TagUpdates()
 
-	currPrio := int16(d.MatchPriority(mc.history[end]))
+	// 1. Find the history entry that covers the 'end' position.
+	histIdx := -1
+	byteOffset := 0
+	for i, entry := range mc.history {
+		length := 1
+		if (entry & histWarpMarker) != 0 {
+			length = int((entry & histLengthMask) >> histLengthShift)
+		}
+		if byteOffset+length > end {
+			histIdx = i
+			break
+		}
+		byteOffset += length
+	}
+
+	if histIdx == -1 {
+		return
+	}
+
+	// Initial priority from the state at 'end'.
+	entry := mc.history[histIdx]
+	currPrio := int16(d.MatchPriority(entry & histStateMask))
 	mc.pathHistory[end] = int32(currPrio)
 
-	for i := end - 1; i >= start; i-- {
-		byteVal := b[i]
-		sidx := mc.history[i]
-		if sidx == ir.InvalidState {
-			mc.pathHistory[i] = int32(currPrio)
-			continue
+	currPos := end
+	// 2. Trace backward from end to start.
+	// We need to use the transition: State(pos-1) --(byte at pos-1)--> State(pos)
+	for i := histIdx; i >= 0; i-- {
+		if currPos <= start {
+			break
 		}
-		off := (int(sidx) << 8) | int(byteVal)
 
-		found := false
-		bestInputPrio := int16(32767)
-		if off < len(recap.Transitions) {
-			basePrio := int16(0)
-			if off < len(uIndices) {
-				uIdx := uIndices[off]
-				if int(uIdx) < len(uUpdates) {
-					basePrio = int16(uUpdates[uIdx].BasePriority)
-				}
+		entry := mc.history[i]
+		length := 1
+		if (entry & histWarpMarker) != 0 {
+			length = int((entry & histLengthMask) >> histLengthShift)
+		}
+
+		// Calculate how many bytes of this segment are within [start, currPos]
+		segStart := byteOffset
+		segEnd := byteOffset + length
+
+		inSegEnd := currPos
+		if segEnd < inSegEnd {
+			// This should not happen in the first iteration because histIdx covers 'end'
+			// In subsequent iterations, segEnd is always currPos.
+			inSegEnd = segEnd
+		}
+		inSegStart := segStart
+		if inSegStart < start {
+			inSegStart = start
+		}
+
+		inSegLen := inSegEnd - inSegStart
+
+		if (entry & histWarpMarker) != 0 {
+			// Warp jump: Priority remains constant because SWAR is tag-free.
+			for k := 0; k < inSegLen; k++ {
+				currPos--
+				mc.pathHistory[currPos] = int32(currPrio)
 			}
+		} else {
+			// Normal entry: perform priority transition.
+			currPos--
+			if currPos < start {
+				break
+			}
+			byteVal := b[currPos]
 
-			for _, entry := range recap.Transitions[off] {
-				if int16(entry.NextPriority) == currPrio {
-					p := entry.InputPriority + basePrio
-					if p < bestInputPrio {
-						bestInputPrio = p
-						found = true
+			// Source state is in the PREVIOUS entry (mc.history[i-1]).
+			// Wait, what if currPos is in the middle of a warp?
+			// That's handled by the Warp block above.
+			// So here length is 1, and the source state is indeed mc.history[i-1].
+			if i == 0 {
+				break // Should not happen as we checked currPos > start
+			}
+			prevEntry := mc.history[i-1]
+			sidx := prevEntry & histStateMask
+
+			off := (int(sidx) << 8) | int(byteVal)
+			found := false
+			bestInputPrio := int16(32767)
+			if off < len(recap.Transitions) {
+				basePrio := int16(0)
+				if off < len(uIndices) {
+					uIdx := uIndices[off]
+					if int(uIdx) < len(uUpdates) {
+						basePrio = int16(uUpdates[uIdx].BasePriority)
+					}
+				}
+				for _, entry := range recap.Transitions[off] {
+					if int16(entry.NextPriority) == currPrio {
+						p := entry.InputPriority + basePrio
+						if p < bestInputPrio {
+							bestInputPrio = p
+							found = true
+						}
 					}
 				}
 			}
+			if found {
+				currPrio = bestInputPrio
+			}
+			mc.pathHistory[currPos] = int32(currPrio)
 		}
-		if found {
-			currPrio = bestInputPrio
+
+		// Update byteOffset for the segment BEFORE this one.
+		if i > 0 {
+			prevEntry := mc.history[i-1]
+			prevLen := 1
+			if (prevEntry & histWarpMarker) != 0 {
+				prevLen = int((prevEntry & histLengthMask) >> histLengthShift)
+			}
+			byteOffset -= prevLen
 		}
-		mc.pathHistory[i] = int32(currPrio)
 	}
 }
 
@@ -1450,14 +1514,56 @@ func (re *Regexp) sparseTDFA_Recap(mc *matchContext, b []byte, start, end, prio 
 
 	re.applyEntryTags(regs, d.StartUpdates(), mc.pathHistory[start], start)
 
-	for i := start; i < end; {
-		sidx := mc.history[i]
-		if sidx == ir.InvalidState {
-			i++
+	// 1. Find the starting history entry
+	histIdx := 0
+	byteOffset := 0
+	for i, entry := range mc.history {
+		length := 1
+		if (entry & histWarpMarker) != 0 {
+			length = int((entry & histLengthMask) >> histLengthShift)
+		}
+		if byteOffset+length > start {
+			histIdx = i
+			break
+		}
+		byteOffset += length
+	}
+
+	currPos := start
+	for i := histIdx; i < len(mc.history); i++ {
+		entry := mc.history[i]
+		if currPos >= end {
+			break
+		}
+
+		length := 1
+		if (entry & histWarpMarker) != 0 {
+			length = int((entry & histLengthMask) >> histLengthShift)
+		}
+
+		if (entry & histWarpMarker) != 0 {
+			// Warp jump: No tag updates in this segment.
+			// The first warp might be partially covered if it starts before 'start'
+			warpStart := byteOffset
+			warpEnd := byteOffset + length
+
+			actualLength := length
+			if warpStart < start {
+				actualLength = warpEnd - start
+			}
+			if currPos+actualLength > end {
+				actualLength = end - currPos
+			}
+
+			currPos += actualLength
+			byteOffset += length
 			continue
 		}
-		pathID := mc.pathHistory[i]
-		byteVal := b[i]
+
+		// Normal entry: process tags
+		sidx := entry & histStateMask
+		pathID := mc.pathHistory[currPos]
+		byteVal := b[currPos]
 		off := (int(sidx) << 8) | int(byteVal)
 
 		step := 1
@@ -1476,19 +1582,20 @@ func (re *Regexp) sparseTDFA_Recap(mc *matchContext, b []byte, start, end, prio 
 			}
 
 			nextPathID := int32(0)
-			if i+step <= end {
-				nextPathID = mc.pathHistory[i+step]
+			if currPos+step <= end {
+				nextPathID = mc.pathHistory[currPos+step]
 			}
 
 			for _, entry := range recap.Transitions[off] {
 				if entry.InputPriority == int16(pathID)-basePrio && int32(entry.NextPriority) == nextPathID {
-					re.applyRawTags(regs, entry.PreTags, i)
-					re.applyRawTags(regs, entry.PostTags, i+step)
+					re.applyRawTags(regs, entry.PreTags, currPos)
+					re.applyRawTags(regs, entry.PostTags, currPos+step)
 					break
 				}
 			}
 		}
-		i += step
+		currPos += step
+		byteOffset += length
 	}
 }
 
@@ -1552,6 +1659,14 @@ func (re *Regexp) FindStringSubmatch(s string) []string {
 	return result
 }
 
+const (
+	histWarpMarker  uint32 = 0x80000000
+	histLengthMask  uint32 = 0x7FF00000
+	histStateMask   uint32 = 0x000FFFFF
+	histLengthShift        = 20
+	histMaxLength          = 2047
+)
+
 type matchContext struct {
 	historyBuf     [1024]uint32
 	history        []uint32
@@ -1565,9 +1680,9 @@ func (mc *matchContext) prepare(n int, numSubexp int) {
 	required := n + 1
 	if required > len(mc.historyBuf) {
 		if cap(mc.history) < required {
-			mc.history = make([]uint32, required)
+			mc.history = make([]uint32, 0, required)
 		} else {
-			mc.history = mc.history[:required]
+			mc.history = mc.history[:0]
 		}
 		if cap(mc.pathHistory) < required {
 			mc.pathHistory = make([]int32, required)
@@ -1575,8 +1690,12 @@ func (mc *matchContext) prepare(n int, numSubexp int) {
 			mc.pathHistory = mc.pathHistory[:required]
 		}
 	} else {
-		mc.history = mc.historyBuf[:required]
+		mc.history = mc.historyBuf[:0]
 		mc.pathHistory = mc.pathHistoryBuf[:required]
+	}
+
+	for i := range mc.pathHistory {
+		mc.pathHistory[i] = -1
 	}
 
 	requiredRegs := (numSubexp + 1) * 2
@@ -1592,6 +1711,25 @@ func (mc *matchContext) prepare(n int, numSubexp int) {
 	for i := range mc.regs {
 		mc.regs[i] = -1
 	}
+}
+
+func (mc *matchContext) appendRaw(sidx uint32) {
+	mc.history = append(mc.history, sidx&histStateMask)
+}
+
+func (mc *matchContext) appendWarp(sidx uint32, n int) {
+	sidx &= histStateMask
+	if len(mc.history) > 0 {
+		last := mc.history[len(mc.history)-1]
+		if (last&histWarpMarker) != 0 && (last&histStateMask) == sidx {
+			lenVal := (last & histLengthMask) >> histLengthShift
+			if int(lenVal)+n <= histMaxLength {
+				mc.history[len(mc.history)-1] = histWarpMarker | ((lenVal + uint32(n)) << histLengthShift) | sidx
+				return
+			}
+		}
+	}
+	mc.history = append(mc.history, histWarpMarker|((uint32(n))<<histLengthShift)|sidx)
 }
 
 var matchContextPool = sync.Pool{New: func() any { return &matchContext{} }}

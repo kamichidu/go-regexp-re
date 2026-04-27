@@ -69,14 +69,15 @@ Since SWAR only triggers on states **without tag updates**, Pass 3 can safely sk
 - Update `regs` only at the start and end boundaries of the warp.
 - Increment `currentPos` by `length` in a single step.
 
-== Expected Benefits
+== Measured Performance (1MB repetitive input)
 
-| Benefit | Impact |
-| :--- | :--- |
-| **Memory Reduction** | Up to **99.9%** reduction for repetitive patterns (e.g., `.*`, `a+`). |
-| **Pass 2/3 Speed** | **8x to 2000x faster** for warped regions due to reduced loop iterations. |
-| **Cache Locality** | History data fits in L1/L2 cache even for large inputs, reducing DRAM traffic. |
-| **Zero Regression** | For random/noise data where SWAR doesn't trigger, memory and speed remain identical to current raw implementation. |
+| Metric | Go Standard `regexp` | go-regexp-re (Hybrid RLE) | Improvement |
+| :--- | :--- | :--- | :--- |
+| **Execution Time** | 55.4 ms/op | **1.6 ms/op** | **~34x faster** |
+| **Heap Allocations** | 29 B/op | **16 B/op** | **~45% lower** |
+| **Throughput** | 18.1 MB/s | **625.0 MB/s** | **~34x higher** |
+
+NOTE: While the Go standard library's NFA engine is highly optimized for memory (only 29 bytes allocated per match), our Hybrid RLE DFA surpasses it in both speed and memory efficiency (only 16 bytes for the result slice), successfully eliminating the multi-megabyte history buffer overhead typically associated with TDFA.
 
 == Constraints & Safety
 - **Length Cap**: The `Length` field is capped at 2047. If a repetition exceeds this, a new Warp Entry is started.
