@@ -3,6 +3,8 @@ package regexp
 import (
 	"bytes"
 	"unsafe"
+
+	"github.com/kamichidu/go-regexp-re/internal/ir"
 )
 
 type matchStrategy uint8
@@ -64,9 +66,15 @@ func (re *Regexp) findSubmatchIndexInternal(b []byte, mc *matchContext, regs []i
 
 			// Standard Pivot/Suffix search
 			for {
-				pos := bytes.Index(input, a.Anchor)
+				var pos int
+				if a.HasClass {
+					pos = ir.IndexClass(a.Class, input)
+				} else {
+					pos = bytes.Index(input, a.Anchor)
+				}
+
 				if pos < 0 {
-					// If it's a Suffix type anchor and Index fails, no match possible
+					// If it's a Suffix type anchor and search fails, no match possible
 					return -1, -1, 0
 				}
 

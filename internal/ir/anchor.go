@@ -27,6 +27,8 @@ type Constraint struct {
 // AnchorInfo holds information about a potential anchor in the pattern.
 type AnchorInfo struct {
 	Anchor       []byte
+	Class        CCWarpInfo // If Anchor is empty, use this SWAR class anchor
+	HasClass     bool
 	Type         AnchorType
 	Distance     int // Estimated distance from the start of the match
 	Forward      []Constraint
@@ -35,9 +37,8 @@ type AnchorInfo struct {
 	HasEndText   bool // Ends with $
 }
 
-// ExtractAnchors traverses the AST and identifies all potential literal anchors.
+// ExtractAnchors traverses the AST and identifies all potential anchors.
 func ExtractAnchors(re *syntax.Regexp) []AnchorInfo {
-	// Create a virtual flat AST for anchor extraction (strip captures)
 	flatRE := stripCaptures(re)
 	anchors := extractAnchors(flatRE, 0, false)
 
@@ -45,7 +46,11 @@ func ExtractAnchors(re *syntax.Regexp) []AnchorInfo {
 	totalMin := minLength(re)
 	if totalMin >= 0 {
 		for i := range anchors {
-			if anchors[i].Distance+len(anchors[i].Anchor) == totalMin {
+			anchorLen := len(anchors[i].Anchor)
+			if anchors[i].HasClass {
+				anchorLen = 1 // Class anchor is considered 1 byte for distance
+			}
+			if anchors[i].Distance+anchorLen == totalMin {
 				if anchors[i].Type != AnchorPrefix {
 					anchors[i].Type = AnchorSuffix
 				}
@@ -81,8 +86,7 @@ func stripCaptures(re *syntax.Regexp) *syntax.Regexp {
 	if re == nil {
 		return nil
 	}
-
-	res := *re // shallow copy
+	res := *re
 	switch re.Op {
 	case syntax.OpCapture:
 		return stripCaptures(re.Sub[0])
@@ -96,8 +100,6 @@ func stripCaptures(re *syntax.Regexp) *syntax.Regexp {
 				subs = append(subs, s)
 			}
 		}
-
-		// Merge adjacent literals
 		if len(subs) > 1 {
 			merged := []*syntax.Regexp{subs[0]}
 			for i := 1; i < len(subs); i++ {
@@ -148,14 +150,25 @@ func extractAnchors(re *syntax.Regexp, offset int, inStar bool) []AnchorInfo {
 			}
 		}
 	case syntax.OpCharClass:
-		if re.Flags&syntax.FoldCase == 0 && len(re.Rune) == 2 && re.Rune[0] == re.Rune[1] {
-			var b [utf8.UTFMax]byte
-			n := utf8.EncodeRune(b[:], re.Rune[0])
-			anchors = append(anchors, AnchorInfo{
-				Anchor:   b[:n],
-				Type:     AnchorPivot,
-				Distance: offset,
-			})
+		if re.Flags&syntax.FoldCase == 0 {
+			// Single character class
+			if len(re.Rune) == 2 && re.Rune[0] == re.Rune[1] {
+				var b [utf8.UTFMax]byte
+				n := utf8.EncodeRune(b[:], re.Rune[0])
+				anchors = append(anchors, AnchorInfo{
+					Anchor:   b[:n],
+					Type:     AnchorPivot,
+					Distance: offset,
+				})
+			} else if info, ok := toCCWarp(re); ok {
+				// SWAR-capable class anchor
+				anchors = append(anchors, AnchorInfo{
+					Class:    info,
+					HasClass: true,
+					Type:     AnchorPivot,
+					Distance: offset,
+				})
+			}
 		}
 	case syntax.OpRepeat, syntax.OpQuest, syntax.OpPlus:
 		anchors = append(anchors, extractAnchors(re.Sub[0], offset, inStar)...)
@@ -241,7 +254,6 @@ func minLength(re *syntax.Regexp) int {
 }
 
 func ExtractConstraints(re *syntax.Regexp, anchor *AnchorInfo) {
-	// Re-flatten to ensure constraints are calculated relative to the same flat structure
 	flatRE := stripCaptures(re)
 	extractConstraints(flatRE, anchor)
 }
@@ -255,9 +267,16 @@ func extractConstraints(re *syntax.Regexp, anchor *AnchorInfo) {
 	currentOffset := 0
 	for i, sub := range re.Sub {
 		if currentOffset == anchor.Distance {
-			if lit, ok := isLiteral(sub); ok && string(lit) == string(anchor.Anchor) {
-				anchorIdx = i
-				break
+			if anchor.HasClass {
+				if info, ok := toCCWarp(sub); ok && info.Kernel == anchor.Class.Kernel && info.V0 == anchor.Class.V0 && info.V1 == anchor.Class.V1 {
+					anchorIdx = i
+					break
+				}
+			} else {
+				if lit, ok := isLiteral(sub); ok && string(lit) == string(anchor.Anchor) {
+					anchorIdx = i
+					break
+				}
 			}
 		}
 		d := minLength(sub)
@@ -293,7 +312,11 @@ func extractConstraints(re *syntax.Regexp, anchor *AnchorInfo) {
 		}
 	}
 
-	forwardOffset := len(anchor.Anchor)
+	forwardOffset := 1
+	if !anchor.HasClass {
+		forwardOffset = len(anchor.Anchor)
+	}
+
 	for i := anchorIdx + 1; i < len(re.Sub); i++ {
 		sub := re.Sub[i]
 		if sub.Op == syntax.OpEndText {
@@ -380,7 +403,14 @@ func SelectBestAnchor(anchors []AnchorInfo) *AnchorInfo {
 	var best *AnchorInfo
 	maxScore := -1
 	for i := range anchors {
-		score := len(anchors[i].Anchor) * 10
+		score := 0
+		if anchors[i].HasClass {
+			// Class anchors are good but not as fast as SIMD bytes.Index
+			score = 20 // Base score for a class
+		} else {
+			score = len(anchors[i].Anchor) * 10
+		}
+
 		if anchors[i].Type == AnchorPrefix {
 			score += 100
 		}
@@ -409,7 +439,11 @@ func (a *AnchorInfo) Validate(b []byte, p int) (int, bool) {
 		}
 	}
 
-	endPos := p + len(a.Anchor)
+	endPos := p + 1
+	if !a.HasClass {
+		endPos = p + len(a.Anchor)
+	}
+
 	for _, c := range a.Forward {
 		start := p + c.Offset
 		if start > len(b) {
@@ -556,6 +590,58 @@ func warp(info CCWarpInfo, b []byte) int {
 		}
 	}
 	return i
+}
+
+// IndexClass finds the first byte in b that satisfies the CCWarpInfo kernel.
+// It returns the index of the first match, or -1 if not found.
+func IndexClass(info CCWarpInfo, b []byte) int {
+	i := 0
+	switch info.Kernel {
+	case CCWarpEqual:
+		return bytes.IndexByte(b, byte(info.V0))
+	case CCWarpSingleRange:
+		low, high := byte(info.V0), byte(info.V1)
+		low64, high64 := splat(uint64(low)), splat(uint64(high))
+		for i+8 <= len(b) {
+			v := binary.LittleEndian.Uint64(b[i:])
+			// bit set if in range: ((v+0x7f...-high)|(v-low))&0x80... == 0x80...
+			// we want to find if ANY byte is in range.
+			if ((v+0x7f7f7f7f7f7f7f7f-high64)|(v-low64))&0x8080808080808080 != 0 {
+				// At least one byte might match, fallback to byte-by-byte for exact index
+				break
+			}
+			i += 8
+		}
+		for ; i < len(b); i++ {
+			if b[i] >= low && b[i] <= high {
+				return i
+			}
+		}
+	case CCWarpAnyChar:
+		// Find first ASCII byte
+		for i < len(b) {
+			if b[i] < 0x80 {
+				return i
+			}
+			i++
+		}
+	case CCWarpAnyExceptNL:
+		for i < len(b) {
+			if b[i] < 0x80 && b[i] != '\n' {
+				return i
+			}
+			i++
+		}
+	case CCWarpNotEqual:
+		target := byte(info.V0)
+		for i < len(b) {
+			if b[i] != target {
+				return i
+			}
+			i++
+		}
+	}
+	return -1
 }
 
 func splat(v uint64) uint64 {
