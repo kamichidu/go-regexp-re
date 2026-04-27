@@ -46,10 +46,11 @@ const (
 )
 
 type CCWarpInfo struct {
-	Kernel CCWarpKernel
-	Splats [8]uint64 // Base values for XOR
-	Masks  [8]uint64 // Ignore-masks for XOR-based parallel check
-	Mask   [2]uint64 // Fallback bitmask
+	Kernel   CCWarpKernel
+	Splats   [8]uint64 // Base values for XOR
+	Masks    [8]uint64 // Ignore-masks for XOR-based parallel check
+	Mask     [2]uint64 // Fallback bitmask
+	IndexAny string    // String for bytes.IndexAny (used in SearchWarp)
 }
 
 const MaxDFAMemory = 64 * 1024 * 1024
@@ -967,27 +968,43 @@ func (d *DFA) build(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, ma
 			}
 		}
 		// If it's a very broad range (like [^\n]), SearchWarp is counter-productive.
-		if isSingleRange && low != -1 && (high-low) >= 1 && (high-low) < 64 {
-			info := CCWarpInfo{
-				Kernel: CCWarpSingleRange,
+		if isSingleRange && low != -1 && (high-low) < 64 {
+			splatLow := uint64(low) * 0x0101010101010101
+			splatHigh := uint64(high) * 0x0101010101010101
+			var chars []byte
+			for b := low; b <= high; b++ {
+				chars = append(chars, byte(b))
 			}
-			info.Splats[0] = uint64(low) * 0x0101010101010101
-			info.Splats[1] = uint64(high) * 0x0101010101010101
+			info := CCWarpInfo{
+				IndexAny: string(chars),
+			}
+			if low == high {
+				info.Kernel = CCWarpEqual
+				info.Splats[0] = splatLow
+			} else {
+				info.Kernel = CCWarpSingleRange
+				info.Splats[0] = splatLow
+				info.Splats[1] = splatHigh
+			}
 			d.searchWarp = info
 		} else if searchCount < 64 {
 			// Sparse match starts: use Bitmask (with noise characters in mask)
 			var mask [2]uint64
+			var chars []byte
 			noiseCount := 0
 			for b := 0; b < 128; b++ {
 				if (firstBytes[b>>6] & (1 << (b & 63))) == 0 {
 					mask[b>>6] |= 1 << (b & 63)
 					noiseCount++
+				} else {
+					chars = append(chars, byte(b))
 				}
 			}
 			if noiseCount >= 4 {
 				d.searchWarp = CCWarpInfo{
-					Kernel: CCWarpBitmask,
-					Mask:   mask,
+					Kernel:   CCWarpBitmask,
+					Mask:     mask,
+					IndexAny: string(chars),
 				}
 			}
 		}
