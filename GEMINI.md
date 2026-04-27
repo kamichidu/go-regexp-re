@@ -24,10 +24,10 @@ Every implementation must adhere to these pillars to ensure maximum performance:
 - **Minimize Memory Latency**: Keep core structures small enough to fit within L2/L3 caches even for large pattern sets.
 
 ### 2.4 Execution Switching Strategy
-To maximize throughput, the engine MUST select the most efficient execution loop based on pattern characteristics:
-- **0-Pass (Literal Bypass)**: Selected for pure constant strings and anchored literals (e.g., `^abc$`, `^abc`, `abc$`). Bypasses all regex engines using SIMD-accelerated standard library search (e.g., `bytes.Index`, `bytes.HasPrefix`). It utilizes a **unified, interface-free `LiteralMatcher` component** with a **Capture Template** to provide submatch indices with zero state-machine and zero dynamic-dispatch overhead. **When this strategy is selected, the engine MUST explicitly bypass all DFA construction to minimize compilation latency and memory footprint.**
-- **Fast Path (Pure DFA)**: Automatically selected for larger patterns. It utilizes a minimalist table-based execution loop with **Two-Phase SWAR Warping** (SearchWarp for pre-filtering noise and CCWarp for match fast-forwarding).
-- **SWAR Character Class Warp (CCWarp)**: A specialized execution loop for "Pure Self-Loops"—DFA states that transition back to themselves without updating capture tags. It treats 64-bit registers as SIMD vectors to process 8 bytes in parallel, achieving up to 5 GB/s throughput.
+To maximize throughput, the engine MUST select the most efficient execution loop based on pattern characteristics. The core execution loops are implemented in **`exec_dfa.go`** and dispatched via **`exec_dispatch.go`**:
+- **0-Pass (Literal Bypass)**: Selected for pure constant strings and anchored literals (e.g., `^abc$`, `^abc`, `abc$`). Bypasses all regex engines using SIMD-accelerated standard library search (e.g., `bytes.Index`, `bytes.HasPrefix`). It utilizes a **unified, interface-free `LiteralMatcher` component** (in `internal/ir/literal.go`) with a **Capture Template** to provide submatch indices with zero state-machine and zero dynamic-dispatch overhead. **When this strategy is selected, the engine MUST explicitly bypass all DFA construction to minimize compilation latency and memory footprint.**
+- **Fast Path (Pure DFA)**: Automatically selected for larger patterns. It utilizes a minimalist table-based execution loop (`fastMatchExecLoop`) with **Two-Phase SWAR Warping** (SearchWarp for pre-filtering noise and CCWarp for match fast-forwarding).
+- **SWAR Character Class Warp (CCWarp)**: A specialized execution strategy for "Pure Self-Loops"—DFA states that transition back to themselves without updating capture tags. It treats 64-bit registers as SIMD vectors to process 8 bytes in parallel, achieving up to 5 GB/s throughput.
 - **Anchor-Aware Guarded SIMD Warp**: Selected for patterns with anchors. Utilizes a separate `anchorTransitions` table and **guarded warp points** to allow SIMD skipping even in the presence of anchors (e.g., `^`, `$`, `\b`).
 
 - **Explicit Hot-Loop Monomorphization**: To ensure zero-overhead, the engine MUST avoid Go generics (`GCShape` sharing) for the primary execution loops. Instead, it employs manually monomorphized functions (e.g., `fastMatchExecLoop`, `extendedMatchExecLoop`, `extendedSubmatchExecLoop`) to ensure the Go compiler can completely eliminate unreachable branches (like `if hasAnchors`) and avoid runtime dictionary lookups.
@@ -37,11 +37,11 @@ To maximize throughput, the engine MUST select the most efficient execution loop
 - **Pre-calculated Search/Match States**: The initial `searchState` and `matchState` MUST be pre-calculated during compilation with all relevant flags (Accepting, Tagged) already applied, eliminating per-match setup costs.
 
 ### 2.5 Submatch Extraction Architecture (3-Pass Sparse TDFA)
-The engine follows a **3-Pass Sparse TDFA** strategy to guarantee peak performance, $O(n)$ time complexity, and 100% Go-compatible precision.
+The engine follows a **3-Pass Sparse TDFA** strategy (implemented in **`exec_tdfa.go`**) to guarantee peak performance, $O(n)$ time complexity, and 100% Go-compatible precision.
 
 - **NFA-Free & Calculation-Free Mandate**: Runtime NFA simulation, backtracking, or dynamic priority comparison is **STRICTLY PROHIBITED**. All submatch extraction decisions MUST be pre-calculated and "burned into" the transition tables during compilation.
 - **Pass 1: Naked Discovery**: A high-speed scan (DFA or BP-DFA) determines match boundaries `[start, end]` and records a history of deterministic states.
-    - **Hybrid RLE History Mandate**: To eliminate the $O(n)$ memory bottleneck for submatch extraction, the engine MUST employ a **32-bit bit-packed RLE** strategy during SWAR skips. Consecutive bytes in the same state MUST be collapsed into a single "Warp Entry" with a length field (capped at 2047 bytes). This ensures that memory consumption for repetitive patterns (e.g., `.*`) is effectively $O(1)$ relative to the repetition length.
+    - **Hybrid RLE History Mandate**: To eliminate the $O(n)$ memory bottleneck for submatch extraction, the engine MUST employ a **32-bit bit-packed RLE** strategy (managed in **`context.go`**) during SWAR skips. Consecutive bytes in the same state MUST be collapsed into a single "Warp Entry" with a length field (capped at 2047 bytes). This ensures that memory consumption for repetitive patterns (e.g., `.*`) is effectively $O(1)$ relative to the repetition length.
     - **Priority Separation**: To prevent incorrect match boundary extensions (e.g., `aa|a` matching `aaaa` as `[0 4]`), Pass 1 DFA states MUST include the **MatchPriority** (the highest priority NFA path in the state) in their identity key. This ensures that states with the same NFA IDs but different leftmost-first implications are physically separated.
 
 - **Pass 2: Path Identity Selection**: Identifies the unique "winning NFA path" by **performing a backward trace** from the match end point. This leverages the `MatchPriority` determined in Pass 1 to reconstruct the priority identity sequence without lookahead or ambiguity. **To maintain submatch precision for multi-byte runes, Pass 2 MUST trace every byte transition in the history, ensuring that priority shifts occurring within continuation bytes are correctly captured.** If multiple paths lead to the same result, the one with the **minimum InputPriority** MUST be selected to satisfy Go's leftmost-first rule.
@@ -177,6 +177,38 @@ The project maintains a multi-layered automated verification suite to ensure tha
 - **Explicit Aliasing**:
   - `regexp` -> `goregexp`
   - `regexp/syntax` -> `gosyntax`
+
+## 6. Project Structure & Modularity Mandates
+To prevent file bloat and maintain long-term maintainability, the codebase MUST adhere to the following file organization. Any new high-level logic should be placed in a specialized file rather than `regexp.go` or `dfa.go`.
+
+### 6.1 Core Runtime (Root Package)
+- **`regexp.go`**: Public API entry points (`Compile`, `MustCompile`, `FindSubmatchIndex`) and the core `Regexp` structure definition.
+- **`exec_dispatch.go`**: Execution strategy binding and high-level match/submatch dispatching logic.
+- **`exec_dfa.go`**: Manually monomorphized hot-loops for DFA execution (`fastMatchExecLoop`, `extendedMatchExecLoop`).
+- **`exec_tdfa.go`**: 3-Pass Sparse TDFA logic, including backward path selection (Pass 2) and forward tag licking (Pass 3).
+- **`context.go`**: `matchContext` management, history recording (RLE), and memory pooling.
+- **`compat_*.go`**: Standard library compatibility layers, grouped by functionality (match, find, replace, misc).
+
+### 6.2 IR & Compiler (`internal/ir/`)
+- **`dfa.go`**: core `DFA` structure, StateID layout constants, and basic getter methods.
+- **`dfa_builder.go`**: The DFA compiler, including subset construction, epsilon closure with anchor verification, and SWAR kernel detection.
+- **`recap.go`**: Definitions for tag-carrying transition tables (`GroupRecapTable`, `RecapEntry`).
+- **`storage.go`**: Abstractions and implementations for NFA path set storage (`NFAPathStorage`).
+- **`literal.go`**: The `LiteralMatcher` for 0-pass bypass.
+- **`utf8.go`**: UTF-8 to Byte-level transition Trie construction.
+
+### 6.3 Syntax & Optimization (`syntax/`)
+- **`syntax.go`**: Fundamental types and standard library-compliant `Parse`/`Compile` wrappers.
+- **`optimize.go`**: Project-specific AST optimizations (Simplify, Optimize, Factoring).
+
+### 6.4 Test Organization
+To maintain a high-signal testing environment, tests MUST be categorized by the architectural layer they verify:
+- **`api_test.go`**: High-level integration tests covering the public API surface.
+- **`exec_dfa_test.go`**: Correctness of the DFA execution engine, SWAR kernels, and SIMD warp logic.
+- **`exec_tdfa_test.go`**: Submatch extraction precision, Pass 2 path selection, and Pass 3 tag updates.
+- **`utf8_test.go`**: Specialized UTF-8 handling, multi-byte boundaries, and invalid sequence resilience.
+- **`compat_test.go`**: Systematic parity verification against Go's standard `regexp` package.
+- **`internal/ir/dfa_builder_test.go`**: Validation of subset construction, epsilon closure logic, and memory-limit protection.
 
 ---
 **Note**: Any modification to the compilation shortcut or rescan dispatch must be validated against the **"Efficiency First, Precision Mandatory"** principle.
