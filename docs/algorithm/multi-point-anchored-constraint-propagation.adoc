@@ -1,0 +1,80 @@
+= Multi-Point Anchored Constraint Propagation (MAP)
+:core-tech: SIMD (bytes.Index), SWAR, Constraint Programming, AST Optimization
+
+== Overview
+
+Multi-Point Anchored Constraint Propagation (MAP) is an advanced execution strategy for `go-regexp-re` that acts as **Pass 0**. By extracting and evaluating multiple anchor points from mandatory AST paths, the engine can skip vast amounts of "non-matching" data using SIMD-accelerated instructions and SWAR-based validation before ever invoking the heavy DFA machinery.
+
+MAP is designed to handle complex patterns with multiple entry points (e.g., `(^|[abc])literal`) and provides a zero-false-negative guarantee through strict safety mandates.
+
+== 1. Multi-Entry Point Anchor Discovery
+
+The engine analyzes the optimized AST to identify the most "selective" literal or character class for each mandatory path.
+
+|===
+| Anchor Type | Location | Discovery Tool | Propagation Direction
+| *Prefix* | Pattern Start | `bytes.HasPrefix` / `IndexByte` | Forward only.
+| *Pivot* | Middle of Pattern | `bytes.Index` or `IndexClass` | Bi-directional.
+| *Suffix* | Pattern End | `bytes.LastIndex` | Backward only.
+|===
+
+=== A. Support for Alternation (`OpAlternate`)
+MAP traverses all branches of an alternation to identify mandatory anchors for every path. This allows the engine to handle patterns like `(^|[abc])feb` by tracking two separate entry points:
+- Path 1: `^` (Start of text) + `feb`.
+- Path 2: `[abc]` (Pivot class) + `feb`.
+
+=== B. Anchor Selection Criteria (Heuristic Score)
+Not all anchors are equal. The engine selects up to 4 anchors based on a heuristic score:
+`Score = (BaseWeight * Length) / DistanceFromStart`
+
+- **Literal Anchor (Weight: 10)**: Triggers SIMD `bytes.Index`. Longer literals are highly preferred.
+- **Class Anchor (Weight: 2)**: Triggers SWAR `IndexClass`.
+- **Distance Bonus**: Prefix anchors (`distance == 0`) get a fixed bonus as they are the most direct path.
+
+== 2. Correctness & Safety Mandates
+
+To ensure 100% compatibility with standard regular expression semantics, MAP adheres to strict safety rules:
+
+- **Nullable Pattern Protection**: If any path in the pattern can match an empty string (`minLength == 0`), MAP is **disabled** to prevent incorrect rejection of empty matches.
+- **Capture Transparency**: Anchor extraction uses **Capture Stripping** to ignore `OpCapture` boundaries, merging adjacent literals into longer, more efficient anchors (e.g., `abc(def)ghi` -> `abcdefghi`).
+- **Anchor Context Awareness**: Anchors tied to `^` (BeginText) are validated only at index 0, while Pivot anchors search the entire buffer.
+
+== 3. Constraint Propagation Model
+
+Once an anchor is discovered at position `P`, the engine does not immediately start the DFA. Instead, it applies **Constraints** that must hold true:
+
+- **Forward Constraints**: Character classes or bytes that MUST appear at offset `P+k`. Supports **Dynamic Warp** for repetitions.
+- **Backward Constraints**: Character classes or bytes that MUST appear at offset `P-k`.
+
+These constraints are "folded" during compilation into 64-bit masks or arithmetic range checks.
+
+== 4. SWAR-Integrated Validation
+
+MAP leverages **SWAR (SIMD Within A Register)** to validate constraints 8 bytes at a time.
+
+- **Backward Guard**: Validates character classes preceding the anchor.
+- **Forward Warp (Dynamic Skip)**: If the pattern contains a repetitive class (e.g., `PIVOT[0-9]+`), the engine uses `warp` to skip the entire matching segment using SWAR kernels.
+- **IndexClass**: When no literals are available, SWAR bitwise tricks find the first occurrence of a character class 8 bytes at a time.
+
+== 5. UTF-8 & Multi-byte Compatibility
+
+A core mandate of `go-regexp-re` is avoiding unnecessary rune decoding.
+
+- **Byte-Oriented Literal Anchors**: Anchors are raw byte sequences. Multi-byte runes are treated as their literal UTF-8 representation, ensuring `bytes.Index` remains valid.
+- **Lead-Byte Resilience**: SWAR kernels operate on raw bytes. The engine ensures that increments and skips do not split a multi-byte sequence unless the regex defines a byte-level constraint.
+
+== 6. Integration into 3-Pass TDFA
+
+MAP acts as **Pass 0**.
+
+1.  **Discovery (Pass 0)**: Locate the best anchors (Literal or Class) for each mandatory path.
+2.  **Validation (Pass 0)**: Apply SWAR Forward/Backward guards and Dynamic Warps.
+3.  **Discovery (Pass 1)**: If guards pass, the DFA starts from the **estimated start position**.
+4.  **Path Selection & Recap (Pass 2 & 3)**: Standard submatch extraction.
+
+== 7. Expected Performance Impact
+
+By shifting the burden of "noise rejection" from the DFA to SIMD and SWAR:
+- **Throughput**: Expected 2x-100x improvement on patterns with selective anchors.
+- **DFA Bypass**: DFA execution—the most instruction-heavy part—is only invoked for segments with a very high probability of matching.
+- **Latency**: Reduced compilation latency for literal-heavy patterns that can bypass DFA construction entirely.
