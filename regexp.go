@@ -265,12 +265,10 @@ func (re *Regexp) match(b []byte) (int, int, int) {
 		return fastMatchExecLoop(re, b)
 	}
 }
-
 func fastMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 	d := re.dfa
 	trans := d.Transitions()
 	guards := d.AcceptingGuards()
-	numStates := d.NumStates()
 	numBytes := len(b)
 	searchState := re.searchState
 	matchState := re.matchState
@@ -296,7 +294,7 @@ func fastMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 		sidx := state & ir.StateIDMask
 
 		// Priority 1: SIMD Warp (SearchWarp) - skip noise
-		if !anchorStart && (state&ir.StateIDMask) == (searchState&ir.StateIDMask) {
+		if !anchorStart && sidx == (searchState&ir.StateIDMask) {
 			oldI := i
 			if len(re.prefix) > 0 {
 				pos := bytes.Index(b[i:], re.prefix)
@@ -309,7 +307,7 @@ func fastMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 				info := re.searchWarp
 				switch info.Kernel {
 				case ir.CCWarpEqual:
-					target := byte(info.Splats[0])
+					target := byte(info.V0)
 					pos := bytes.IndexByte(b[i:], target)
 					if pos < 0 {
 						i = numBytes
@@ -326,7 +324,7 @@ func fastMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 						}
 						break
 					}
-					low, high := info.Splats[0], info.Splats[1]
+					low, high := info.V0, info.V1
 					for i+8 <= numBytes {
 						v := binary.LittleEndian.Uint64(b[i:])
 						if ((v+0x7f7f7f7f7f7f7f7f-high)|(v-low))&0x8080808080808080 != 0x8080808080808080 {
@@ -334,16 +332,15 @@ func fastMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 						}
 						i += 8
 					}
-					// Fallback to byte-by-byte for the last few bytes
 					for i < numBytes {
 						bv := b[i]
-						if bv >= byte(info.Splats[0]>>56) && bv <= byte(info.Splats[1]>>56) {
+						if bv >= byte(low) && bv <= byte(high) {
 							break
 						}
 						i++
 					}
 				case ir.CCWarpNotSingleRange:
-					low, high := info.Splats[0], info.Splats[1]
+					low, high := info.V0, info.V1
 					for i+8 <= numBytes {
 						v := binary.LittleEndian.Uint64(b[i:])
 						if ((v+0x7f7f7f7f7f7f7f7f-high)|(v-low))&0x8080808080808080 == 0x8080808080808080 {
@@ -353,31 +350,14 @@ func fastMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 					}
 					for i < numBytes {
 						bv := b[i]
-						if bv < byte(info.Splats[0]>>56) || bv > byte(info.Splats[1]>>56) {
+						if bv < byte(low) || bv > byte(high) {
 							break
 						}
 						i++
 					}
 				case ir.CCWarpNotEqual:
-					target := byte(info.Splats[0])
+					target := byte(info.V0)
 					for i < numBytes && b[i] == target {
-						i++
-					}
-				case ir.CCWarpNotEqualSet:
-					for i < numBytes {
-						found := false
-						for k := 0; k < 8; k++ {
-							if info.Masks[k] == 0 {
-								break
-							}
-							if b[i] == byte(info.Splats[k]) {
-								found = true
-								break
-							}
-						}
-						if !found {
-							break
-						}
 						i++
 					}
 				case ir.CCWarpBitmask:
@@ -390,29 +370,20 @@ func fastMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 						}
 						break
 					}
-					mask := info.Mask
-					for i+8 <= numBytes {
-						v := binary.LittleEndian.Uint64(b[i:])
-						if v&0x8080808080808080 != 0 {
-							break
-						}
-						allNoise := true
-						for k := 0; k < 8; k++ {
-							bv := byte(v >> (k * 8))
-							if (mask[bv>>6] & (1 << (bv & 63))) == 0 {
-								allNoise = false
-								break
-							}
-						}
-						if !allNoise {
-							break
-						}
-						i += 8
-					}
+					m0, m1 := info.Extra[0], info.Extra[1]
 					for i < numBytes {
 						bv := b[i]
-						if bv >= 128 || (mask[bv>>6]&(1<<(bv&63))) == 0 {
+						if bv >= 128 {
 							break
+						}
+						if bv < 64 {
+							if (m0 & (1 << bv)) == 0 {
+								break
+							}
+						} else {
+							if (m1 & (1 << (bv - 64))) == 0 {
+								break
+							}
 						}
 						i++
 					}
@@ -423,7 +394,7 @@ func fastMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 				if i >= numBytes {
 					break
 				}
-				sidx = state & ir.StateIDMask
+				continue
 			}
 		}
 
@@ -433,7 +404,7 @@ func fastMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 			oldI := i
 			switch info.Kernel {
 			case ir.CCWarpEqual:
-				target := info.Splats[0]
+				target := info.V0
 				for i+8 <= numBytes {
 					v := binary.LittleEndian.Uint64(b[i:])
 					if v != target {
@@ -442,7 +413,7 @@ func fastMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 					i += 8
 				}
 			case ir.CCWarpSingleRange:
-				low, high := info.Splats[0], info.Splats[1]
+				low, high := info.V0, info.V1
 				for i+8 <= numBytes {
 					v := binary.LittleEndian.Uint64(b[i:])
 					if ((v+0x7f7f7f7f7f7f7f7f-high)|(v-low))&0x8080808080808080 != 0 {
@@ -451,7 +422,7 @@ func fastMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 					i += 8
 				}
 			case ir.CCWarpNotSingleRange:
-				low, high := info.Splats[0], info.Splats[1]
+				low, high := info.V0, info.V1
 				for i+8 <= numBytes {
 					v := binary.LittleEndian.Uint64(b[i:])
 					if ((v+0x7f7f7f7f7f7f7f7f-high)|(v-low))&0x8080808080808080 != 0x8080808080808080 {
@@ -477,7 +448,7 @@ func fastMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 					i += 8
 				}
 			case ir.CCWarpNotEqual:
-				target := info.Splats[0]
+				target := info.V0
 				for i+8 <= numBytes {
 					v := binary.LittleEndian.Uint64(b[i:])
 					diff := v ^ target
@@ -487,59 +458,35 @@ func fastMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 					i += 8
 				}
 			case ir.CCWarpNotEqualSet:
-				s0, s1, s2, s3, s4, s5, s6, s7 := info.Splats[0], info.Splats[1], info.Splats[2], info.Splats[3], info.Splats[4], info.Splats[5], info.Splats[6], info.Splats[7]
-				m0, m1, m2, m3, m4, m5, m6, m7 := info.Masks[0], info.Masks[1], info.Masks[2], info.Masks[3], info.Masks[4], info.Masks[5], info.Masks[6], info.Masks[7]
+				extra := info.Extra
 				for i+8 <= numBytes {
 					v := binary.LittleEndian.Uint64(b[i:])
-					res0 := (v ^ s0) & ^m0
-					res1 := (v ^ s1) & ^m1
-					res2 := (v ^ s2) & ^m2
-					res3 := (v ^ s3) & ^m3
-					res4 := (v ^ s4) & ^m4
-					res5 := (v ^ s5) & ^m5
-					res6 := (v ^ s6) & ^m6
-					res7 := (v ^ s7) & ^m7
-					m := (res0 - 0x0101010101010101) & (^res0)
-					m |= (res1 - 0x0101010101010101) & (^res1)
-					m |= (res2 - 0x0101010101010101) & (^res2)
-					m |= (res3 - 0x0101010101010101) & (^res3)
-					m |= (res4 - 0x0101010101010101) & (^res4)
-					m |= (res5 - 0x0101010101010101) & (^res5)
-					m |= (res6 - 0x0101010101010101) & (^res6)
-					m |= (res7 - 0x0101010101010101) & (^res7)
-					if (m & 0x8080808080808080) != 0 {
+					match := uint64(0)
+					for k := 0; k < 8; k++ {
+						res := (v ^ extra[k]) & ^extra[k+8]
+						match |= (res - 0x0101010101010101) & (^res)
+					}
+					if (match & 0x8080808080808080) != 0 {
 						break
 					}
 					i += 8
 				}
 			case ir.CCWarpEqualSet:
-				s0, s1, s2, s3, s4, s5, s6, s7 := info.Splats[0], info.Splats[1], info.Splats[2], info.Splats[3], info.Splats[4], info.Splats[5], info.Splats[6], info.Splats[7]
-				m0, m1, m2, m3, m4, m5, m6, m7 := info.Masks[0], info.Masks[1], info.Masks[2], info.Masks[3], info.Masks[4], info.Masks[5], info.Masks[6], info.Masks[7]
+				extra := info.Extra
 				for i+8 <= numBytes {
 					v := binary.LittleEndian.Uint64(b[i:])
-					res0 := (v ^ s0) & ^m0
-					res1 := (v ^ s1) & ^m1
-					res2 := (v ^ s2) & ^m2
-					res3 := (v ^ s3) & ^m3
-					res4 := (v ^ s4) & ^m4
-					res5 := (v ^ s5) & ^m5
-					res6 := (v ^ s6) & ^m6
-					res7 := (v ^ s7) & ^m7
-					m := (res0 - 0x0101010101010101) & (^res0)
-					m |= (res1 - 0x0101010101010101) & (^res1)
-					m |= (res2 - 0x0101010101010101) & (^res2)
-					m |= (res3 - 0x0101010101010101) & (^res3)
-					m |= (res4 - 0x0101010101010101) & (^res4)
-					m |= (res5 - 0x0101010101010101) & (^res5)
-					m |= (res6 - 0x0101010101010101) & (^res6)
-					m |= (res7 - 0x0101010101010101) & (^res7)
-					if (m & 0x8080808080808080) != 0x8080808080808080 {
+					match := uint64(0)
+					for k := 0; k < 8; k++ {
+						res := (v ^ extra[k]) & ^extra[k+8]
+						match |= (res - 0x0101010101010101) & (^res)
+					}
+					if (match & 0x8080808080808080) != 0x8080808080808080 {
 						break
 					}
 					i += 8
 				}
 			case ir.CCWarpNotBitmask:
-				mask := info.Mask
+				m0, m1 := info.Extra[0], info.Extra[1]
 				for i+8 <= numBytes {
 					v := binary.LittleEndian.Uint64(b[i:])
 					if v&0x8080808080808080 != 0 {
@@ -548,7 +495,7 @@ func fastMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 					noneIncluded := true
 					for k := 0; k < 8; k++ {
 						bv := byte(v >> (k * 8))
-						if (mask[bv>>6] & (1 << (bv & 63))) != 0 {
+						if (bv < 64 && (m0&(1<<bv)) != 0) || (bv >= 64 && (m1&(1<<(bv-64))) != 0) {
 							noneIncluded = false
 							break
 						}
@@ -559,7 +506,7 @@ func fastMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 					i += 8
 				}
 			case ir.CCWarpBitmask:
-				mask := info.Mask
+				m0, m1 := info.Extra[0], info.Extra[1]
 				for i+8 <= numBytes {
 					v := binary.LittleEndian.Uint64(b[i:])
 					if v&0x8080808080808080 != 0 {
@@ -568,9 +515,16 @@ func fastMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 					allIncluded := true
 					for k := 0; k < 8; k++ {
 						bv := byte(v >> (k * 8))
-						if (mask[bv>>6] & (1 << (bv & 63))) == 0 {
-							allIncluded = false
-							break
+						if bv < 64 {
+							if (m0 & (1 << bv)) == 0 {
+								allIncluded = false
+								break
+							}
+						} else {
+							if (m1 & (1 << (bv - 64))) == 0 {
+								allIncluded = false
+								break
+							}
 						}
 					}
 					if !allIncluded {
@@ -617,32 +571,24 @@ func fastMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 		}
 
 		byteVal := b[i]
-		if int(sidx) < numStates {
-			off := (int(sidx) << 8) | int(byteVal)
-			rawNext := trans[off]
+		off := (int(sidx) << 8) | int(byteVal)
+		rawNext := trans[off]
+		if rawNext != ir.InvalidState {
+			// Handle special flags
+			if (rawNext & ir.AnchorVerifyFlag) != 0 {
+				req := syntax.EmptyOp((rawNext & ir.AnchorMask) >> 22)
+				if !(ir.VerifyEnd(b, i, numBytes, req) && ir.VerifyBegin(b, i, req) && ir.VerifyWord(b, i, numBytes, req)) {
+					rawNext = ir.InvalidState
+				}
+			}
 			if rawNext != ir.InvalidState {
-				if (rawNext & (ir.AnchorVerifyFlag | ir.TaggedStateFlag | ir.WarpStateFlag)) == 0 {
-					state = rawNext
+				state = rawNext
+				if (byteVal < 0x80) || (rawNext&ir.WarpStateFlag) == 0 {
 					i++
-					continue
+				} else {
+					i += 1 + ir.GetTrailingByteCount(byteVal)
 				}
-
-				// Handle special flags
-				if (rawNext & ir.AnchorVerifyFlag) != 0 {
-					req := syntax.EmptyOp((rawNext & ir.AnchorMask) >> 22)
-					if !(ir.VerifyEnd(b, i, numBytes, req) && ir.VerifyBegin(b, i, req) && ir.VerifyWord(b, i, numBytes, req)) {
-						rawNext = ir.InvalidState
-					}
-				}
-				if rawNext != ir.InvalidState {
-					state = rawNext
-					if (byteVal < 0x80) || (rawNext&ir.WarpStateFlag) == 0 {
-						i++
-					} else {
-						i += 1 + ir.GetTrailingByteCount(byteVal)
-					}
-					continue
-				}
+				continue
 			}
 		}
 		if anchorStart {
@@ -676,7 +622,6 @@ func extendedMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 	d := re.dfa
 	trans := d.Transitions()
 	guards := d.AcceptingGuards()
-	numStates := d.NumStates()
 	numBytes := len(b)
 	searchState := re.searchState
 	matchState := re.matchState
@@ -704,7 +649,7 @@ func extendedMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 		sidx := state & ir.StateIDMask
 
 		// Priority 1: SIMD Warp (SearchWarp) - skip noise
-		if !anchorStart && (state&ir.StateIDMask) == (searchState&ir.StateIDMask) {
+		if !anchorStart && sidx == (searchState&ir.StateIDMask) {
 			oldI := i
 			if len(re.prefix) > 0 {
 				pos := bytes.Index(b[i:], re.prefix)
@@ -717,7 +662,7 @@ func extendedMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 				info := re.searchWarp
 				switch info.Kernel {
 				case ir.CCWarpEqual:
-					target := byte(info.Splats[0])
+					target := byte(info.V0)
 					pos := bytes.IndexByte(b[i:], target)
 					if pos < 0 {
 						i = numBytes
@@ -734,7 +679,7 @@ func extendedMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 						}
 						break
 					}
-					low, high := info.Splats[0], info.Splats[1]
+					low, high := info.V0, info.V1
 					for i+8 <= numBytes {
 						v := binary.LittleEndian.Uint64(b[i:])
 						if ((v+0x7f7f7f7f7f7f7f7f-high)|(v-low))&0x8080808080808080 != 0x8080808080808080 {
@@ -742,16 +687,15 @@ func extendedMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 						}
 						i += 8
 					}
-					// Fallback to byte-by-byte for the last few bytes
 					for i < numBytes {
 						bv := b[i]
-						if bv >= byte(info.Splats[0]>>56) && bv <= byte(info.Splats[1]>>56) {
+						if bv >= byte(low) && bv <= byte(high) {
 							break
 						}
 						i++
 					}
 				case ir.CCWarpNotSingleRange:
-					low, high := info.Splats[0], info.Splats[1]
+					low, high := info.V0, info.V1
 					for i+8 <= numBytes {
 						v := binary.LittleEndian.Uint64(b[i:])
 						if ((v+0x7f7f7f7f7f7f7f7f-high)|(v-low))&0x8080808080808080 == 0x8080808080808080 {
@@ -761,31 +705,14 @@ func extendedMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 					}
 					for i < numBytes {
 						bv := b[i]
-						if bv < byte(info.Splats[0]>>56) || bv > byte(info.Splats[1]>>56) {
+						if bv < byte(low) || bv > byte(high) {
 							break
 						}
 						i++
 					}
 				case ir.CCWarpNotEqual:
-					target := byte(info.Splats[0])
+					target := byte(info.V0)
 					for i < numBytes && b[i] == target {
-						i++
-					}
-				case ir.CCWarpNotEqualSet:
-					for i < numBytes {
-						found := false
-						for k := 0; k < 8; k++ {
-							if info.Masks[k] == 0 {
-								break
-							}
-							if b[i] == byte(info.Splats[k]) {
-								found = true
-								break
-							}
-						}
-						if !found {
-							break
-						}
 						i++
 					}
 				case ir.CCWarpBitmask:
@@ -798,29 +725,20 @@ func extendedMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 						}
 						break
 					}
-					mask := info.Mask
-					for i+8 <= numBytes {
-						v := binary.LittleEndian.Uint64(b[i:])
-						if v&0x8080808080808080 != 0 {
-							break
-						}
-						allNoise := true
-						for k := 0; k < 8; k++ {
-							bv := byte(v >> (k * 8))
-							if (mask[bv>>6] & (1 << (bv & 63))) == 0 {
-								allNoise = false
-								break
-							}
-						}
-						if !allNoise {
-							break
-						}
-						i += 8
-					}
+					m0, m1 := info.Extra[0], info.Extra[1]
 					for i < numBytes {
 						bv := b[i]
-						if bv >= 128 || (mask[bv>>6]&(1<<(bv&63))) == 0 {
+						if bv >= 128 {
 							break
+						}
+						if bv < 64 {
+							if (m0 & (1 << bv)) == 0 {
+								break
+							}
+						} else {
+							if (m1 & (1 << (bv - 64))) == 0 {
+								break
+							}
 						}
 						i++
 					}
@@ -831,7 +749,7 @@ func extendedMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 				if i >= numBytes {
 					break
 				}
-				sidx = state & ir.StateIDMask
+				continue
 			}
 		}
 
@@ -841,7 +759,7 @@ func extendedMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 			oldI := i
 			switch info.Kernel {
 			case ir.CCWarpEqual:
-				target := info.Splats[0]
+				target := info.V0
 				for i+8 <= numBytes {
 					v := binary.LittleEndian.Uint64(b[i:])
 					if v != target {
@@ -850,7 +768,7 @@ func extendedMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 					i += 8
 				}
 			case ir.CCWarpSingleRange:
-				low, high := info.Splats[0], info.Splats[1]
+				low, high := info.V0, info.V1
 				for i+8 <= numBytes {
 					v := binary.LittleEndian.Uint64(b[i:])
 					if ((v+0x7f7f7f7f7f7f7f7f-high)|(v-low))&0x8080808080808080 != 0 {
@@ -859,7 +777,7 @@ func extendedMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 					i += 8
 				}
 			case ir.CCWarpNotSingleRange:
-				low, high := info.Splats[0], info.Splats[1]
+				low, high := info.V0, info.V1
 				for i+8 <= numBytes {
 					v := binary.LittleEndian.Uint64(b[i:])
 					if ((v+0x7f7f7f7f7f7f7f7f-high)|(v-low))&0x8080808080808080 != 0x8080808080808080 {
@@ -885,7 +803,7 @@ func extendedMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 					i += 8
 				}
 			case ir.CCWarpNotEqual:
-				target := info.Splats[0]
+				target := info.V0
 				for i+8 <= numBytes {
 					v := binary.LittleEndian.Uint64(b[i:])
 					diff := v ^ target
@@ -895,59 +813,35 @@ func extendedMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 					i += 8
 				}
 			case ir.CCWarpNotEqualSet:
-				s0, s1, s2, s3, s4, s5, s6, s7 := info.Splats[0], info.Splats[1], info.Splats[2], info.Splats[3], info.Splats[4], info.Splats[5], info.Splats[6], info.Splats[7]
-				m0, m1, m2, m3, m4, m5, m6, m7 := info.Masks[0], info.Masks[1], info.Masks[2], info.Masks[3], info.Masks[4], info.Masks[5], info.Masks[6], info.Masks[7]
+				extra := info.Extra
 				for i+8 <= numBytes {
 					v := binary.LittleEndian.Uint64(b[i:])
-					res0 := (v ^ s0) & ^m0
-					res1 := (v ^ s1) & ^m1
-					res2 := (v ^ s2) & ^m2
-					res3 := (v ^ s3) & ^m3
-					res4 := (v ^ s4) & ^m4
-					res5 := (v ^ s5) & ^m5
-					res6 := (v ^ s6) & ^m6
-					res7 := (v ^ s7) & ^m7
-					m := (res0 - 0x0101010101010101) & (^res0)
-					m |= (res1 - 0x0101010101010101) & (^res1)
-					m |= (res2 - 0x0101010101010101) & (^res2)
-					m |= (res3 - 0x0101010101010101) & (^res3)
-					m |= (res4 - 0x0101010101010101) & (^res4)
-					m |= (res5 - 0x0101010101010101) & (^res5)
-					m |= (res6 - 0x0101010101010101) & (^res6)
-					m |= (res7 - 0x0101010101010101) & (^res7)
-					if (m & 0x8080808080808080) != 0 {
+					match := uint64(0)
+					for k := 0; k < 8; k++ {
+						res := (v ^ extra[k]) & ^extra[k+8]
+						match |= (res - 0x0101010101010101) & (^res)
+					}
+					if (match & 0x8080808080808080) != 0 {
 						break
 					}
 					i += 8
 				}
 			case ir.CCWarpEqualSet:
-				s0, s1, s2, s3, s4, s5, s6, s7 := info.Splats[0], info.Splats[1], info.Splats[2], info.Splats[3], info.Splats[4], info.Splats[5], info.Splats[6], info.Splats[7]
-				m0, m1, m2, m3, m4, m5, m6, m7 := info.Masks[0], info.Masks[1], info.Masks[2], info.Masks[3], info.Masks[4], info.Masks[5], info.Masks[6], info.Masks[7]
+				extra := info.Extra
 				for i+8 <= numBytes {
 					v := binary.LittleEndian.Uint64(b[i:])
-					res0 := (v ^ s0) & ^m0
-					res1 := (v ^ s1) & ^m1
-					res2 := (v ^ s2) & ^m2
-					res3 := (v ^ s3) & ^m3
-					res4 := (v ^ s4) & ^m4
-					res5 := (v ^ s5) & ^m5
-					res6 := (v ^ s6) & ^m6
-					res7 := (v ^ s7) & ^m7
-					m := (res0 - 0x0101010101010101) & (^res0)
-					m |= (res1 - 0x0101010101010101) & (^res1)
-					m |= (res2 - 0x0101010101010101) & (^res2)
-					m |= (res3 - 0x0101010101010101) & (^res3)
-					m |= (res4 - 0x0101010101010101) & (^res4)
-					m |= (res5 - 0x0101010101010101) & (^res5)
-					m |= (res6 - 0x0101010101010101) & (^res6)
-					m |= (res7 - 0x0101010101010101) & (^res7)
-					if (m & 0x8080808080808080) != 0x8080808080808080 {
+					match := uint64(0)
+					for k := 0; k < 8; k++ {
+						res := (v ^ extra[k]) & ^extra[k+8]
+						match |= (res - 0x0101010101010101) & (^res)
+					}
+					if (match & 0x8080808080808080) != 0x8080808080808080 {
 						break
 					}
 					i += 8
 				}
 			case ir.CCWarpNotBitmask:
-				mask := info.Mask
+				m0, m1 := info.Extra[0], info.Extra[1]
 				for i+8 <= numBytes {
 					v := binary.LittleEndian.Uint64(b[i:])
 					if v&0x8080808080808080 != 0 {
@@ -956,7 +850,7 @@ func extendedMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 					noneIncluded := true
 					for k := 0; k < 8; k++ {
 						bv := byte(v >> (k * 8))
-						if (mask[bv>>6] & (1 << (bv & 63))) != 0 {
+						if (bv < 64 && (m0&(1<<bv)) != 0) || (bv >= 64 && (m1&(1<<(bv-64))) != 0) {
 							noneIncluded = false
 							break
 						}
@@ -967,7 +861,7 @@ func extendedMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 					i += 8
 				}
 			case ir.CCWarpBitmask:
-				mask := info.Mask
+				m0, m1 := info.Extra[0], info.Extra[1]
 				for i+8 <= numBytes {
 					v := binary.LittleEndian.Uint64(b[i:])
 					if v&0x8080808080808080 != 0 {
@@ -976,9 +870,16 @@ func extendedMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 					allIncluded := true
 					for k := 0; k < 8; k++ {
 						bv := byte(v >> (k * 8))
-						if (mask[bv>>6] & (1 << (bv & 63))) == 0 {
-							allIncluded = false
-							break
+						if bv < 64 {
+							if (m0 & (1 << bv)) == 0 {
+								allIncluded = false
+								break
+							}
+						} else {
+							if (m1 & (1 << (bv - 64))) == 0 {
+								allIncluded = false
+								break
+							}
 						}
 					}
 					if !allIncluded {
@@ -1025,34 +926,32 @@ func extendedMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 		}
 
 		byteVal := b[i]
-		if int(sidx) < numStates {
-			off := (int(sidx) << 8) | int(byteVal)
-			rawNext := trans[off]
-			if rawNext != ir.InvalidState {
-				// Handle special flags
-				if (rawNext & ir.AnchorVerifyFlag) != 0 {
-					req := syntax.EmptyOp((rawNext & ir.AnchorMask) >> 22)
-					if !(ir.VerifyEnd(b, i, numBytes, req) && ir.VerifyBegin(b, i, req) && ir.VerifyWord(b, i, numBytes, req)) {
-						rawNext = ir.InvalidState
-					}
+		off := (int(sidx) << 8) | int(byteVal)
+		rawNext := trans[off]
+		if rawNext != ir.InvalidState {
+			// Handle special flags
+			if (rawNext & ir.AnchorVerifyFlag) != 0 {
+				req := syntax.EmptyOp((rawNext & ir.AnchorMask) >> 22)
+				if !(ir.VerifyEnd(b, i, numBytes, req) && ir.VerifyBegin(b, i, req) && ir.VerifyWord(b, i, numBytes, req)) {
+					rawNext = ir.InvalidState
 				}
-				if rawNext != ir.InvalidState {
-					if (rawNext & ir.TaggedStateFlag) != 0 {
-						if off < len(uIndices) {
-							uIdx := uIndices[off]
-							if int(uIdx) < len(uPrioDeltas) {
-								prio += int(uPrioDeltas[uIdx])
-							}
+			}
+			if rawNext != ir.InvalidState {
+				if (rawNext & ir.TaggedStateFlag) != 0 {
+					if off < len(uIndices) {
+						uIdx := uIndices[off]
+						if int(uIdx) < len(uPrioDeltas) {
+							prio += int(uPrioDeltas[uIdx])
 						}
 					}
-					state = rawNext
-					if (byteVal < 0x80) || (rawNext&ir.WarpStateFlag) == 0 {
-						i++
-					} else {
-						i += 1 + ir.GetTrailingByteCount(byteVal)
-					}
-					continue
 				}
+				state = rawNext
+				if (byteVal < 0x80) || (rawNext&ir.WarpStateFlag) == 0 {
+					i++
+				} else {
+					i += 1 + ir.GetTrailingByteCount(byteVal)
+				}
+				continue
 			}
 		}
 		if anchorStart {
@@ -1081,7 +980,6 @@ func extendedMatchExecLoop(re *Regexp, b []byte) (int, int, int) {
 	}
 	return bestStart, bestEnd, bestPriority
 }
-
 func (re *Regexp) submatch(b []byte, mc *matchContext) (int, int, int) {
 	// Submatch always uses the extended loop because it needs to record history
 	return extendedSubmatchExecLoop(re, b, mc)
@@ -1091,7 +989,6 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 	d := re.dfa
 	trans := d.Transitions()
 	guards := d.AcceptingGuards()
-	numStates := d.NumStates()
 	numBytes := len(b)
 	uIndices := re.uIndices
 	uPrioDeltas := re.uPrioDeltas
@@ -1120,7 +1017,7 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 		sidx := state & ir.StateIDMask
 
 		// Priority 1: SIMD Warp (SearchWarp) - skip noise
-		if !anchorStart && (state&ir.StateIDMask) == (searchState&ir.StateIDMask) {
+		if !anchorStart && sidx == (searchState&ir.StateIDMask) {
 			oldI := i
 			if len(re.prefix) > 0 {
 				pos := bytes.Index(b[i:], re.prefix)
@@ -1138,7 +1035,7 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 				info := re.searchWarp
 				switch info.Kernel {
 				case ir.CCWarpEqual:
-					target := byte(info.Splats[0])
+					target := byte(info.V0)
 					pos := bytes.IndexByte(b[i:], target)
 					if pos < 0 {
 						for k := i; k < numBytes; k++ {
@@ -1167,7 +1064,7 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 						}
 						break
 					}
-					low, high := info.Splats[0], info.Splats[1]
+					low, high := info.V0, info.V1
 					for i < numBytes {
 						bv := b[i]
 						if bv >= byte(low) && bv <= byte(high) {
@@ -1177,7 +1074,7 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 						i++
 					}
 				case ir.CCWarpNotSingleRange:
-					low, high := info.Splats[0], info.Splats[1]
+					low, high := info.V0, info.V1
 					for i < numBytes {
 						bv := b[i]
 						if bv < byte(low) || bv > byte(high) {
@@ -1187,26 +1084,8 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 						i++
 					}
 				case ir.CCWarpNotEqual:
-					target := byte(info.Splats[0])
+					target := byte(info.V0)
 					for i < numBytes && b[i] == target {
-						mc.history[i] = sidx
-						i++
-					}
-				case ir.CCWarpNotEqualSet:
-					for i < numBytes {
-						found := false
-						for k := 0; k < 8; k++ {
-							if info.Masks[k] == 0 {
-								break
-							}
-							if b[i] == byte(info.Splats[k]) {
-								found = true
-								break
-							}
-						}
-						if !found {
-							break
-						}
 						mc.history[i] = sidx
 						i++
 					}
@@ -1226,11 +1105,20 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 						}
 						break
 					}
-					mask := info.Mask
+					m0, m1 := info.Extra[0], info.Extra[1]
 					for i < numBytes {
 						bv := b[i]
-						if bv >= 128 || (mask[bv>>6]&(1<<(bv&63))) == 0 {
+						if bv >= 128 {
 							break
+						}
+						if bv < 64 {
+							if (m0 & (1 << bv)) == 0 {
+								break
+							}
+						} else {
+							if (m1 & (1 << (bv - 64))) == 0 {
+								break
+							}
 						}
 						mc.history[i] = sidx
 						i++
@@ -1242,7 +1130,7 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 				if i >= numBytes {
 					break
 				}
-				sidx = state & ir.StateIDMask
+				continue
 			}
 		}
 
@@ -1252,7 +1140,7 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 			oldI := i
 			switch info.Kernel {
 			case ir.CCWarpEqual:
-				target := info.Splats[0]
+				target := info.V0
 				for i+8 <= numBytes {
 					v := binary.LittleEndian.Uint64(b[i:])
 					if v != target {
@@ -1264,7 +1152,7 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 					i += 8
 				}
 			case ir.CCWarpSingleRange:
-				low, high := info.Splats[0], info.Splats[1]
+				low, high := info.V0, info.V1
 				for i+8 <= numBytes {
 					v := binary.LittleEndian.Uint64(b[i:])
 					if ((v+0x7f7f7f7f7f7f7f7f-high)|(v-low))&0x8080808080808080 != 0 {
@@ -1276,7 +1164,7 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 					i += 8
 				}
 			case ir.CCWarpNotSingleRange:
-				low, high := info.Splats[0], info.Splats[1]
+				low, high := info.V0, info.V1
 				for i+8 <= numBytes {
 					v := binary.LittleEndian.Uint64(b[i:])
 					if ((v+0x7f7f7f7f7f7f7f7f-high)|(v-low))&0x8080808080808080 != 0x8080808080808080 {
@@ -1311,7 +1199,7 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 					i += 8
 				}
 			case ir.CCWarpNotEqual:
-				target := info.Splats[0]
+				target := info.V0
 				for i+8 <= numBytes {
 					v := binary.LittleEndian.Uint64(b[i:])
 					diff := v ^ target
@@ -1324,27 +1212,15 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 					i += 8
 				}
 			case ir.CCWarpNotEqualSet:
-				s0, s1, s2, s3, s4, s5, s6, s7 := info.Splats[0], info.Splats[1], info.Splats[2], info.Splats[3], info.Splats[4], info.Splats[5], info.Splats[6], info.Splats[7]
-				m0, m1, m2, m3, m4, m5, m6, m7 := info.Masks[0], info.Masks[1], info.Masks[2], info.Masks[3], info.Masks[4], info.Masks[5], info.Masks[6], info.Masks[7]
+				extra := info.Extra
 				for i+8 <= numBytes {
 					v := binary.LittleEndian.Uint64(b[i:])
-					res0 := (v ^ s0) & ^m0
-					res1 := (v ^ s1) & ^m1
-					res2 := (v ^ s2) & ^m2
-					res3 := (v ^ s3) & ^m3
-					res4 := (v ^ s4) & ^m4
-					res5 := (v ^ s5) & ^m5
-					res6 := (v ^ s6) & ^m6
-					res7 := (v ^ s7) & ^m7
-					m := (res0 - 0x0101010101010101) & (^res0)
-					m |= (res1 - 0x0101010101010101) & (^res1)
-					m |= (res2 - 0x0101010101010101) & (^res2)
-					m |= (res3 - 0x0101010101010101) & (^res3)
-					m |= (res4 - 0x0101010101010101) & (^res4)
-					m |= (res5 - 0x0101010101010101) & (^res5)
-					m |= (res6 - 0x0101010101010101) & (^res6)
-					m |= (res7 - 0x0101010101010101) & (^res7)
-					if (m & 0x8080808080808080) != 0 {
+					match := uint64(0)
+					for k := 0; k < 8; k++ {
+						res := (v ^ extra[k]) & ^extra[k+8]
+						match |= (res - 0x0101010101010101) & (^res)
+					}
+					if (match & 0x8080808080808080) != 0 {
 						break
 					}
 					for k := 0; k < 8; k++ {
@@ -1353,27 +1229,15 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 					i += 8
 				}
 			case ir.CCWarpEqualSet:
-				s0, s1, s2, s3, s4, s5, s6, s7 := info.Splats[0], info.Splats[1], info.Splats[2], info.Splats[3], info.Splats[4], info.Splats[5], info.Splats[6], info.Splats[7]
-				m0, m1, m2, m3, m4, m5, m6, m7 := info.Masks[0], info.Masks[1], info.Masks[2], info.Masks[3], info.Masks[4], info.Masks[5], info.Masks[6], info.Masks[7]
+				extra := info.Extra
 				for i+8 <= numBytes {
 					v := binary.LittleEndian.Uint64(b[i:])
-					res0 := (v ^ s0) & ^m0
-					res1 := (v ^ s1) & ^m1
-					res2 := (v ^ s2) & ^m2
-					res3 := (v ^ s3) & ^m3
-					res4 := (v ^ s4) & ^m4
-					res5 := (v ^ s5) & ^m5
-					res6 := (v ^ s6) & ^m6
-					res7 := (v ^ s7) & ^m7
-					m := (res0 - 0x0101010101010101) & (^res0)
-					m |= (res1 - 0x0101010101010101) & (^res1)
-					m |= (res2 - 0x0101010101010101) & (^res2)
-					m |= (res3 - 0x0101010101010101) & (^res3)
-					m |= (res4 - 0x0101010101010101) & (^res4)
-					m |= (res5 - 0x0101010101010101) & (^res5)
-					m |= (res6 - 0x0101010101010101) & (^res6)
-					m |= (res7 - 0x0101010101010101) & (^res7)
-					if (m & 0x8080808080808080) != 0x8080808080808080 {
+					match := uint64(0)
+					for k := 0; k < 8; k++ {
+						res := (v ^ extra[k]) & ^extra[k+8]
+						match |= (res - 0x0101010101010101) & (^res)
+					}
+					if (match & 0x8080808080808080) != 0x8080808080808080 {
 						break
 					}
 					for k := 0; k < 8; k++ {
@@ -1382,7 +1246,7 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 					i += 8
 				}
 			case ir.CCWarpNotBitmask:
-				mask := info.Mask
+				m0, m1 := info.Extra[0], info.Extra[1]
 				for i+8 <= numBytes {
 					v := binary.LittleEndian.Uint64(b[i:])
 					if v&0x8080808080808080 != 0 {
@@ -1391,7 +1255,7 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 					noneIncluded := true
 					for k := 0; k < 8; k++ {
 						bv := byte(v >> (k * 8))
-						if (mask[bv>>6] & (1 << (bv & 63))) != 0 {
+						if (bv < 64 && (m0&(1<<bv)) != 0) || (bv >= 64 && (m1&(1<<(bv-64))) != 0) {
 							noneIncluded = false
 							break
 						}
@@ -1405,7 +1269,7 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 					i += 8
 				}
 			case ir.CCWarpBitmask:
-				mask := info.Mask
+				m0, m1 := info.Extra[0], info.Extra[1]
 				for i+8 <= numBytes {
 					v := binary.LittleEndian.Uint64(b[i:])
 					if v&0x8080808080808080 != 0 {
@@ -1414,9 +1278,16 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 					allIncluded := true
 					for k := 0; k < 8; k++ {
 						bv := byte(v >> (k * 8))
-						if (mask[bv>>6] & (1 << (bv & 63))) == 0 {
-							allIncluded = false
-							break
+						if bv < 64 {
+							if (m0 & (1 << bv)) == 0 {
+								allIncluded = false
+								break
+							}
+						} else {
+							if (m1 & (1 << (bv - 64))) == 0 {
+								allIncluded = false
+								break
+							}
 						}
 					}
 					if !allIncluded {
@@ -1467,38 +1338,36 @@ func extendedSubmatchExecLoop(re *Regexp, b []byte, mc *matchContext) (int, int,
 		}
 
 		byteVal := b[i]
-		if int(sidx) < numStates {
-			off := (int(sidx) << 8) | int(byteVal)
-			rawNext := trans[off]
+		off := (int(sidx) << 8) | int(byteVal)
+		rawNext := trans[off]
+		if rawNext != ir.InvalidState {
+			// Handle special flags
+			if (rawNext & ir.AnchorVerifyFlag) != 0 {
+				req := syntax.EmptyOp((rawNext & ir.AnchorMask) >> 22)
+				if !(ir.VerifyEnd(b, i, numBytes, req) && ir.VerifyBegin(b, i, req) && ir.VerifyWord(b, i, numBytes, req)) {
+					rawNext = ir.InvalidState
+				}
+			}
 			if rawNext != ir.InvalidState {
-				// Handle special flags
-				if (rawNext & ir.AnchorVerifyFlag) != 0 {
-					req := syntax.EmptyOp((rawNext & ir.AnchorMask) >> 22)
-					if !(ir.VerifyEnd(b, i, numBytes, req) && ir.VerifyBegin(b, i, req) && ir.VerifyWord(b, i, numBytes, req)) {
-						rawNext = ir.InvalidState
-					}
-				}
-				if rawNext != ir.InvalidState {
-					if (rawNext & ir.TaggedStateFlag) != 0 {
-						if off < len(uIndices) {
-							uIdx := uIndices[off]
-							if int(uIdx) < len(uPrioDeltas) {
-								prio += int(uPrioDeltas[uIdx])
-							}
+				if (rawNext & ir.TaggedStateFlag) != 0 {
+					if off < len(uIndices) {
+						uIdx := uIndices[off]
+						if int(uIdx) < len(uPrioDeltas) {
+							prio += int(uPrioDeltas[uIdx])
 						}
 					}
-					state = rawNext
-					if (byteVal < 0x80) || (rawNext&ir.WarpStateFlag) == 0 {
-						i++
-					} else {
-						step := 1 + ir.GetTrailingByteCount(byteVal)
-						for k := 1; k < step; k++ {
-							mc.history[i+k] = state & ir.StateIDMask
-						}
-						i += step
-					}
-					continue
 				}
+				state = rawNext
+				if (byteVal < 0x80) || (rawNext&ir.WarpStateFlag) == 0 {
+					i++
+				} else {
+					step := 1 + ir.GetTrailingByteCount(byteVal)
+					for k := 1; k < step; k++ {
+						mc.history[i+k] = state & ir.StateIDMask
+					}
+					i += step
+				}
+				continue
 			}
 		}
 		if anchorStart {
@@ -1534,7 +1403,6 @@ func (re *Regexp) sparseTDFA_PathSelection(mc *matchContext, b []byte, start, en
 	recap := d.RecapTables()[0]
 	uIndices, uUpdates := d.TagUpdateIndices(), d.TagUpdates()
 
-	// The winning path's relative priority at the end point.
 	currPrio := int16(d.MatchPriority(mc.history[end]))
 	mc.pathHistory[end] = int32(currPrio)
 
@@ -1570,8 +1438,6 @@ func (re *Regexp) sparseTDFA_PathSelection(mc *matchContext, b []byte, start, en
 		}
 		if found {
 			currPrio = bestInputPrio
-		} else {
-			// Stay at current priority if no explicit transition is found (e.g. search restart)
 		}
 		mc.pathHistory[i] = int32(currPrio)
 	}
@@ -1582,7 +1448,6 @@ func (re *Regexp) sparseTDFA_Recap(mc *matchContext, b []byte, start, end, prio 
 	recap := d.RecapTables()[0]
 	uIndices, uUpdates := d.TagUpdateIndices(), d.TagUpdates()
 
-	// Apply initial tags for the winning path identity at start.
 	re.applyEntryTags(regs, d.StartUpdates(), mc.pathHistory[start], start)
 
 	for i := start; i < end; {
@@ -1610,13 +1475,11 @@ func (re *Regexp) sparseTDFA_Recap(mc *matchContext, b []byte, start, end, prio 
 				}
 			}
 
-			// Step 2: Forward lick. Determine the next identity to select the unique edge.
 			nextPathID := int32(0)
 			if i+step <= end {
 				nextPathID = mc.pathHistory[i+step]
 			}
 
-			// We need to find entry where InputPriority == pathID - basePrio AND NextPriority == nextPathID
 			for _, entry := range recap.Transitions[off] {
 				if entry.InputPriority == int16(pathID)-basePrio && int32(entry.NextPriority) == nextPathID {
 					re.applyRawTags(regs, entry.PreTags, i)
@@ -1636,9 +1499,6 @@ func (re *Regexp) applyRawTags(regs []int, tags uint64, pos int) {
 	for bit := 2; bit < 64; bit++ {
 		if (tags & (1 << uint(bit))) != 0 {
 			if bit < len(regs) {
-				// Go capturing semantics on the winning path:
-				// - Start tags (even bits: 2, 4, ...) are fixed once set (leftmost).
-				// - End tags (odd bits: 3, 5, ...) are updated to the latest position.
 				if (bit%2 != 0) || regs[bit] == -1 {
 					regs[bit] = pos
 				}
@@ -1648,7 +1508,6 @@ func (re *Regexp) applyRawTags(regs []int, tags uint64, pos int) {
 }
 
 func (re *Regexp) applyEntryTags(regs []int, updates []ir.PathTagUpdate, pathID int32, pos int) {
-	// Standardize pathID for StartUpdates which are always calculated against Prio 0 or Restart Penalty
 	matchID := pathID
 	if pathID >= ir.SearchRestartPenalty {
 		matchID = pathID % ir.SearchRestartPenalty

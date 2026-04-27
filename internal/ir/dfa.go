@@ -47,10 +47,9 @@ const (
 
 type CCWarpInfo struct {
 	Kernel   CCWarpKernel
-	Splats   [8]uint64 // Base values for XOR
-	Masks    [8]uint64 // Ignore-masks for XOR-based parallel check
-	Mask     [2]uint64 // Fallback bitmask
-	IndexAny string    // String for bytes.IndexAny (used in SearchWarp)
+	V0, V1   uint64   // Fast access for common kernels (Equal, Range, etc.)
+	Extra    []uint64 // Fallback for large sets (EqualSet, Bitmask)
+	IndexAny string   // Fast path for SearchWarp
 }
 
 const MaxDFAMemory = 64 * 1024 * 1024
@@ -715,8 +714,8 @@ func (d *DFA) build(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, ma
 			if excluded != -1 {
 				d.ccWarpTable[i] = CCWarpInfo{
 					Kernel: CCWarpNotEqual,
+					V0:     uint64(excluded) * 0x0101010101010101,
 				}
-				d.ccWarpTable[i].Splats[0] = uint64(excluded) * 0x0101010101010101
 				continue
 			}
 		}
@@ -758,16 +757,13 @@ func (d *DFA) build(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, ma
 				n++
 			}
 
-			// Fill remaining with an identity that never matches 0
-			for j := n; j < 8; j++ {
-				bases[j] = 0xFFFFFFFFFFFFFFFF
-				masks[j] = 0
-			}
+			extra := make([]uint64, 16)
+			copy(extra[0:8], bases[:])
+			copy(extra[8:16], masks[:])
 
 			d.ccWarpTable[i] = CCWarpInfo{
 				Kernel: CCWarpNotEqualSet,
-				Splats: bases,
-				Masks:  masks,
+				Extra:  extra,
 			}
 			continue
 		}
@@ -776,14 +772,12 @@ func (d *DFA) build(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, ma
 		if count >= 100 {
 			exLow, exHigh := -1, -1
 			isExSingleRange := true
-			exCount := 0
 			for b := 0; b < 128; b++ {
 				if !selfLoops[b] {
 					if exLow == -1 {
 						exLow = b
 					}
 					exHigh = b
-					exCount++
 				} else if exLow != -1 {
 					for j := b + 1; j < 128; j++ {
 						if !selfLoops[j] {
@@ -797,9 +791,9 @@ func (d *DFA) build(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, ma
 			if isExSingleRange && exLow != -1 && (exHigh-exLow) >= 1 {
 				d.ccWarpTable[i] = CCWarpInfo{
 					Kernel: CCWarpNotSingleRange,
+					V0:     uint64(exLow) * 0x0101010101010101,
+					V1:     uint64(exHigh) * 0x0101010101010101,
 				}
-				d.ccWarpTable[i].Splats[0] = uint64(exLow) * 0x0101010101010101
-				d.ccWarpTable[i].Splats[1] = uint64(exHigh) * 0x0101010101010101
 				continue
 			}
 		}
@@ -814,7 +808,7 @@ func (d *DFA) build(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, ma
 			}
 			d.ccWarpTable[i] = CCWarpInfo{
 				Kernel: CCWarpNotBitmask,
-				Mask:   mask,
+				Extra:  []uint64{mask[0], mask[1]},
 			}
 			continue
 		}
@@ -846,11 +840,11 @@ func (d *DFA) build(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, ma
 			info := CCWarpInfo{}
 			if low == high {
 				info.Kernel = CCWarpEqual
-				info.Splats[0] = splatLow
+				info.V0 = splatLow
 			} else {
 				info.Kernel = CCWarpSingleRange
-				info.Splats[0] = splatLow
-				info.Splats[1] = splatHigh
+				info.V0 = splatLow
+				info.V1 = splatHigh
 			}
 			d.ccWarpTable[i] = info
 			continue
@@ -890,16 +884,13 @@ func (d *DFA) build(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, ma
 				masks[n] = uint64(mask) * 0x0101010101010101
 				n++
 			}
-			// Fill remaining with zero-matchers
-			for j := n; j < 8; j++ {
-				bases[j] = 0 // Will match 0x00, but m calculation will handle it
-				masks[j] = 0
-			}
+			extra := make([]uint64, 16)
+			copy(extra[0:8], bases[:])
+			copy(extra[8:16], masks[:])
 
 			d.ccWarpTable[i] = CCWarpInfo{
 				Kernel: CCWarpEqualSet,
-				Splats: bases,
-				Masks:  masks,
+				Extra:  extra,
 			}
 			continue
 		}
@@ -914,7 +905,7 @@ func (d *DFA) build(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, ma
 			}
 			d.ccWarpTable[i] = CCWarpInfo{
 				Kernel: CCWarpBitmask,
-				Mask:   mask,
+				Extra:  []uint64{mask[0], mask[1]},
 			}
 		}
 	}
@@ -980,11 +971,11 @@ func (d *DFA) build(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, ma
 			}
 			if low == high {
 				info.Kernel = CCWarpEqual
-				info.Splats[0] = splatLow
+				info.V0 = splatLow
 			} else {
 				info.Kernel = CCWarpSingleRange
-				info.Splats[0] = splatLow
-				info.Splats[1] = splatHigh
+				info.V0 = splatLow
+				info.V1 = splatHigh
 			}
 			d.searchWarp = info
 		} else if searchCount < 64 {
@@ -1003,7 +994,7 @@ func (d *DFA) build(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, ma
 			if noiseCount >= 4 {
 				d.searchWarp = CCWarpInfo{
 					Kernel:   CCWarpBitmask,
-					Mask:     mask,
+					Extra:    []uint64{mask[0], mask[1]},
 					IndexAny: string(chars),
 				}
 			}

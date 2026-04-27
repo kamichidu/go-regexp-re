@@ -66,10 +66,22 @@ A byte `b` is in `[lo, hi]` if `(b + (127 - hi))` does not overflow into Bit 7, 
 === 2. Sub-cube Decomposition
 For disjoint sets like `[a-cA-C]`, the engine groups characters that differ by only 1 bit (e.g., 'a' [0x61] and 'A' [0x41] differ by 0x20). By using a bitmask to ignore that specific bit during XOR, we check **two characters with one operation**.
 
-=== 3. Integration with 3-Pass TDFA
+=== 3. Register Pressure & Compiler Optimization
+Earlier versions used manual loop unrolling (8x) to maximize throughput. However, the current engine favors **slim `for` loops** over manual unrolling.
+- **Why**: Manual unrolling with 8x `uint64` variables consumes too many general-purpose registers, causing the Go compiler to "spill" variables to the stack (memory).
+- **Benefit**: By using `for` loops, we reduce active register usage, allowing the compiler to perform its own optimal unrolling based on the target CPU's register availability, resulting in cleaner and faster assembly.
+
+=== 4. Cache Locality Optimization
+To prevent performance degradation in complex regex patterns with many states, the core transition data is optimized for the L1 cache.
+- **Slim CCWarpInfo**: The structure is kept to **32 bytes**.
+- **Heap Fallback**: Large data sets (like 128-bit masks) are offloaded to an `Extra` slice (heap-allocated once).
+- **Impact**: This ensures that even DFA tables with hundreds of states can fit within the L2 cache, minimizing memory latency during state transitions.
+
+=== 5. Integration with 3-Pass TDFA
 CCWarp is tightly integrated into the 3-Pass execution loop:
-- **Strict Self-Loops**: Warping only triggers on states where transitions lead back to themselves without tag updates.
-- **Naked History**: During the warp, the engine fills the `mc.history` buffer with the state ID, allowing Pass 2 (Path Selection) to reconstruct the winning path accurately.
+- **Strict Self-Loops**: Warping only triggers on states where transitions lead back to themselves without capture tag updates.
+- **Naked History**: During the warp, the engine fills the `mc.history` buffer with the state ID for each skipped byte. This allows Pass 2 (Path Selection) to reconstruct the winning path accurately as if it were scanned byte-by-byte.
+- **Greedy Boundaries**: When a warp triggers on an accepting state, it records the current index as a potential `bestEnd`. Because it's a self-loop, the `bestStart` and `priority` remain anchored to the initial entry point of that state, preserving Go-compatible leftmost-first-longest semantics.
 
 == Benchmarks (Intel(R) Xeon(R) CPU @ 2.80GHz)
 
