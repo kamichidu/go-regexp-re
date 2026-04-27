@@ -26,8 +26,10 @@ Every implementation must adhere to these pillars to ensure maximum performance:
 ### 2.4 Execution Switching Strategy
 To maximize throughput, the engine MUST select the most efficient execution loop based on pattern characteristics:
 - **0-Pass (Literal Bypass)**: Selected for pure constant strings and anchored literals (e.g., `^abc$`, `^abc`, `abc$`). Bypasses all regex engines using SIMD-accelerated standard library search (e.g., `bytes.Index`, `bytes.HasPrefix`). It utilizes a **unified, interface-free `LiteralMatcher` component** with a **Capture Template** to provide submatch indices with zero state-machine and zero dynamic-dispatch overhead. **When this strategy is selected, the engine MUST explicitly bypass all DFA construction to minimize compilation latency and memory footprint.**
-- **Fast Path (Pure DFA)**: Selected for most patterns. It utilizes a minimalist table-based execution loop with **manual restarts and SIMD-accelerated prefix skipping**.
+- **Fast Path (Pure DFA)**: Automatically selected for larger patterns. It utilizes a minimalist table-based execution loop with **Two-Phase SWAR Warping** (SearchWarp for pre-filtering noise and CCWarp for match fast-forwarding).
+- **SWAR Character Class Warp (CCWarp)**: A specialized execution loop for "Pure Self-Loops"—DFA states that transition back to themselves without updating capture tags. It treats 64-bit registers as SIMD vectors to process 8 bytes in parallel, achieving up to 5 GB/s throughput.
 - **Anchor-Aware Guarded SIMD Warp**: Selected for patterns with anchors. Utilizes a separate `anchorTransitions` table and **guarded warp points** to allow SIMD skipping even in the presence of anchors (e.g., `^`, `$`, `\b`).
+
 - **Explicit Hot-Loop Monomorphization**: To ensure zero-overhead, the engine MUST avoid Go generics (`GCShape` sharing) for the primary execution loops. Instead, it employs manually monomorphized functions (e.g., `fastMatchExecLoop`, `extendedMatchExecLoop`, `extendedSubmatchExecLoop`) to ensure the Go compiler can completely eliminate unreachable branches (like `if hasAnchors`) and avoid runtime dictionary lookups.
 - **State-Resident Acceptance Flag**: To eliminate redundant memory lookups in hot loops, DFA state IDs MUST embed the `AcceptingStateFlag` (Bit 29). This allows the execution loop to identify accepting states via a single bitwise AND operation on the current state variable.
 - **Inlining-Friendly Anchor Verification**: Anchor verification logic (e.g., `^`, `$`, `\b`) MUST be implemented as tiny, specialized functions (e.g., `VerifyBegin`, `VerifyEnd`) to guarantee inlining by the Go compiler. Complex junction analysis MUST be avoided in favor of short-circuiting these specialized checks to minimize call-stack overhead and branch misprediction.
@@ -108,6 +110,17 @@ To ensure DFA determinism and $O(1)$ transitions, the behavior of `.` (dot) is s
 
 #### 2.19.2 Calculation-Free Boundary Analysis Mandate
 Junction verification for anchors (`\b`, `^`, `$`) MUST NOT employ `utf8.DecodeRune`. Word boundaries (`\b`) are defined as **ASCII Word Boundaries**; multi-byte bytes (0x80+) are treated as non-word characters.
+
+### 2.20 Byte-Parallel SWAR Execution (Mandate)
+To achieve the $O(n)$ physical throughput goal, the engine MUST implement a hierarchical SWAR (SIMD Within A Register) execution strategy for character classes and repetitions.
+
+- **Hierarchical Kernel Selection**: The engine MUST automatically select the most efficient kernel based on the character set complexity (Equal -> Range -> Set -> Bitmask).
+- **Sub-cube Decomposition**: For disjoint character sets (e.g., `[aeiou]`), the engine MUST employ Sub-cube Decomposition (pairing characters with Hamming distance 1) to enable parallel 8-byte matching with minimal XOR+OR chains.
+- **Register Pressure Management**: Hot loops MUST favor slim implementation (e.g., `for` loops) over manual unrolling if unrolling causes register spilling to the stack. Performance MUST be verified by inspecting compiler-generated assembly or micro-benchmarks.
+- **Cache-line Optimization**: Core transition data structures (e.g., `CCWarpInfo`) MUST be kept small (ideally **32 bytes**) to maximize L1/L2 cache hit rates. Non-critical or large data MUST be offloaded to heap-allocated slices.
+- **Two-Phase Warping & Inverted Logic**: The engine MUST distinguish between **SearchWarp** (finding match start) and **CCWarp** (continuing match). SearchWarp MUST skip noise (characters NOT in the start set) using **Inverted Kernel Logic**. To achieve 10 GB/s+ throughput, SearchWarp MUST prioritize SIMD-accelerated library functions (`bytes.IndexByte`, `bytes.IndexAny`) before falling back to custom SWAR kernels.
+- **Correctness via Self-Loop Restriction**: SWAR Warp MUST be strictly restricted to "Pure Self-Loops"—states that lead back to the same ID without updating capture tags—to prevent submatch boundary corruption.
+- **Physical Throughput Baseline**: The engine MUST aim for a baseline throughput of 3-5 GB/s for simple repetitions (`a+`, `.*`, `[0-9]+`) and 0.5-1 GB/s for disjoint sets on modern x86/ARM hardware.
 
 ## 3. Feature Selection Policy
 

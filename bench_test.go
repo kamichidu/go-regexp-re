@@ -22,8 +22,6 @@ func BenchmarkCompile(b *testing.B) {
 		for _, p := range goldenPatterns {
 			b.Run(p.name, func(b *testing.B) {
 				b.ReportAllocs()
-				// We still need the loop for b.N, but we use it sparingly if it's slow.
-				// However, standard benchmark practice is to run b.N times.
 				for i := 0; i < b.N; i++ {
 					_ = MustCompile(p.pattern)
 				}
@@ -48,7 +46,6 @@ func BenchmarkMatch(b *testing.B) {
 	b.Run("Re", func(b *testing.B) {
 		for _, p := range goldenPatterns {
 			b.Run(p.name, func(b *testing.B) {
-				// Use the cache if available from tests, or just compile once here.
 				r, err := Compile(p.pattern)
 				if err != nil {
 					b.Fatalf("Compile %s failed: %v", p.pattern, err)
@@ -155,9 +152,26 @@ func BenchmarkCCWarp(b *testing.B) {
 		pattern string
 		payload string
 	}{
-		{"Digits", `[0-9]+`, strings.Repeat("1234567890123456", 1024)}, // 16KB of digits
-		{"Word", `[a-zA-Z0-9_]+`, strings.Repeat("word1234_5678_word", 1024)},
-		{"Dot", `.*`, strings.Repeat("hello_swar_warp_8bytes", 1024)},
+		// 1. Single Character repetition
+		{"Equal", `a+`, strings.Repeat("a", 16384)},
+		// 2. Single Range repetition
+		{"SingleRange", `[0-9]+`, strings.Repeat("12345678", 2048)},
+		// 3. Disjoint set repetition
+		{"EqualSet", `[aeiou]+`, strings.Repeat("aeiouaei", 2048)},
+		// 4. Matches everything (dot-all)
+		{"AnyChar", `(?s).*`, strings.Repeat("ANYTHING", 2048)},
+		// 5. Matches everything except NL
+		{"AnyExceptNL", `.*`, strings.Repeat("NoNewLin", 2048)},
+		// 6. Negated single character
+		{"NotEqual", `[^"]+`, strings.Repeat("NoQuotes", 2048)},
+		// 7. Negated single range
+		{"NotSingleRange", `[^0-9]+`, strings.Repeat("NoDigits", 2048)},
+		// 8. Negated small set
+		{"NotEqualSet", `[^ "]+`, strings.Repeat("NoSpaceQ", 2048)},
+		// 9. Standard Bitmask
+		{"Bitmask", `[a-zA-Z0-9_]+`, strings.Repeat("Word1234", 2048)},
+		// 10. Negated Bitmask
+		{"NotBitmask", `[^a-z]+`, strings.Repeat("12345678", 2048)},
 	}
 
 	for _, c := range cases {
@@ -165,26 +179,19 @@ func BenchmarkCCWarp(b *testing.B) {
 			input := []byte(c.payload)
 			b.Run("Go", func(b *testing.B) {
 				r := goregexp.MustCompile(c.pattern)
-				b.ResetTimer()
+				b.ReportAllocs()
 				b.SetBytes(int64(len(input)))
+				b.ResetTimer()
 				for i := 0; i < b.N; i++ {
 					r.Match(input)
 				}
 			})
 			b.Run("Re", func(b *testing.B) {
 				r := MustCompile(c.pattern)
-				b.ResetTimer()
 				b.SetBytes(int64(len(input)))
+				b.ResetTimer()
 				for i := 0; i < b.N; i++ {
 					r.Match(input)
-				}
-			})
-			b.Run("Re-Submatch", func(b *testing.B) {
-				r := MustCompile(c.pattern)
-				b.ResetTimer()
-				b.SetBytes(int64(len(input)))
-				for i := 0; i < b.N; i++ {
-					r.FindSubmatchIndex(input)
 				}
 			})
 		})

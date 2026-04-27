@@ -32,17 +32,24 @@ const (
 type CCWarpKernel int
 
 const (
-	CCWarpNone CCWarpKernel = iota
-	CCWarpSingleRange
-	CCWarpBitmask
-	CCWarpAnyExceptNL
+	CCWarpNone           CCWarpKernel = iota
+	CCWarpAnyChar                     // Matches everything including NL: (?s). (fastest possible skip)
+	CCWarpAnyExceptNL                 // Any character except newline: .
+	CCWarpEqual                       // Single character repetition: a+ (fastest positive path)
+	CCWarpNotEqual                    // Negated single character: [^"]
+	CCWarpSingleRange                 // Continuous ASCII range: [0-9], [a-z]
+	CCWarpNotSingleRange              // Negated continuous ASCII range: [^0-9]
+	CCWarpEqualSet                    // Small positive disjoint set (2-16 chars) via sub-cube XOR+OR chain
+	CCWarpNotEqualSet                 // Small negated disjoint set (2-8 chars) via sub-cube XOR+OR chain
+	CCWarpBitmask                     // Complex positive set via 8-byte bitmask check
+	CCWarpNotBitmask                  // Large negated disjoint set via negated 8-byte bitmask check
 )
 
 type CCWarpInfo struct {
-	Kernel CCWarpKernel
-	Low    uint64 // Splatted 8-byte low bound
-	High   uint64 // Splatted 8-byte high bound
-	Mask   [2]uint64
+	Kernel   CCWarpKernel
+	V0, V1   uint64   // Fast access for common kernels (Equal, Range, etc.)
+	Extra    []uint64 // Fallback for large sets (EqualSet, Bitmask)
+	IndexAny string   // Fast path for SearchWarp
 }
 
 const MaxDFAMemory = 64 * 1024 * 1024
@@ -550,30 +557,30 @@ func (d *DFA) build(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, ma
 				})
 				d.tagUpdateIndices[idx] = uIdx
 
-				hasRealTags := basePrio != 0
-				if !hasRealTags {
-					for _, u := range nextRes.Updates {
-						if u.Tags != 0 {
-							hasRealTags = true
-							break
-						}
+				hasTags := false
+				for _, u := range nextRes.Updates {
+					if u.Tags != 0 {
+						hasTags = true
+						break
 					}
-					if !hasRealTags {
-						// Also check if any PreTags in the recap entry would be non-zero
-						for _, u := range nextRes.Updates {
-							for _, eu := range d.stateEntryTags[i] {
-								if eu.NextPriority == u.RelativePriority && eu.Tags != 0 {
-									hasRealTags = true
-									break
-								}
-							}
-							if hasRealTags {
+				}
+				if !hasTags {
+					for _, u := range nextRes.Updates {
+						for _, eu := range d.stateEntryTags[i] {
+							if eu.NextPriority == u.RelativePriority && eu.Tags != 0 {
+								hasTags = true
 								break
 							}
 						}
+						if hasTags {
+							break
+						}
 					}
 				}
-				if hasRealTags {
+
+				// Only set TaggedStateFlag if there are actual tags OR a priority shift.
+				// However, for CCWarp detection, we will separately check if priority shifts are allowed.
+				if hasTags || basePrio != 0 {
 					rawNext |= TaggedStateFlag
 				}
 			}
@@ -613,6 +620,7 @@ func (d *DFA) build(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, ma
 	d.ccWarpTable = make([]CCWarpInfo, d.numStates)
 	for i := 0; i < d.numStates; i++ {
 		// A state is CCWarp candidate if it has a large set of self-loops without tags/anchors.
+		// CRITICAL: We only count transitions that lead back to the SAME state (self-loop).
 		var selfLoops [256]bool
 		count := 0
 		for b := 0; b < 128; b++ {
@@ -625,13 +633,42 @@ func (d *DFA) build(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, ma
 				continue
 			}
 
-			// Condition: Self-loop to the same state (masking out flags)
-			if (next & StateIDMask) == uint32(i) {
-				// Condition: No tags or anchors on this transition
-				if (next & (TaggedStateFlag | AnchorVerifyFlag)) == 0 {
-					selfLoops[b] = true
-					count++
+			// Condition: MUST BE a self-loop to the same state (masking out flags)
+			if (next & StateIDMask) != uint32(i) {
+				continue
+			}
+
+			// Condition: No actual capture group tags or anchors on this transition.
+			hasRealTags := false
+			if (next & TaggedStateFlag) != 0 {
+				uIdx := d.tagUpdateIndices[idx]
+				if uIdx != 0xFFFFFFFF {
+					update := d.tagUpdates[uIdx]
+					for _, u := range update.PreUpdates {
+						if u.Tags != 0 {
+							hasRealTags = true
+							break
+						}
+					}
+					if !hasRealTags {
+						for _, u := range update.PreUpdates {
+							for _, eu := range d.stateEntryTags[i] {
+								if eu.NextPriority == u.RelativePriority && eu.Tags != 0 {
+									hasRealTags = true
+									break
+								}
+							}
+							if hasRealTags {
+								break
+							}
+						}
+					}
 				}
+			}
+
+			if !hasRealTags && (next&AnchorVerifyFlag) == 0 {
+				selfLoops[b] = true
+				count++
 			}
 		}
 
@@ -640,6 +677,11 @@ func (d *DFA) build(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, ma
 		}
 
 		// Try to identify a pattern in the self-loops for SWAR kernels.
+		if count == 128 {
+			d.ccWarpTable[i] = CCWarpInfo{Kernel: CCWarpAnyChar}
+			continue
+		}
+
 		// 1. Check for Any-Except-Newline (common for .*)
 		isAnyExceptNL := true
 		for b := 0; b < 128; b++ {
@@ -657,14 +699,116 @@ func (d *DFA) build(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, ma
 		}
 		if isAnyExceptNL {
 			d.ccWarpTable[i] = CCWarpInfo{Kernel: CCWarpAnyExceptNL}
-			// Find all search/match states for this state and set the flag
-			for b := 0; b < 256; b++ {
-				idx := (i << 8) | b
-				if idx < len(d.transitions) && d.transitions[idx] != InvalidState {
-					if (d.transitions[idx] & StateIDMask) == uint32(i) {
-						d.transitions[idx] |= CCWarpFlag
+			continue
+		}
+
+		// 1b. Check for Not-Equal (e.g. [^"])
+		if count == 127 {
+			excluded := -1
+			for b := 0; b < 128; b++ {
+				if !selfLoops[b] {
+					excluded = b
+					break
+				}
+			}
+			if excluded != -1 {
+				d.ccWarpTable[i] = CCWarpInfo{
+					Kernel: CCWarpNotEqual,
+					V0:     uint64(excluded) * 0x0101010101010101,
+				}
+				continue
+			}
+		}
+
+		// 1c. Check for Not-Equal-Set (e.g. [^ "])
+		excludedCount := 128 - count
+		if excludedCount >= 2 && excludedCount <= 16 { // Increased limit as we can combine
+			var excludedChars []int
+			for b := 0; b < 128; b++ {
+				if !selfLoops[b] {
+					excludedChars = append(excludedChars, b)
+				}
+			}
+
+			var bases, masks [8]uint64
+			n := 0
+			used := make([]bool, len(excludedChars))
+			for j := 0; j < len(excludedChars) && n < 8; j++ {
+				if used[j] {
+					continue
+				}
+				base := excludedChars[j]
+				mask := 0
+				used[j] = true
+				// Try to find another char to combine
+				for k := j + 1; k < len(excludedChars); k++ {
+					if used[k] {
+						continue
+					}
+					diff := base ^ excludedChars[k]
+					if (diff & (diff - 1)) == 0 { // Differ by exactly 1 bit
+						mask = diff
+						used[k] = true
+						break
 					}
 				}
+				bases[n] = uint64(base) * 0x0101010101010101
+				masks[n] = uint64(mask) * 0x0101010101010101
+				n++
+			}
+
+			extra := make([]uint64, 16)
+			copy(extra[0:8], bases[:])
+			copy(extra[8:16], masks[:])
+
+			d.ccWarpTable[i] = CCWarpInfo{
+				Kernel: CCWarpNotEqualSet,
+				Extra:  extra,
+			}
+			continue
+		}
+
+		// 1d. Check for Not-Single-Range (e.g. [^0-9])
+		if count >= 100 {
+			exLow, exHigh := -1, -1
+			isExSingleRange := true
+			for b := 0; b < 128; b++ {
+				if !selfLoops[b] {
+					if exLow == -1 {
+						exLow = b
+					}
+					exHigh = b
+				} else if exLow != -1 {
+					for j := b + 1; j < 128; j++ {
+						if !selfLoops[j] {
+							isExSingleRange = false
+							break
+						}
+					}
+					break
+				}
+			}
+			if isExSingleRange && exLow != -1 && (exHigh-exLow) >= 1 {
+				d.ccWarpTable[i] = CCWarpInfo{
+					Kernel: CCWarpNotSingleRange,
+					V0:     uint64(exLow) * 0x0101010101010101,
+					V1:     uint64(exHigh) * 0x0101010101010101,
+				}
+				continue
+			}
+		}
+
+		// 1e. Check for Not-Bitmask (e.g. [^a-z0-9])
+		if count >= 100 && count < 128-8 {
+			var mask [2]uint64
+			for b := 0; b < 128; b++ {
+				if !selfLoops[b] {
+					mask[b>>6] |= 1 << (b & 63)
+				}
+			}
+			d.ccWarpTable[i] = CCWarpInfo{
+				Kernel: CCWarpNotBitmask,
+				Extra:  []uint64{mask[0], mask[1]},
 			}
 			continue
 		}
@@ -693,23 +837,65 @@ func (d *DFA) build(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, ma
 		if isSingleRange && low != -1 && (high-low) >= 0 { // Allow single character ranges (e.g. a+)
 			splatLow := uint64(low) * 0x0101010101010101
 			splatHigh := uint64(high) * 0x0101010101010101
-			d.ccWarpTable[i] = CCWarpInfo{
-				Kernel: CCWarpSingleRange,
-				Low:    splatLow,
-				High:   splatHigh,
+			info := CCWarpInfo{}
+			if low == high {
+				info.Kernel = CCWarpEqual
+				info.V0 = splatLow
+			} else {
+				info.Kernel = CCWarpSingleRange
+				info.V0 = splatLow
+				info.V1 = splatHigh
 			}
-			for b := 0; b < 256; b++ {
-				idx := (i << 8) | b
-				if idx < len(d.transitions) && d.transitions[idx] != InvalidState {
-					if (d.transitions[idx] & StateIDMask) == uint32(i) {
-						d.transitions[idx] |= CCWarpFlag
+			d.ccWarpTable[i] = info
+			continue
+		}
+
+		// 2b. Check for Equal-Set (disjoint positive set, e.g. [aeiou])
+		if count >= 2 && count <= 16 {
+			var chars []int
+			for b := 0; b < 128; b++ {
+				if selfLoops[b] {
+					chars = append(chars, b)
+				}
+			}
+
+			var bases, masks [8]uint64
+			n := 0
+			used := make([]bool, len(chars))
+			for j := 0; j < len(chars) && n < 8; j++ {
+				if used[j] {
+					continue
+				}
+				base := chars[j]
+				mask := 0
+				used[j] = true
+				for k := j + 1; k < len(chars); k++ {
+					if used[k] {
+						continue
+					}
+					diff := base ^ chars[k]
+					if (diff & (diff - 1)) == 0 {
+						mask = diff
+						used[k] = true
+						break
 					}
 				}
+				bases[n] = uint64(base) * 0x0101010101010101
+				masks[n] = uint64(mask) * 0x0101010101010101
+				n++
+			}
+			extra := make([]uint64, 16)
+			copy(extra[0:8], bases[:])
+			copy(extra[8:16], masks[:])
+
+			d.ccWarpTable[i] = CCWarpInfo{
+				Kernel: CCWarpEqualSet,
+				Extra:  extra,
 			}
 			continue
 		}
 
-		// 3. Fallback to Bitmask (for complex classes like [a-zA-Z0-9_])
+		// 3. Fallback to Bitmask
 		if count >= 4 {
 			var mask [2]uint64
 			for b := 0; b < 128; b++ {
@@ -719,35 +905,49 @@ func (d *DFA) build(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, ma
 			}
 			d.ccWarpTable[i] = CCWarpInfo{
 				Kernel: CCWarpBitmask,
-				Mask:   mask,
+				Extra:  []uint64{mask[0], mask[1]},
 			}
-			for b := 0; b < 256; b++ {
-				idx := (i << 8) | b
-				if idx < len(d.transitions) && d.transitions[idx] != InvalidState {
-					if (d.transitions[idx] & StateIDMask) == uint32(i) {
-						d.transitions[idx] |= CCWarpFlag
-					}
-				}
+		}
+	}
+
+	// Assign CCWarpFlag to self-loop transitions for states that qualify.
+	for i := 0; i < d.numStates; i++ {
+		if d.ccWarpTable[i].Kernel == CCWarpNone {
+			continue
+		}
+		for b := 0; b < 256; b++ {
+			idx := (i << 8) | b
+			if idx < len(d.transitions) && (d.transitions[idx]&StateIDMask) == uint32(i) {
+				d.transitions[idx] |= CCWarpFlag
 			}
 		}
 	}
 
 	// Calculate SearchWarp for the entire pattern (Pre-filter)
-	firstBytes := GetFirstBytes(s)
-	// Try to identify a pattern for SearchWarp kernels.
-	// We only use SearchWarp if the start set is relatively small/specific.
+	searchIdx := int(d.searchState & StateIDMask)
+	var firstBytes [2]uint64
+	searchCount := 0
+	for b := 0; b < 128; b++ {
+		idx := (searchIdx << 8) | b
+		if idx < len(d.transitions) {
+			next := d.transitions[idx]
+			if next != InvalidState {
+				firstBytes[b>>6] |= 1 << (b & 63)
+				searchCount++
+			}
+		}
+	}
+
 	{
 		// 1. Check for single range [low, high]
 		low, high := -1, -1
 		isSingleRange := true
-		count := 0
 		for b := 0; b < 128; b++ {
 			if (firstBytes[b>>6] & (1 << (b & 63))) != 0 {
 				if low == -1 {
 					low = b
 				}
 				high = b
-				count++
 			} else if low != -1 {
 				for j := b + 1; j < 128; j++ {
 					if (firstBytes[j>>6] & (1 << (j & 63))) != 0 {
@@ -759,23 +959,44 @@ func (d *DFA) build(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, ma
 			}
 		}
 		// If it's a very broad range (like [^\n]), SearchWarp is counter-productive.
-		if isSingleRange && low != -1 && (high-low) >= 1 && (high-low) < 64 {
-			d.searchWarp = CCWarpInfo{
-				Kernel: CCWarpSingleRange,
-				Low:    uint64(low) * 0x0101010101010101,
-				High:   uint64(high) * 0x0101010101010101,
+		if isSingleRange && low != -1 && (high-low) < 64 {
+			splatLow := uint64(low) * 0x0101010101010101
+			splatHigh := uint64(high) * 0x0101010101010101
+			var chars []byte
+			for b := low; b <= high; b++ {
+				chars = append(chars, byte(b))
 			}
-		} else if count >= 2 && count < 64 {
-			// 2. Fallback to Bitmask
+			info := CCWarpInfo{
+				IndexAny: string(chars),
+			}
+			if low == high {
+				info.Kernel = CCWarpEqual
+				info.V0 = splatLow
+			} else {
+				info.Kernel = CCWarpSingleRange
+				info.V0 = splatLow
+				info.V1 = splatHigh
+			}
+			d.searchWarp = info
+		} else if searchCount < 64 {
+			// Sparse match starts: use Bitmask (with noise characters in mask)
 			var mask [2]uint64
+			var chars []byte
+			noiseCount := 0
 			for b := 0; b < 128; b++ {
-				if (firstBytes[b>>6] & (1 << (b & 63))) != 0 {
+				if (firstBytes[b>>6] & (1 << (b & 63))) == 0 {
 					mask[b>>6] |= 1 << (b & 63)
+					noiseCount++
+				} else {
+					chars = append(chars, byte(b))
 				}
 			}
-			d.searchWarp = CCWarpInfo{
-				Kernel: CCWarpBitmask,
-				Mask:   mask,
+			if noiseCount >= 4 {
+				d.searchWarp = CCWarpInfo{
+					Kernel:   CCWarpBitmask,
+					Extra:    []uint64{mask[0], mask[1]},
+					IndexAny: string(chars),
+				}
 			}
 		}
 	}

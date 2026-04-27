@@ -1,126 +1,99 @@
-= SWAR Character Class Warp
-:sectnums:
+= SWAR Character Class Warp (CCWarp)
+:core-tech: SWAR (SIMD Within A Register), Bitwise Parallel, Arithmetic Range Check
 
 == Overview
-SWAR (SIMD Within A Register) Character Class Warp is a technique to accelerate two distinct phases of regex execution:
-1. **Search Pre-filter (SearchWarp)**: Rapidly finding the next possible match start position.
-2. **Match-time Skip (CCWarp)**: Fast-forwarding through continuous matches in self-looping states (e.g., `[a-z]+`, `a+`).
 
-== Design Specification
+Standard DFA engines process input one byte at a time, leading to significant overhead in loops, branch mispredictions, and memory latency—especially for patterns like `.*` or `[0-9]+` where the state machine stays in a self-loop.
 
-=== 1. State ID and Structure Extension
-To support both types of SWAR Warp:
-* **CCWarp**: Defined per-state in the transition table using the `CCWarpFlag`.
-* **SearchWarp**: Defined per-pattern in the `Regexp` structure, used when no constant SIMD prefix is available.
+**SWAR Character Class Warp (CCWarp)** overcomes this bottleneck by treating 64-bit general-purpose registers as SIMD vectors. It processes **8 bytes in parallel** using Pure Go bitwise and arithmetic operations, bypassing the DFA transition table for long repetitions.
 
-[source]
-----
- 32-bit Packed State ID:
- [31] TaggedStateFlag
- [30] AnchorVerifyFlag
- [29] AcceptingStateFlag
- [28] CCWarpFlag
- [27-22] AnchorMask (6-bit EmptyOp)
- [21] WarpStateFlag (UTF-8 skip)
- [20] Reserved
- [19-0] State Index
-----
+== Two-Phase Warping Strategy
 
-=== 2. Search Pre-filter (SearchWarp)
-When a pattern lacks a constant prefix (e.g., `[0-9]+`), the engine uses SearchWarp to skip non-starting bytes.
+The engine applies SWAR optimizations in two distinct phases to maximize throughput across the entire search process.
 
-* **Intelligent Thresholding**: SearchWarp is only enabled if the "Start Set" (possible first bytes of a match) contains **fewer than 64 unique ASCII bytes**. This prevents the overhead of SWAR from outweighing its benefits in broad patterns like `.*`.
-* **Priority Placement**: To avoid performance regression during noise skipping, SearchWarp is checked **before** CCWarp in the execution loop. This ensures that the engine only attempts match-time skips once it has potentially found a match start.
-* **Infinite Loop Prevention**: Runtime loops MUST verify that the index `i` has actually advanced (using an `oldI := i` check) before issuing a `continue`. If no progress is made (e.g., noise is less than 8 bytes), the engine falls back to standard DFA transitions to ensure progress.
+=== 1. SearchWarp (Pre-filtering)
+When the engine is in the initial `searchState` (scanning for a match start), it uses the **SearchWarp** phase to skip "noise" characters. 
 
-=== 3. Match-time Skip (CCWarp)
-During the DFA optimization phase, a state $S$ is marked for `CCWarp` if it meets the following criteria:
+- **Hybrid Strategy**: To achieve peak performance, SearchWarp prioritizes Go standard library SIMD-accelerated functions:
+    *   **Single Character**: Uses `bytes.IndexByte` (up to 15 GB/s).
+    *   **Small Set/Range**: Uses `bytes.IndexAny` with a pre-calculated character string.
+    *   **Large/Negated Set**: Falls back to specialized SWAR kernels (e.g., `CCWarpNotSingleRange`) to skip noise 8 bytes at a time.
+- **Goal**: Rapidly skip segments of text that cannot possibly start a match.
+- **Sharing**: It shares the same kernel definitions as CCWarp but applies **inverted logic**: it skips as long as characters are NOT in the "Start Set".
 
-1. **Self-Loop Existence**: There exists an ASCII byte set $C \subseteq [0, 127]$ such that $\delta(S, c) = S \ (\forall c \in C)$.
-2. **Purity Guarantee**:
-    * The self-loop transition contains no **real updates** (Tags or Priority shifts). `TaggedStateFlag` is only set if a transition actually modifies the match state.
-    * The self-loop transition requires no `AnchorVerifyFlag` checks.
-3. **Determinism**: $C$ matches one of the predefined SWAR kernels.
+=== 2. CCWarp (Match Fast-Forwarding)
+Once a match has begun and the DFA enters a self-looping state (like the `+` in `[0-9]+`), it switches to the **CCWarp** phase.
+- **Goal**: Consume as many matching characters as possible without leaving the current DFA state.
+- **Performance**: This phase allows the engine to "swallow" the bulk of the match at memory-bandwidth speeds.
 
-* **Single Character Optimization**: CCWarp is enabled for ranges of any size, including single characters (e.g., `a+`). This allows simple repetitions to achieve multi-gigabyte throughput.
+== The Core Principle: Bitwise Parallelism
 
-=== 4. Runtime: Hybrid Warp Strategy
-Execution loops attempt skipping in the following order of priority. Note that `SearchWarp` has higher priority to maximize efficiency when searching through long noise segments. To maximize instruction throughput, the kernel selection (`switch`) is performed **outside** the inner warp loop (Monomorphization).
+The foundation of CCWarp is the "Zero-Byte Detection" trick. To check if any byte in an 8-byte word `v` matches a target character `c`, we calculate:
 
 [source,go]
 ----
-for i < numBytes {
-    sidx := state & ir.StateIDMask
-
-    // Priority 1: SIMD Warp (SearchWarp) - skip noise
-    if !anchorStart && (state&ir.StateIDMask) == (searchState&ir.StateIDMask) {
-        if len(re.prefix) > 0 {
-            // ... bytes.Index ...
-            if pos > 0 { i += pos; continue }
-        } else if re.searchWarp.Kernel != ir.CCWarpNone && i+8 <= numBytes {
-            // ... SWAR pre-filter ...
-            if i > oldI { continue }
-        }
-    }
-
-    // Priority 2: CCWarp (Match continuation skip)
-    if (state&ir.CCWarpFlag) != 0 && i+8 <= numBytes {
-        info := ccWarps[sidx]
-        oldI := i
-        switch info.Kernel {
-        case ir.CCWarpSingleRange:
-            // ... SWAR Kernel ...
-        }
-        if i > oldI {
-            // Correctness: Update match boundaries if state is accepting
-            if (state & ir.AcceptingStateFlag) != 0 {
-                // ... update bestStart, bestEnd ...
-                if d.IsBestMatch(sidx) { return ... }
-            }
-            continue
-        }
-    }
-
-    // Priority 3: Standard DFA Transition (1-byte)
-    // ...
-}
+diff := v ^ splat(c)
+hasMatch := ((diff - 0x0101010101010101) & ^diff & 0x8080808080808080) != 0
 ----
 
-== SWAR Kernel Variants
-The engine employs different SWAR kernels based on the complexity of the character set:
+This allows kernels like `NotEqual` and `AnyExceptNL` to run at the speed of a simple memory copy (~4 GB/s).
 
-* **Kernel 1: Single Range** (`[a-z]`, `[0-9]`, `a+`)
-    * **Logic**: `((v + 0x7f... - high) | (v - low)) & 0x80... == 0`
-    * **Optimization**: Uses only 4-5 instructions to verify 8 bytes simultaneously. Now applied even to single-character ranges.
-* **Kernel 2: ASCII Bitmask** (Complex ASCII sets like `[a-zA-Z0-9_]`)
-    * **Logic**: Verifies all bytes < 128 and performs a bit-index check against a 128-bit bitmask stored in `uint64` registers.
-* **Kernel 3: Any Except Newline** (Optimized for `.*`)
-    * **Logic**: Detects the presence of `\n` (0x0A) using zero-byte detection: `((v ^ 0x0A...) - 0x01...) & ^(v ^ 0x0A...) & 0x80... != 0`.
+== Hierarchical Optimization Kernels
 
-== Interaction with UTF-8 Warp
-* **Complementary**: SWAR Warp handles wide "surfaces" of ASCII data, while UTF-8 Warp handles "points" of multi-byte character boundaries.
-* **Safe Fallback**: If SWAR detects an out-of-range byte (including bytes >= 0x80), the engine immediately falls back to standard DFA transitions or UTF-8 Warp, ensuring 100% correctness.
-* **Greedy Consistency**: When skipping bytes in an accepting state, `CCWarp` must update the "best match" boundaries (`bestEnd`) to ensure longest-match (greedy) semantics are preserved, even when skipping across large segments.
-* **Performance**: Provides a significant throughput boost (up to 3.6 GB/s) for ASCII-heavy payloads, breaking the physical limit of 1-byte-per-transition DFA scanning while remaining safe for multi-byte UTF-8 data.
+The engine automatically selects the most specialized kernel for both SearchWarp and CCWarp.
 
-[appendix]
-== Simulation Results
-Measured throughput for 256MB input on Intel(R) Xeon(R) CPU @ 2.80GHz:
-
+[cols="1,2,1,3", options="header"]
 |===
-| Method | Throughput | Description
-
-| DFA Baseline | 0.41 GB/s | 1-byte table lookup.
-| **SearchWarp** | **3.58 GB/s** | **SIMD noise skipping.**
-| **CCWarp (a+)** | **3.41 GB/s** | **SWAR repetition skipping.**
+| Kernel | Target Pattern | Speed | Strategy
+| *Equal* | `a+` | ~5.0 GB/s | Full 64-bit comparison (`v == splat`).
+| *AnyChar* | `(?s).*` | ~4.4 GB/s | Total skip. Only checks if bytes are ASCII (Bit 7).
+| *AnyExceptNL* | `.*` | ~4.3 GB/s | XOR with `\n` splat.
+| *NotEqual* | `[^"]+` | ~3.4 GB/s | XOR with excluded character splat.
+| *SingleRange* | `[0-9]+` | ~3.3 GB/s | **Arithmetic Range Check**. Handles continuous ASCII segments.
+| *NotSingleRange* | `[^0-9]+` | ~3.2 GB/s | Inverted Arithmetic Range Check.
+| *EqualSet* | `[aeiou]+` | ~800 MB/s | **Sub-cube Decomposition**. Chains multiple XOR+Mask operations.
+| *NotEqualSet* | `[^ "]+` | ~750 MB/s | Sub-cube chain for negated disjoint sets.
+| *Bitmask* | `[\w]+` | ~440 MB/s | 128-bit lookup table applied to 8 bytes batch.
+| *NotBitmask* | `[^a-z]+` | ~440 MB/s | Inverted bitmask lookup.
 |===
 
-== Real-World Performance
-Measured via `BenchmarkReproAPlus` and `BenchmarkSynthetic/SearchWarp`:
+== Advanced Techniques
 
+=== 1. Arithmetic Range Checking
+Instead of comparing against a bitmask, `SingleRange` uses arithmetic properties:
+A byte `b` is in `[lo, hi]` if `(b + (127 - hi))` does not overflow into Bit 7, and `(b - lo)` does not underflow. By splatting this across 64 bits, we check 8 bytes with just 3-4 instructions.
+
+=== 2. Sub-cube Decomposition
+For disjoint sets like `[a-cA-C]`, the engine groups characters that differ by only 1 bit (e.g., 'a' [0x61] and 'A' [0x41] differ by 0x20). By using a bitmask to ignore that specific bit during XOR, we check **two characters with one operation**.
+
+=== 3. Register Pressure & Compiler Optimization
+Earlier versions used manual loop unrolling (8x) to maximize throughput. However, the current engine favors **slim `for` loops** over manual unrolling.
+- **Why**: Manual unrolling with 8x `uint64` variables consumes too many general-purpose registers, causing the Go compiler to "spill" variables to the stack (memory).
+- **Benefit**: By using `for` loops, we reduce active register usage, allowing the compiler to perform its own optimal unrolling based on the target CPU's register availability, resulting in cleaner and faster assembly.
+
+=== 4. Cache Locality Optimization
+To prevent performance degradation in complex regex patterns with many states, the core transition data is optimized for the L1 cache.
+- **Slim CCWarpInfo**: The structure is kept to **32 bytes**.
+- **Heap Fallback**: Large data sets (like 128-bit masks) are offloaded to an `Extra` slice (heap-allocated once).
+- **Impact**: This ensures that even DFA tables with hundreds of states can fit within the L2 cache, minimizing memory latency during state transitions.
+
+=== 5. Integration with 3-Pass TDFA
+CCWarp is tightly integrated into the 3-Pass execution loop:
+- **Strict Self-Loops**: Warping only triggers on states where transitions lead back to themselves without capture tag updates.
+- **Naked History**: During the warp, the engine fills the `mc.history` buffer with the state ID for each skipped byte. This allows Pass 2 (Path Selection) to reconstruct the winning path accurately as if it were scanned byte-by-byte.
+- **Greedy Boundaries**: When a warp triggers on an accepting state, it records the current index as a potential `bestEnd`. Because it's a self-loop, the `bestStart` and `priority` remain anchored to the initial entry point of that state, preserving Go-compatible leftmost-first-longest semantics.
+
+== Benchmarks (Intel(R) Xeon(R) CPU @ 2.80GHz)
+
+The Re engine consistently outperforms the Go standard library by **10x to 60x**.
+
+[cols="1,1,1,1", options="header"]
 |===
-| Pattern | Improvement | Throughput (Re)
-
-| `a+` (1MB 'a') | **34.1x** | 3.41 GB/s
-| `[0-9]+` (Noise) | **84.2x** | 3.58 GB/s
+| Pattern | Go Stdlib (`regexp`) | **Re Engine (SWAR)** | **Improvement**
+| `a+` | 74 MB/s | **5,080 MB/s** | **68.6x**
+| `.*` | 75 MB/s | **4,360 MB/s** | **58.1x**
+| `[^"]+` | 56 MB/s | **3,341 MB/s** | **59.6x**
+| `[0-9]+` | 61 MB/s | **3,293 MB/s** | **53.9x**
+| `[^ "]+` | 53 MB/s | **722 MB/s** | **13.6x**
+| `[\w]+` | 54 MB/s | **431 MB/s** | **7.9x**
 |===
