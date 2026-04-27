@@ -39,6 +39,9 @@ const (
 	CCWarpNotEqual    // [^"] etc.
 	CCWarpNotEqualSet // [^ "] etc. (up to 8 chars)
 	CCWarpNotBitmask  // [^a-z0-9] etc.
+	CCWarpEqualSet    // [aeiou] etc. (disjoint positive set)
+	CCWarpEqual       // [a] (single character positive)
+	CCWarpNotSingleRange // [^0-9] (single range negated)
 )
 
 type CCWarpInfo struct {
@@ -762,7 +765,39 @@ func (d *DFA) build(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, ma
 			continue
 		}
 
-		// 1d. Check for Not-Bitmask (e.g. [^a-z0-9])
+		// 1d. Check for Not-Single-Range (e.g. [^0-9])
+		if count >= 100 {
+			exLow, exHigh := -1, -1
+			isExSingleRange := true
+			exCount := 0
+			for b := 0; b < 128; b++ {
+				if !selfLoops[b] {
+					if exLow == -1 {
+						exLow = b
+					}
+					exHigh = b
+					exCount++
+				} else if exLow != -1 {
+					for j := b + 1; j < 128; j++ {
+						if !selfLoops[j] {
+							isExSingleRange = false
+							break
+						}
+					}
+					break
+				}
+			}
+			if isExSingleRange && exLow != -1 && (exHigh-exLow) >= 1 {
+				d.ccWarpTable[i] = CCWarpInfo{
+					Kernel: CCWarpNotSingleRange,
+				}
+				d.ccWarpTable[i].Splats[0] = uint64(exLow) * 0x0101010101010101
+				d.ccWarpTable[i].Splats[1] = uint64(exHigh) * 0x0101010101010101
+				continue
+			}
+		}
+
+		// 1e. Check for Not-Bitmask (e.g. [^a-z0-9])
 		if count >= 100 && count < 128-8 {
 			var mask [2]uint64
 			for b := 0; b < 128; b++ {
@@ -801,12 +836,64 @@ func (d *DFA) build(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, ma
 		if isSingleRange && low != -1 && (high-low) >= 0 { // Allow single character ranges (e.g. a+)
 			splatLow := uint64(low) * 0x0101010101010101
 			splatHigh := uint64(high) * 0x0101010101010101
-			info := CCWarpInfo{
-				Kernel: CCWarpSingleRange,
+			info := CCWarpInfo{}
+			if low == high {
+				info.Kernel = CCWarpEqual
+				info.Splats[0] = splatLow
+			} else {
+				info.Kernel = CCWarpSingleRange
+				info.Splats[0] = splatLow
+				info.Splats[1] = splatHigh
 			}
-			info.Splats[0] = splatLow
-			info.Splats[1] = splatHigh
 			d.ccWarpTable[i] = info
+			continue
+		}
+
+		// 2b. Check for Equal-Set (disjoint positive set, e.g. [aeiou])
+		if count >= 2 && count <= 16 {
+			var chars []int
+			for b := 0; b < 128; b++ {
+				if selfLoops[b] {
+					chars = append(chars, b)
+				}
+			}
+
+			var bases, masks [8]uint64
+			n := 0
+			used := make([]bool, len(chars))
+			for j := 0; j < len(chars) && n < 8; j++ {
+				if used[j] {
+					continue
+				}
+				base := chars[j]
+				mask := 0
+				used[j] = true
+				for k := j + 1; k < len(chars); k++ {
+					if used[k] {
+						continue
+					}
+					diff := base ^ chars[k]
+					if (diff & (diff - 1)) == 0 {
+						mask = diff
+						used[k] = true
+						break
+					}
+				}
+				bases[n] = uint64(base) * 0x0101010101010101
+				masks[n] = uint64(mask) * 0x0101010101010101
+				n++
+			}
+			// Fill remaining with zero-matchers
+			for j := n; j < 8; j++ {
+				bases[j] = 0 // Will match 0x00, but m calculation will handle it
+				masks[j] = 0
+			}
+
+			d.ccWarpTable[i] = CCWarpInfo{
+				Kernel: CCWarpEqualSet,
+				Splats: bases,
+				Masks:  masks,
+			}
 			continue
 		}
 
