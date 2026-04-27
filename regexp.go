@@ -123,11 +123,16 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 		searchWarp:     searchWarp,
 	}
 
-	if res.literalMatcher == nil && !res.hasAnchors {
+	if res.literalMatcher == nil && !ir.HasComplexAnchors(s) {
 		anchors := ir.ExtractAnchors(s)
 		res.mapAnchor = ir.SelectBestAnchor(anchors)
 		if res.mapAnchor != nil {
-			ir.ExtractConstraints(s, res.mapAnchor)
+			// Disable MAP for multiline anchored patterns for now
+			if (res.mapAnchor.HasBeginText || res.mapAnchor.HasEndText) && (s.Flags&syntax.OneLine == 0) {
+				res.mapAnchor = nil
+			} else {
+				ir.ExtractConstraints(s, res.mapAnchor)
+			}
 		}
 	}
 

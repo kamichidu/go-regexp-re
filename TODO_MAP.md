@@ -10,18 +10,19 @@
 - [x] Pivot (中間), Suffix (末尾) リテラルの抽出
 - [x] アンカー評価関数 (Scoring) の実装: 最も効率的な起点を選択
 - [x] 制約（前後 CharClass）の畳み込みロジックの実装
+- [x] ^ や $ などのアンカー情報の抽出と活用
 
 ## Phase 3: SWARガード・カーネルの実装
-- [x] 逆方向バリデーション用 SWAR カーネルの実装 (in `validate`)
-- [ ] 前方スキップ用 SWAR ワープの統合 (Partial, via `validate`)
-- [x] バリデータの単体テストと境界条件（UTF-8等）の検証 (via golden tests)
+- [x] 逆方向バリデーション用 SWAR カーネルの実装
+- [x] 前方スキップ用 SWAR ワープ (Dynamic Warp) の統合
+- [x] バリデータの単体テストと境界条件（UTF-8等）の検証
 
 ## Phase 4: 実行エンジンへの統合 (Pass 0)
-- [x] `LiteralMatcher` の拡張: 双方向ガード付き検索の実装 (in `findSubmatchIndexInternal`)
+- [x] `LiteralMatcher` の拡張: 双方向ガード付き探索の実装
 - [x] `exec_dispatch.go` への Pass 0 組み込み
 - [x] Pass 0 から Pass 1 (DFA) へのコンテキスト引き継ぎの最適化
 
 ## Phase 5: 最終検証と性能評価
 - [x] 互換性テスト (Fowler, RE2) によるデグレード確認
 - [x] ベースラインとの性能比較（スループット、DFA起動数）
-- [x] ドキュメント (docs/algorithm) の最終更新 (Created)
+- [x] ドキュメント (docs/algorithm) の最終更新

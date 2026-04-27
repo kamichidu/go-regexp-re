@@ -39,17 +39,40 @@ func (re *Regexp) findSubmatchIndexInternal(b []byte, mc *matchContext, regs []i
 		if re.mapAnchor != nil {
 			a := re.mapAnchor
 			input := b
+
+			// Handle BeginText anchor (^)
+			if a.HasBeginText {
+				// If it's a true BeginText anchor (not multiline), it MUST be at 0
+				if bytes.HasPrefix(b, a.Anchor) {
+					if _, ok := a.Validate(b, 0); ok {
+						startSearch := 0
+						var start, end, prio int
+						if mc == nil {
+							start, end, prio = re.match(b[startSearch:])
+						} else {
+							mc.prepare(len(b[startSearch:]), re.numSubexp)
+							start, end, prio = re.submatch(b[startSearch:], mc)
+						}
+						if start >= 0 {
+							return start + startSearch, end + startSearch, prio
+						}
+					}
+				}
+				// If we have ^ and it's not at the start, it will never match (non-multiline)
+				return -1, -1, 0
+			}
+
+			// Standard Pivot/Suffix search
 			for {
 				pos := bytes.Index(input, a.Anchor)
 				if pos < 0 {
+					// If it's a Suffix type anchor and Index fails, no match possible
 					return -1, -1, 0
 				}
 
-				// Found anchor, validate it
 				absolutePos := (len(b) - len(input)) + pos
-				if a.Validate(b, absolutePos) {
+				if _, ok := a.Validate(b, absolutePos); ok {
 					// Constraints satisfied, start DFA Pass 1
-					// Estimated start position
 					startSearch := absolutePos - a.Distance
 					if startSearch < 0 {
 						startSearch = 0
@@ -68,7 +91,6 @@ func (re *Regexp) findSubmatchIndexInternal(b []byte, mc *matchContext, regs []i
 					}
 				}
 
-				// Not a match or didn't satisfy constraints, skip this anchor and search again
 				input = input[pos+1:]
 				if len(input) < len(a.Anchor) {
 					return -1, -1, 0

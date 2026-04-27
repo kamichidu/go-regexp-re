@@ -18,18 +18,21 @@ const (
 
 // Constraint defines a requirement on characters surrounding the anchor.
 type Constraint struct {
-	Offset int // Relative to anchor start
-	Length int
-	Info   CCWarpInfo
+	Offset   int  // Relative to anchor start
+	Length   int  // Fixed length if > 0
+	IsRepeat bool // If true, this is a variable length skip (Warp)
+	Info     CCWarpInfo
 }
 
 // AnchorInfo holds information about a potential anchor in the pattern.
 type AnchorInfo struct {
-	Anchor   []byte
-	Type     AnchorType
-	Distance int // Estimated distance from the start of the match
-	Forward  []Constraint
-	Backward []Constraint
+	Anchor       []byte
+	Type         AnchorType
+	Distance     int // Estimated distance from the start of the match
+	Forward      []Constraint
+	Backward     []Constraint
+	HasBeginText bool // Starts with ^
+	HasEndText   bool // Ends with $
 }
 
 // ExtractAnchors traverses the AST and identifies all potential literal anchors.
@@ -46,6 +49,27 @@ func ExtractAnchors(re *syntax.Regexp) []AnchorInfo {
 				}
 			}
 		}
+	}
+
+	// Anchor flags
+	hasBegin := false
+	hasEnd := false
+	if re.Op == syntax.OpConcat {
+		if len(re.Sub) > 0 && re.Sub[0].Op == syntax.OpBeginText {
+			hasBegin = true
+		}
+		if len(re.Sub) > 0 && re.Sub[len(re.Sub)-1].Op == syntax.OpEndText {
+			hasEnd = true
+		}
+	} else if re.Op == syntax.OpBeginText {
+		hasBegin = true
+	} else if re.Op == syntax.OpEndText {
+		hasEnd = true
+	}
+
+	for i := range anchors {
+		anchors[i].HasBeginText = hasBegin
+		anchors[i].HasEndText = hasEnd
 	}
 
 	return anchors
@@ -189,9 +213,13 @@ func ExtractConstraints(re *syntax.Regexp, anchor *AnchorInfo) {
 		return
 	}
 
+	// Backward constraints (Only support fixed length for now)
 	backOffset := 0
 	for i := anchorIdx - 1; i >= 0; i-- {
 		sub := re.Sub[i]
+		if sub.Op == syntax.OpBeginText {
+			continue // Handled by HasBeginText
+		}
 		d := minLength(sub)
 		if d < 0 {
 			break
@@ -208,23 +236,39 @@ func ExtractConstraints(re *syntax.Regexp, anchor *AnchorInfo) {
 		}
 	}
 
+	// Forward constraints (Support variable length skip/warp)
 	forwardOffset := len(anchor.Anchor)
 	for i := anchorIdx + 1; i < len(re.Sub); i++ {
 		sub := re.Sub[i]
-		d := minLength(sub)
-		if d < 0 {
-			break
+		if sub.Op == syntax.OpEndText {
+			continue // Handled by HasEndText
 		}
+		d := minLength(sub)
+
+		isRepeat := false
+		if sub.Op == syntax.OpStar || sub.Op == syntax.OpPlus || (sub.Op == syntax.OpRepeat && sub.Max == -1) {
+			isRepeat = true
+		}
+
 		if info, ok := toCCWarp(sub); ok {
 			anchor.Forward = append(anchor.Forward, Constraint{
-				Offset: forwardOffset,
-				Length: d,
-				Info:   info,
+				Offset:   forwardOffset,
+				Length:   d,
+				IsRepeat: isRepeat,
+				Info:     info,
 			})
+			if isRepeat {
+				// After a repeat, we can't easily track fixed offsets anymore for Pass 0
+				break
+			}
 		} else {
 			break
 		}
-		forwardOffset += d
+		if d >= 0 {
+			forwardOffset += d
+		} else {
+			break
+		}
 	}
 }
 
@@ -265,7 +309,7 @@ func toCCWarp(re *syntax.Regexp) (CCWarpInfo, bool) {
 		return CCWarpInfo{Kernel: CCWarpAnyExceptNL}, true
 	case syntax.OpAnyChar:
 		return CCWarpInfo{Kernel: CCWarpAnyChar}, true
-	case syntax.OpRepeat, syntax.OpPlus:
+	case syntax.OpRepeat, syntax.OpPlus, syntax.OpStar:
 		if info, ok := toCCWarp(re.Sub[0]); ok {
 			return info, true
 		}
@@ -300,29 +344,46 @@ func SelectBestAnchor(anchors []AnchorInfo) *AnchorInfo {
 	return best
 }
 
-func (a *AnchorInfo) Validate(b []byte, p int) bool {
+// Validate checks if the constraints at the given anchor position P are satisfied.
+// It returns the estimated end of the validated region (for skipping forward).
+func (a *AnchorInfo) Validate(b []byte, p int) (int, bool) {
+	// Backward constraints
 	for _, c := range a.Backward {
 		start := p + c.Offset
 		if start < 0 {
-			return false
+			return p, false
 		}
-		if !validate(c.Info, b[start:start+c.Length]) {
-			return false
+		if !validateFixed(c.Info, b[start:start+c.Length]) {
+			return p, false
 		}
 	}
+
+	// Forward constraints
+	endPos := p + len(a.Anchor)
 	for _, c := range a.Forward {
 		start := p + c.Offset
-		if start+c.Length > len(b) {
-			return false
+		if start > len(b) {
+			return p, false
 		}
-		if !validate(c.Info, b[start:start+c.Length]) {
-			return false
+		if c.IsRepeat {
+			// Dynamic Skip (Warp)
+			skipped := warp(c.Info, b[start:])
+			endPos = start + skipped
+		} else {
+			if start+c.Length > len(b) {
+				return p, false
+			}
+			if !validateFixed(c.Info, b[start:start+c.Length]) {
+				return p, false
+			}
+			endPos = start + c.Length
 		}
 	}
-	return true
+
+	return endPos, true
 }
 
-func validate(info CCWarpInfo, b []byte) bool {
+func validateFixed(info CCWarpInfo, b []byte) bool {
 	if len(b) == 0 {
 		return true
 	}
@@ -402,6 +463,69 @@ func validate(info CCWarpInfo, b []byte) bool {
 	return true
 }
 
+func warp(info CCWarpInfo, b []byte) int {
+	i := 0
+	switch info.Kernel {
+	case CCWarpEqual:
+		target := byte(info.V0)
+		for i < len(b) && b[i] == target {
+			i++
+		}
+	case CCWarpSingleRange:
+		low, high := byte(info.V0), byte(info.V1)
+		low64, high64 := splat(uint64(low)), splat(uint64(high))
+		for i+8 <= len(b) {
+			v := binary.LittleEndian.Uint64(b[i:])
+			if ((v+0x7f7f7f7f7f7f7f7f-high64)|(v-low64))&0x8080808080808080 != 0x8080808080808080 {
+				break
+			}
+			i += 8
+		}
+		for i < len(b) {
+			if b[i] < low || b[i] > high {
+				break
+			}
+			i++
+		}
+	case CCWarpAnyChar:
+		for i+8 <= len(b) {
+			v := binary.LittleEndian.Uint64(b[i:])
+			if v&0x8080808080808080 != 0 {
+				break
+			}
+			i += 8
+		}
+		for i < len(b) && b[i] < 0x80 {
+			i++
+		}
+	case CCWarpAnyExceptNL:
+		for i < len(b) {
+			if b[i] == '\n' || b[i] >= 0x80 {
+				break
+			}
+			i++
+		}
+	}
+	return i
+}
+
 func splat(v uint64) uint64 {
 	return v * 0x0101010101010101
+}
+
+// HasComplexAnchors reports if the pattern contains anchors other than ^ or $.
+func HasComplexAnchors(re *syntax.Regexp) bool {
+	switch re.Op {
+	case syntax.OpBeginLine, syntax.OpEndLine, syntax.OpWordBoundary, syntax.OpNoWordBoundary:
+		return true
+	case syntax.OpCapture, syntax.OpRepeat, syntax.OpQuest, syntax.OpPlus, syntax.OpStar:
+		return HasComplexAnchors(re.Sub[0])
+	case syntax.OpConcat, syntax.OpAlternate:
+		for _, sub := range re.Sub {
+			if HasComplexAnchors(sub) {
+				return true
+			}
+		}
+	}
+	return false
 }
