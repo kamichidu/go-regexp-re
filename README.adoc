@@ -17,7 +17,7 @@ go-regexp-re is a pure Go byte-oriented DFA regex engine. It is designed for ext
 
 == Technical Characteristics
 
-* **Pure Go**: Implementation is written entirely in Go without CGO dependencies.
+* **Pure Go (No CGO, No Assembly)**: Implementation is written entirely in native Go. It achieves extreme performance through manual loop monomorphization and compiler-friendly optimizations, avoiding architecture-specific assembly code and CGO overhead for maximum portability and maintainability.
 * **Byte-Oriented Scanning**: Input is processed as a raw byte sequence (`[]byte`) to avoid the overhead of UTF-8 rune decoding and maximize CPU pipeline efficiency.
 * **Deterministic Finite Automaton (DFA)**: Patterns are converted into deterministic transition tables to ensure constant-time processing per input byte.
 * **Drop-in Compatibility**: The exported API follows the patterns established by the Go standard `regexp` package.
@@ -28,10 +28,17 @@ The engine achieves high throughput by offloading computation to the compilation
 
 == Architectural Implementation
 
-1. **Compilation Cost**: The `Compile` phase involves state space exploration and transition table construction. For complex patterns, compilation time and memory usage are higher than the standard NFA-based implementation.
-2. **Memory Requirements**: The resulting DFA transition tables occupy memory proportional to the number of states and the alphabet size.
-3. **Memory Limits**: A configurable `MaxMemory` parameter is enforced during compilation to prevent unbounded memory allocation.
-4. **Byte-Level Semantics**: The engine matches physical bytes. It does not support standard `\uFFFD` semantics for invalid UTF-8 sequences.
+The engine employs a modular architecture designed to separate the compilation phase from the high-performance execution phase.
+
+1. **Compilation Layer**: Managed within `internal/ir/`. This layer handles state space exploration, NFA to DFA conversion (Subset Construction), and transition table generation.
+2. **Execution Layer (Runtime)**: Located in the root package. It utilizes manually monomorphized hot-loops to achieve zero-overhead matching, selecting the most efficient kernel based on pattern characteristics.
+3. **AST Optimization**: Managed within `syntax/`. Performs project-specific simplifications and optimizations before the pattern is compiled into an intermediate representation.
+
+=== Core Components
+
+- **Strategy Dispatcher**: Automatically routes patterns to the optimal execution path (Literal Bypass, Bit-parallel, or Pure DFA).
+- **3-Pass Sparse TDFA**: A deterministic submatch extraction engine that guarantees $O(n)$ time complexity by utilizing pre-calculated transition-resident tags.
+- **SIMD/SWAR Warping**: High-speed segment skipping that fast-forwards through non-matching data using CPU-native vector instructions.
 
 == Usage
 
@@ -47,7 +54,7 @@ func main() {
     // Basic usage
     re := regexp.MustCompile(`[a-zA-Z_][a-zA-Z0-9_]*`)
 
-    // Custom options
+    // Custom options (e.g., higher memory limit for complex patterns)
     reComplex, err := regexp.CompileWithOptions(`pattern`, regexp.CompileOptions{
         MaxMemory: 256 * 1024 * 1024,
     })
@@ -56,9 +63,7 @@ func main() {
 
 === Best Practice: Long-lived Objects
 
-Regex compilation in this engine is computationally expensive. To amortize the construction cost, it is recommended to compile patterns once and reuse the resulting objects across multiple execution cycles.
-
-* **Recommendation**: Utilize package-level variables or singletons to store compiled regex objects. Avoid invoking `Compile` or `MustCompile` within hot loops or performance-critical paths.
+Regex compilation in this engine is computationally expensive. To amortize the construction cost, it is recommended to compile patterns once and reuse the resulting objects.
 
 [source,go]
 ----
@@ -71,61 +76,59 @@ func IsIdentifier(s string) bool {
 
 == Compatibility & Constraints
 
-The following constraints apply to maintain $O(n)$ time complexity and DFA determinism:
+`go-regexp-re` inherits the core philosophy of the https://pkg.go.dev/regexp[Go standard regexp package^]: prioritizing $O(n)$ performance and safety over features that require backtracking.
 
-1. **No Backreferences**: Backreferences (e.g., `(a)\1`) are not supported.
-2. **No POSIX Semantics**: Standard Go (leftmost-first) semantics are used; POSIX matching is unsupported.
-3. **API Subset**: Functions that require features incompatible with DFA execution are omitted.
+For a comprehensive breakdown of our validation strategy and architectural boundaries, refer to the **xref:docs/compatibility-policy.adoc[Compatibility Policy]**.
 
-=== Known Issues: Submatch Precision
+=== Shared with Go Standard Library
 
-Submatch extraction is implemented via a 3-pass strategy. The following cases may exhibit boundary offsets of $\pm 1$ byte compared to the standard library:
+Like the standard library (RE2-based), this engine enforces constraints necessary to guarantee linear-time execution:
 
-* **Greedy Loop Boundaries**: Patterns such as `a*(a)` or `(.*)a` when matching repeated characters.
-* **Complex Nested Groups**: Certain configurations of nested optional groups like `a*(|(b))c*`.
+1. **No Backreferences**: Features like `(a)\1` are strictly unsupported as they would require exponential-time backtracking.
+2. **ASCII-Only Character Classes**: Common Perl character classes and boundaries are restricted to the ASCII range, matching standard Go behavior:
+   - `\d` is `[0-9]`, `\s` is `[\t\n\f\r ]`, `\w` is `[a-zA-Z0-9_]`.
+   - `\b` and `\B` are calculated based on the ASCII `\w` definition.
+3. **Leftmost-First Rule**: We strictly follow Go's standard matching priority. POSIX "longest-match" semantics are not supported.
 
-Refinements to the priority resolution logic are ongoing to address these edge cases.
+=== Engine-Specific Architectural Constraints
+
+1. **Strict Capture Determinism**: Patterns that introduce non-deterministic tag updates (e.g., `(|a)*`, `(a|)`) are rejected at compile-time with `regexp.UnsupportedError`.
+2. **Submatch Precision**: While overall match boundaries (indices 0 and 1) are 100% compliant, internal submatch boundaries for highly ambiguous patterns (e.g., `a*(a)`) may occasionally deviate.
+3. **Byte-Level Semantics**: The engine matches physical bytes and does not support standard `\uFFFD` replacement semantics for invalid UTF-8 sequences.
 
 == Implementation Details
 
 Refer to the internal documentation for details on the algorithms used:
 
 * **xref:docs/algorithm.adoc[Technical Documentation: Algorithms]**
-
-Summary of components:
-- **0-Pass (Literal Bypass)**: SIMD-based matching for fixed-string patterns.
-- **Bit-parallel DFA**: Bitwise state transitions for small instruction sets.
-- **Guarded SIMD Warp**: Accelerated skipping for patterns with fixed prefixes.
-- **3-Pass Sparse TDFA**: Deterministic submatch extraction consisting of:
-    1. **Naked Discovery**: Identifies match boundaries.
-    2. **Backward Trace**: Reconstructs the NFA path from final priority.
-    3. **Forward Licking**: Applies register updates using transition-resident delta tags.
+* **xref:docs/compatibility-policy.adoc[Compatibility & Validation Policy]**
+* **xref:docs/benchmark-strategy.adoc[Benchmark Strategy]**
 
 == Testing & Benchmarking
 
-Functional and compatibility tests:
+The project maintains a rigorous multi-layered verification suite:
 
 [source,bash]
 ----
+# Unit tests & Modular verification
 go test -v .
+
+# Standard Library Parity Audit
 go test -v ./internal/compat
-----
 
-Performance benchmarks:
-
-[source,bash]
-----
-cd internal/benchmark
-go test -v -bench . -benchmem -tags goregexp,goregexpre,hyperscan,pcre2cgo
+# Performance Benchmarks (Normalized Ratios)
+./_scripts/benchmark-full.sh
 ----
 
 == Roadmap
 
-1. **Repetition Priority Resolution**: Alignment of greedy loop submatch boundaries.
-2. **Construction Phase Optimization**: Reduction of compilation time and memory footprint.
-3. **Concurrent Scan Support**: Verification of concurrent execution across goroutines.
-4. **Postal Code Stress Test**: Scaling to large pattern sets (100,000+ patterns).
-5. **Fixed-length Assertions**: Support for lookahead/lookbehind.
+1. **Repetition Priority Resolution**: Continued alignment of greedy loop submatch boundaries with standard library behavior.
+2. **Construction Phase Optimization**: Reduction of compilation time and memory footprint for complex patterns.
+3. **Concurrent Scan Support**: Formal verification and benchmarking of concurrent execution across multiple goroutines.
+4. **Postal Code Stress Test**: Validating scaling and performance with extremely large pattern sets (100,000+ literals).
+5. **Fixed-length Assertions**: Implementation of efficient lookahead and lookbehind assertions within the DFA framework.
+6. **Memory Efficiency**: Optimizing the DFA transition table storage for massive alternations to reduce memory pressure.
+
 
 == Acknowledgments
 

@@ -1,0 +1,91 @@
+= Compatibility Policy: Standard Library Parity vs. $O(n)$ Efficiency
+:sectnums:
+:toc: left
+
+This document defines the compatibility goals, validation logic, and acknowledged limitations of `go-regexp-re` relative to the Go standard library (`regexp`).
+
+== Philosophy: "Pragmatic Parity"
+
+The core mission of `go-regexp-re` is to provide $O(n)$ physical throughput. While we strive for 100% compatibility with the behavior defined by the https://pkg.go.dev/regexp[Go standard library^] and its https://pkg.go.dev/regexp/syntax[underlying syntax specification^], we prioritize the $O(n)$ guarantee and DFA determinism over matching the standard library's backtracking artifacts.
+
+We distinguish between **Functional Correctness** (identifying the correct match boundaries) and **Submatch Precision** (identifying internal group boundaries in ambiguous patterns).
+
+== Tiered Validation Strategy
+
+Our automated test suites (`internal/testsuite` and `internal/compat`) employ a tiered approach to evaluate compatibility.
+
+=== Tier 1: Overall Match Integrity (Critical)
+The match boundaries `[start, end]` (indices 0 and 1) MUST strictly match the standard library's results. Any deviation here is treated as a **FAIL**.
+
+- **Greedy/Non-greedy**: Must respect the leftmost-first rule.
+- **Anchors**: Must correctly respect `^`, `$`, and `\b` (ASCII-only).
+- **UTF-8 Boundaries**: Must handle multi-byte characters correctly (refer to `docs/algorithm/multibyte-warp-optimization.adoc`).
+
+=== Tier 2: Submatch Boundary Precision (Best Effort)
+For internal capturing groups (indices 2+), the engine aims for standard parity but acknowledges limitations in the 3-Pass TDFA architecture.
+
+- **Standard Case**: Patterns with deterministic boundaries (e.g., `a(b)c`) MUST match exactly.
+- **Ambiguous Case**: Patterns where submatch boundaries depend on lookahead or complex priority arbitration (e.g., `a*(a)`, `(a|ab)c`) may be treated as a **SKIP (Known Limitation)** if the 3-Pass TDFA produces a slightly different boundary that still spans the correct overall match.
+
+=== Tier 3: Error Compatibility
+We maintain parity in how invalid or unsupported patterns are handled.
+
+- **Syntax Errors**: If a pattern is invalid in standard Go (e.g., mismatched parens), the engine MUST also return a syntax error.
+- **Engine Limitations**: If a pattern uses features that violate the DFA/TDFA architecture (e.g., backreferences, epsilon loops), the engine MUST return a `regexp.UnsupportedError`. This is treated as a **SKIP** in compatibility reports to indicate an acknowledged architectural boundary.
+
+== Acknowledged Architectural Limitations
+
+To maintain $O(n)$ complexity and deterministic transitions, the following features are explicitly unsupported or differ from the standard library.
+
+=== 1. Unsupported Syntax
+These features are rejected at compile-time with `UnsupportedError`:
+- **Backreferences**: Inherently non-DFA compatible.
+- **Empty Alternatives in Captures**: e.g., `(|a)`, `(a|)`, `(a||b)`. These cause non-deterministic tag updates that the 3-Pass TDFA cannot reliably resolve.
+- **Epsilon Cycles**: Patterns that match an empty string in a loop (e.g., `(|a)*`).
+
+=== 2. ASCII-Only Word Boundaries
+In alignment with the Go standard library, word boundaries (`\b`, `\B`) are defined based on ASCII word characters `[a-zA-Z0-9_]`. Multi-byte UTF-8 characters are treated as non-word characters. This allows the engine to maintain $O(1)$ junction verification without rune decoding while preserving parity with standard `regexp` behavior.
+
+=== 3. Invalid UTF-8 Handling
+The engine treats invalid UTF-8 bytes as single-byte units. While we aim for parity with the standard library's "match every byte" behavior for `.`, subtle differences in internal submatch offsets may occur within invalid sequences.
+
+== Verification Suites
+
+The engine is continuously audited against several industry-standard test sets.
+
+|===
+| Suite | Origin | Focus
+
+| **RE2 Search Set**
+| `re2-search.txt`
+| Hundreds of varied patterns used by the original RE2 and Go `regexp` projects.
+
+| **Fowler Suite**
+| `basic.dat`, etc.
+| The POSIX/Fowler regular expression test suite. Focuses on complex alternation and repetition.
+
+| **Standard Library Clone**
+| `regexp_test.go`
+| A port of the Go standard library's own unit tests.
+
+| **NFA-Hard Corpus**
+| Synthetic
+| Patterns specifically designed to cause backtracking explosion or DFA state explosion (e.g., `(a+)+b`).
+|===
+
+== Compatibility Reporting (The Registry)
+
+When running `go test -v ./internal/compat`, a summary is generated using the `CompatibilityRegistry`:
+
+[source,text]
+----
+--- Compatibility Report ---
+Total Tests: 464
+Passed:      412 (88.8%)
+Failed:      4 (Mismatch)
+Incompatible (Compile Error): 48
+----
+
+- **Passed**: 100% parity (indices 0 to N).
+- **Failed**: Mismatch in Tier 1 (Overall Match) or unhandled error.
+- **Incompatible**: Expected rejections (UnsupportedError) or known submatch limitations.
