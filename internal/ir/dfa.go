@@ -32,16 +32,17 @@ const (
 type CCWarpKernel int
 
 const (
-	CCWarpNone CCWarpKernel = iota
-	CCWarpSingleRange
-	CCWarpBitmask
-	CCWarpAnyExceptNL
-	CCWarpNotEqual    // [^"] etc.
-	CCWarpNotEqualSet // [^ "] etc. (up to 8 chars)
-	CCWarpNotBitmask  // [^a-z0-9] etc.
-	CCWarpEqualSet    // [aeiou] etc. (disjoint positive set)
-	CCWarpEqual       // [a] (single character positive)
-	CCWarpNotSingleRange // [^0-9] (single range negated)
+	CCWarpNone           CCWarpKernel = iota
+	CCWarpAnyChar                     // Matches everything including NL: (?s). (fastest possible skip)
+	CCWarpAnyExceptNL                 // Any character except newline: .
+	CCWarpEqual                       // Single character repetition: a+ (fastest positive path)
+	CCWarpNotEqual                    // Negated single character: [^"]
+	CCWarpSingleRange                 // Continuous ASCII range: [0-9], [a-z]
+	CCWarpNotSingleRange              // Negated continuous ASCII range: [^0-9]
+	CCWarpEqualSet                    // Small positive disjoint set (2-16 chars) via sub-cube XOR+OR chain
+	CCWarpNotEqualSet                 // Small negated disjoint set (2-8 chars) via sub-cube XOR+OR chain
+	CCWarpBitmask                     // Complex positive set via 8-byte bitmask check
+	CCWarpNotBitmask                  // Large negated disjoint set via negated 8-byte bitmask check
 )
 
 type CCWarpInfo struct {
@@ -676,6 +677,11 @@ func (d *DFA) build(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, ma
 		}
 
 		// Try to identify a pattern in the self-loops for SWAR kernels.
+		if count == 128 {
+			d.ccWarpTable[i] = CCWarpInfo{Kernel: CCWarpAnyChar}
+			continue
+		}
+
 		// 1. Check for Any-Except-Newline (common for .*)
 		isAnyExceptNL := true
 		for b := 0; b < 128; b++ {

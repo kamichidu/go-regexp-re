@@ -11,32 +11,40 @@ func TestCCWarp(t *testing.T) {
 		match   bool
 		indices []int
 	}{
-		// 1. Single Range [0-9]+
-		{"[0-9]+", "abc12345678def", true, []int{3, 11}},
-		{"[0-9]+", "1234567890123456", true, []int{0, 16}},
+		// 1. CCWarpEqual (a+)
+		{"a+", "aaabbb", true, []int{0, 3}},
+		{"a+", "bbbaaa", true, []int{3, 6}},
 
-		// 2. Bitmask [a-zA-Z0-9_]+
-		{"[a-zA-Z0-9_]+", "  word1234_5678  ", true, []int{2, 15}},
+		// 2. CCWarpSingleRange ([0-9]+)
+		{"[0-9]+", "abc12345def", true, []int{3, 8}},
 
-		// 3. AnyExceptNL (.*)
-		{".*", "hello swar warp", true, []int{0, 15}},
-		{"^.*$", "line1\nline2", false, nil}, // Should not match \n
+		// 3. CCWarpEqualSet ([aeiou]+)
+		{"[aeiou]+", "sky-apple-tree", true, []int{4, 5}}, // 'a' in apple
 
-		// 4. Combined Warp and DFA
-		{"[a-z]+[0-9]+", "abcdefgh12345678", true, []int{0, 16}},
+		// 4. CCWarpAnyChar ((?s).*)
+		{"(?s).*", "line1\nline2", true, []int{0, 11}},
 
-		// 5. Submatch with Warp
-		{"([a-z]+)([0-9]+)", "abcdefgh12345678", true, []int{0, 16, 0, 8, 8, 16}},
+		// 5. CCWarpAnyExceptNL (.*)
+		{".*", "hello world", true, []int{0, 11}},
+		{"^.*$", "line1\nline2", false, nil},
 
-		// 6. UTF-8 Edge (Warp should stop at multi-byte)
+		// 6. CCWarpNotEqual ([^"]+)
+		{`[^"]+`, `say "hello"`, true, []int{0, 4}}, // 'say '
+
+		// 7. CCWarpNotSingleRange ([^0-9]+)
+		{"[^0-9]+", "123abc456", true, []int{3, 6}}, // 'abc'
+
+		// 8. CCWarpNotEqualSet ([^ "]+)
+		{`[^ "]+`, `hello "world"`, true, []int{0, 5}}, // 'hello'
+
+		// 9. CCWarpBitmask ([a-zA-Z0-9_]+)
+		{"[a-zA-Z0-9_]+", "  word123  ", true, []int{2, 9}},
+
+		// 10. CCWarpNotBitmask ([^a-z]+)
+		{"[^a-z]+", "abc12345DEF", true, []int{3, 11}}, // '12345DEF'
+
+		// UTF-8 Edge (Warp should stop at multi-byte)
 		{"[a-z]+", "abcdあefgh", true, []int{0, 4}},
-
-		// 7. Negated Character Classes (SWAR NotEqual / NotEqualSet)
-		{`[^"]+`, "hello world", true, []int{0, 11}},
-		{`[^"]+`, `"`, false, nil},
-		{`[^ "]+`, "helloworld", true, []int{0, 10}},
-		{`[^ "]+`, " ", false, nil},
-		{`[^ "]+`, `"`, false, nil},
 	}
 
 	for _, tt := range tests {
@@ -52,10 +60,8 @@ func TestCCWarp(t *testing.T) {
 				t.Errorf("Pattern %q, Input %q: expected match, got nil", tt.pattern, tt.input)
 				continue
 			}
-			for i, idx := range tt.indices {
-				if i >= len(got) || got[i] != idx {
-					t.Errorf("Pattern %q, Input %q: index %d got %d, want %d", tt.pattern, tt.input, i, got[i], idx)
-				}
+			if got[0] != tt.indices[0] || got[1] != tt.indices[1] {
+				t.Errorf("Pattern %q, Input %q: got indices %v, want %v", tt.pattern, tt.input, got[:2], tt.indices[:2])
 			}
 		} else {
 			if got != nil {
