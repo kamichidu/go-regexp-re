@@ -4,41 +4,31 @@ import (
 	"github.com/kamichidu/go-regexp-re/syntax"
 )
 
-// Input represents the search input with absolute coordinate context.
 type Input struct {
-	B           []byte // The byte slice being scanned
-	AbsPos      int    // The absolute position of B[0] in the original input
-	TotalBytes  int    // The total length of the original input
-	SearchStart int    // Relative start position in B
-	SearchEnd   int    // Relative end position in B
+	B           []byte // スキャン対象スライス
+	AbsPos      int    // スライス先頭の絶対位置
+	TotalBytes  int    // 入力全体の長さ
+	SearchStart int    // B内での相対開始位置
+	SearchEnd   int    // B内での相対終了位置
 }
 
-// Tiny, inlineable anchor verification functions.
-// These use exact syntax.EmptyOp bits to stay efficient and correct.
-
 func VerifyBegin(in Input, i int, req syntax.EmptyOp) bool {
-	// EmptyBeginText(4) | EmptyBeginLine(1)
 	if (req & (syntax.EmptyBeginText | syntax.EmptyBeginLine)) == 0 {
 		return true
 	}
-	// Text start satisfies both BeginText and BeginLine
 	if (in.AbsPos + i) == 0 {
 		return true
 	}
-	// Line start only satisfies BeginLine
 	return (req&syntax.EmptyBeginLine) != 0 && i > 0 && in.B[i-1] == '\n'
 }
 
 func VerifyEnd(in Input, i int, req syntax.EmptyOp) bool {
-	// EmptyEndText(8) | EmptyEndLine(2)
 	if (req & (syntax.EmptyEndText | syntax.EmptyEndLine)) == 0 {
 		return true
 	}
-	// Text end satisfies both EndText and EndLine
 	if (in.AbsPos + i) == in.TotalBytes {
 		return true
 	}
-	// Line end only satisfies EndLine
 	return (req&syntax.EmptyEndLine) != 0 && i < len(in.B) && in.B[i] == '\n'
 }
 

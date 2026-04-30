@@ -80,8 +80,6 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 	var searchWarp ir.CCWarpInfo
 
 	if literalMatcher == nil {
-		// Always build the heavy DFA to support correct FindSubmatchIndex results
-		// and capture groups, unless forced otherwise.
 		dfa, err = ir.NewDFAWithMemoryLimit(ctx, s, prog, opts.MaxMemory, true)
 		if err != nil {
 			return nil, err
@@ -126,7 +124,6 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 	if res.literalMatcher == nil && !ir.HasComplexAnchors(s) {
 		anchors := ir.ExtractAnchors(s)
 		for i := range anchors {
-			// Disable MAP for multiline anchored patterns for now
 			if (anchors[i].HasBeginText || anchors[i].HasEndText) && (s.Flags&syntax.OneLine == 0) {
 				continue
 			}
@@ -136,11 +133,7 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 		res.mapAnchors = ir.SelectBestAnchors(res.mapAnchors)
 	}
 
-	if opts.forceStrategy != strategyNone {
-		res.strategy = opts.forceStrategy
-	} else {
-		res.bindMatchStrategy()
-	}
+	res.bindMatchStrategy()
 	return res, nil
 }
 
@@ -185,6 +178,17 @@ func hasAnchors(prog *syntax.Prog) bool {
 	return false
 }
 
+func (re *Regexp) Match(b []byte) bool {
+	start, _, _ := re.findIndexAt(b, 0, len(b))
+	return start >= 0
+}
+
+func (re *Regexp) MatchString(s string) bool {
+	b := unsafe.Slice(unsafe.StringData(s), len(s))
+	start, _, _ := re.findIndexAt(b, 0, len(b))
+	return start >= 0
+}
+
 func (re *Regexp) FindSubmatchIndex(b []byte) []int {
 	return re.findSubmatchIndexAt(b, 0, len(b))
 }
@@ -205,7 +209,6 @@ func (re *Regexp) findSubmatchIndexAt(b []byte, pos int, totalBytes int) []int {
 		if !re.literalMatcher.FindSubmatchIndexInto(in, regs) {
 			return nil
 		}
-		// Adjust literal match results to absolute coordinates
 		for i := range regs {
 			if regs[i] >= 0 {
 				regs[i] += pos
@@ -218,7 +221,7 @@ func (re *Regexp) findSubmatchIndexAt(b []byte, pos int, totalBytes int) []int {
 	defer matchContextPool.Put(mc)
 	mc.prepare(len(b), re.numSubexp, pos)
 
-	start, end, prio := re.submatch(in, mc)
+	start, end, prio := re.findSubmatchIndexInternal(b, mc, mc.regs)
 	if start < 0 {
 		return nil
 	}
@@ -231,7 +234,6 @@ func (re *Regexp) findSubmatchIndexAt(b []byte, pos int, totalBytes int) []int {
 		re.sparseTDFA_Recap(mc, b, start, end, prio, regs)
 	}
 
-	// Must return a copy because mc is returned to Pool
 	res := make([]int, len(mc.regs))
 	copy(res, mc.regs)
 	return res
@@ -239,7 +241,7 @@ func (re *Regexp) findSubmatchIndexAt(b []byte, pos int, totalBytes int) []int {
 
 func (re *Regexp) FindStringSubmatchIndex(s string) []int {
 	b := unsafe.Slice(unsafe.StringData(s), len(s))
-	return re.FindSubmatchIndex(b)
+	return re.findSubmatchIndexAt(b, 0, len(b))
 }
 
 func MustCompile(expr string) *Regexp {
