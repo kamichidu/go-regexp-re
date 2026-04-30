@@ -1,7 +1,7 @@
 package regexp
 
 import (
-	"unicode/utf8"
+	"github.com/kamichidu/go-regexp-re/internal/ir"
 )
 
 // Find returns a slice holding the text of the leftmost match in b of the regular expression.
@@ -116,26 +116,25 @@ func (re *Regexp) all(b []byte, n int, deliver func([]int)) {
 	if n < 0 {
 		n = len(b) + 1
 	}
-	offset := 0
+	totalBytes := len(b)
+	pos := 0
 	for i := 0; i < n; i++ {
-		loc := re.FindIndex(b)
+		loc := re.findSubmatchIndexAt(b[pos:], pos, totalBytes)
 		if loc == nil {
 			break
 		}
-		deliver([]int{offset + loc[0], offset + loc[1]})
-		if len(b) == 0 {
+		deliver(loc[0:2])
+		if pos >= totalBytes {
 			break
 		}
-		advance := loc[1]
+		advance := loc[1] - pos
 		if advance == 0 {
-			_, width := utf8.DecodeRune(b)
-			advance = width
+			advance = 1 + ir.GetTrailingByteCount(b[pos])
 		}
-		if advance > len(b) {
+		pos += advance
+		if pos > totalBytes {
 			break
 		}
-		b = b[advance:]
-		offset += advance
 	}
 }
 
@@ -143,35 +142,25 @@ func (re *Regexp) allSubmatch(b []byte, n int, deliver func([]int)) {
 	if n < 0 {
 		n = len(b) + 1
 	}
-	numRegs := (re.numSubexp + 1) * 2
-	offset := 0
+	totalBytes := len(b)
+	pos := 0
 	for i := 0; i < n; i++ {
-		loc := re.FindSubmatchIndex(b)
+		loc := re.findSubmatchIndexAt(b[pos:], pos, totalBytes)
 		if loc == nil {
 			break
 		}
-		locCopy := make([]int, numRegs)
-		for j := range locCopy {
-			if j < len(loc) && loc[j] >= 0 {
-				locCopy[j] = loc[j] + offset
-			} else {
-				locCopy[j] = -1
-			}
-		}
-		deliver(locCopy)
-		if len(b) == 0 {
+		deliver(loc)
+		if pos >= totalBytes {
 			break
 		}
-		advance := loc[1]
+		advance := loc[1] - pos
 		if advance == 0 {
-			_, width := utf8.DecodeRune(b)
-			advance = width
+			advance = 1 + ir.GetTrailingByteCount(b[pos])
 		}
-		if advance > len(b) {
+		pos += advance
+		if pos > totalBytes {
 			break
 		}
-		b = b[advance:]
-		offset += advance
 	}
 }
 
