@@ -38,11 +38,18 @@ func TestAnalyzeLiteralPattern(t *testing.T) {
 			continue
 		}
 
-		if got := m.Match([]byte(tt.input)); got != tt.match {
+		in := Input{
+			B:          []byte(tt.input),
+			AbsPos:     0,
+			TotalBytes: len(tt.input),
+			SearchEnd:  len(tt.input),
+		}
+
+		if got := m.Match(in); got != tt.match {
 			t.Errorf("Match(%q, %q) = %v; want %v", tt.pattern, tt.input, got, tt.match)
 		}
 
-		gotIndices := m.FindSubmatchIndex([]byte(tt.input))
+		gotIndices := m.FindSubmatchIndex(in)
 		if !reflect.DeepEqual(gotIndices, tt.indices) {
 			t.Errorf("FindSubmatchIndex(%q, %q) = %v; want %v", tt.pattern, tt.input, gotIndices, tt.indices)
 		}

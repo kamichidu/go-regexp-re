@@ -132,7 +132,7 @@ func (re *Regexp) sparseTDFA_Recap(mc *matchContext, b []byte, start, end, prio 
 	recap := d.RecapTables()[0]
 	uIndices, uUpdates := d.TagUpdateIndices(), d.TagUpdates()
 
-	re.applyEntryTags(regs, d.StartUpdates(), mc.pathHistory[start], start)
+	re.applyEntryTags(mc, regs, d.StartUpdates(), mc.pathHistory[start], start)
 
 	// 1. Find the starting history entry
 	histIdx := 0
@@ -208,8 +208,8 @@ func (re *Regexp) sparseTDFA_Recap(mc *matchContext, b []byte, start, end, prio 
 
 			for _, entry := range recap.Transitions[off] {
 				if entry.InputPriority == int16(pathID)-basePrio && int32(entry.NextPriority) == nextPathID {
-					re.applyRawTags(regs, entry.PreTags, currPos)
-					re.applyRawTags(regs, entry.PostTags, currPos+step)
+					re.applyRawTags(mc, regs, entry.PreTags, currPos)
+					re.applyRawTags(mc, regs, entry.PostTags, currPos+step)
 					break
 				}
 			}
@@ -219,29 +219,30 @@ func (re *Regexp) sparseTDFA_Recap(mc *matchContext, b []byte, start, end, prio 
 	}
 }
 
-func (re *Regexp) applyRawTags(regs []int, tags uint64, pos int) {
+func (re *Regexp) applyRawTags(mc *matchContext, regs []int, tags uint64, pos int) {
 	if tags == 0 {
 		return
 	}
+	absPos := pos + mc.absBase
 	for bit := 2; bit < 64; bit++ {
 		if (tags & (1 << uint(bit))) != 0 {
 			if bit < len(regs) {
 				if (bit%2 != 0) || regs[bit] == -1 {
-					regs[bit] = pos
+					regs[bit] = absPos
 				}
 			}
 		}
 	}
 }
 
-func (re *Regexp) applyEntryTags(regs []int, updates []ir.PathTagUpdate, pathID int32, pos int) {
+func (re *Regexp) applyEntryTags(mc *matchContext, regs []int, updates []ir.PathTagUpdate, pathID int32, pos int) {
 	matchID := pathID
 	if pathID >= ir.SearchRestartPenalty {
 		matchID = pathID % ir.SearchRestartPenalty
 	}
 	for _, u := range updates {
 		if int32(u.NextPriority) == matchID {
-			re.applyRawTags(regs, u.Tags, pos)
+			re.applyRawTags(mc, regs, u.Tags, pos)
 		}
 	}
 }

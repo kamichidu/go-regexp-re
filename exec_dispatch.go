@@ -30,9 +30,19 @@ func (re *Regexp) bindMatchStrategy() {
 }
 
 func (re *Regexp) findSubmatchIndexInternal(b []byte, mc *matchContext, regs []int) (int, int, int) {
+	in := ir.Input{
+		B:          b,
+		AbsPos:     0,
+		TotalBytes: len(b),
+		SearchEnd:  len(b),
+	}
+	if mc != nil {
+		in.AbsPos = mc.absBase
+	}
+
 	switch re.strategy {
 	case strategyLiteral:
-		res := re.literalMatcher.FindSubmatchIndex(b)
+		res := re.literalMatcher.FindSubmatchIndex(in)
 		if res == nil {
 			return -1, -1, 0
 		}
@@ -58,7 +68,8 @@ func (re *Regexp) findSubmatchIndexInternal(b []byte, mc *matchContext, regs []i
 					}
 					if match {
 						if _, ok := a.Validate(b, 0); ok {
-							start, end, prio := re.runDFA(b, 0, mc)
+							in.SearchStart = 0
+							start, end, prio := re.runDFA(in, mc)
 							if start >= 0 {
 								return start, end, prio
 							}
@@ -88,7 +99,8 @@ func (re *Regexp) findSubmatchIndexInternal(b []byte, mc *matchContext, regs []i
 							startSearch = 0
 						}
 
-						start, end, prio := re.runDFA(b[startSearch:], startSearch, mc)
+						in.SearchStart = startSearch
+						start, end, prio := re.runDFA(in, mc)
 						if start >= 0 {
 							return start, end, prio
 						}
@@ -107,40 +119,40 @@ func (re *Regexp) findSubmatchIndexInternal(b []byte, mc *matchContext, regs []i
 		}
 
 		if mc == nil {
-			return re.match(b)
+			return re.match(in)
 		}
-		mc.prepare(len(b), re.numSubexp)
-		return re.submatch(b, mc)
+		mc.prepare(len(b), re.numSubexp, in.AbsPos)
+		return re.submatch(in, mc)
 	}
 	return -1, -1, 0
 }
 
-func (re *Regexp) runDFA(b []byte, offset int, mc *matchContext) (int, int, int) {
+func (re *Regexp) runDFA(in ir.Input, mc *matchContext) (int, int, int) {
 	var start, end, prio int
 	if mc == nil {
-		start, end, prio = re.match(b)
+		start, end, prio = re.match(in)
 	} else {
-		mc.prepare(len(b), re.numSubexp)
-		start, end, prio = re.submatch(b, mc)
+		mc.prepare(len(in.B), re.numSubexp, in.AbsPos)
+		start, end, prio = re.submatch(in, mc)
 	}
 	if start >= 0 {
-		return start + offset, end + offset, prio
+		return start, end, prio
 	}
 	return -1, -1, 0
 }
 
-func (re *Regexp) match(b []byte) (int, int, int) {
+func (re *Regexp) match(in ir.Input) (int, int, int) {
 	switch re.strategy {
 	case strategyExtended:
-		return extendedMatchExecLoop(re, b)
+		return extendedMatchExecLoop(re, in)
 	default:
-		return fastMatchExecLoop(re, b)
+		return fastMatchExecLoop(re, in)
 	}
 }
 
-func (re *Regexp) submatch(b []byte, mc *matchContext) (int, int, int) {
+func (re *Regexp) submatch(in ir.Input, mc *matchContext) (int, int, int) {
 	// Submatch always uses the extended loop because it needs to record history
-	return extendedSubmatchExecLoop(re, b, mc)
+	return extendedSubmatchExecLoop(re, in, mc)
 }
 
 func (re *Regexp) Match(b []byte) bool {

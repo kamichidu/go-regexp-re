@@ -19,9 +19,11 @@ type matchContext struct {
 	pathHistory    []int32
 	regsBuf        [32]int
 	regs           []int
+	absBase        int // Absolute position of the start of the current scan
 }
 
-func (mc *matchContext) prepare(n int, numSubexp int) {
+func (mc *matchContext) prepare(n int, numSubexp int, absBase int) {
+	mc.absBase = absBase
 	required := n + 1
 	if required > len(mc.historyBuf) {
 		if cap(mc.history) < required {

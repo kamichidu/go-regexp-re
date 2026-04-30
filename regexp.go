@@ -186,28 +186,46 @@ func hasAnchors(prog *syntax.Prog) bool {
 }
 
 func (re *Regexp) FindSubmatchIndex(b []byte) []int {
+	return re.FindSubmatchIndexAt(b, 0, len(b))
+}
+
+func (re *Regexp) FindSubmatchIndexAt(b []byte, pos int, totalBytes int) []int {
+	in := ir.Input{
+		B:          b,
+		AbsPos:     pos,
+		TotalBytes: totalBytes,
+		SearchEnd:  len(b),
+	}
+
 	if re.strategy == strategyLiteral {
 		regs := make([]int, (re.numSubexp+1)*2)
 		for i := range regs {
 			regs[i] = -1
 		}
-		if !re.literalMatcher.FindSubmatchIndexInto(b, regs) {
+		if !re.literalMatcher.FindSubmatchIndexInto(in, regs) {
 			return nil
+		}
+		// Adjust literal match results to absolute coordinates
+		for i := range regs {
+			if regs[i] >= 0 {
+				regs[i] += pos
+			}
 		}
 		return regs
 	}
 
 	mc := matchContextPool.Get().(*matchContext)
 	defer matchContextPool.Put(mc)
-	mc.prepare(len(b), re.numSubexp)
+	mc.prepare(len(b), re.numSubexp, pos)
 
-	start, end, prio := re.submatch(b, mc)
+	start, end, prio := re.submatch(in, mc)
 	if start < 0 {
 		return nil
 	}
 
 	regs := mc.regs
-	regs[0], regs[1] = start, end
+	// submatch results are relative to in.B, so add pos for absolute coordinates
+	regs[0], regs[1] = start+pos, end+pos
 	if re.numSubexp > 0 {
 		re.sparseTDFA_PathSelection(mc, b, start, end, prio)
 		re.sparseTDFA_Recap(mc, b, start, end, prio, regs)

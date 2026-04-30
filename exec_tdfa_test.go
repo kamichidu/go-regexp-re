@@ -26,7 +26,7 @@ func TestPass2PathIdentity(t *testing.T) {
 
 			b := []byte(tt.input)
 			mc := &matchContext{}
-			mc.prepare(len(b), re.numSubexp)
+			mc.prepare(len(b), re.numSubexp, 0)
 
 			regs := make([]int, (re.numSubexp+1)*2)
 			start, end, prio := re.findSubmatchIndexInternal(b, mc, regs)
@@ -50,7 +50,7 @@ func TestPass2PathBranching(t *testing.T) {
 	re := MustCompile(`(a|ab)c`)
 	input := []byte("abc")
 	mc := &matchContext{}
-	mc.prepare(len(input), re.numSubexp)
+	mc.prepare(len(input), re.numSubexp, 0)
 
 	start, end, prio := re.findSubmatchIndexInternal(input, mc, nil)
 	re.sparseTDFA_PathSelection(mc, input, start, end, prio)
@@ -120,7 +120,7 @@ func TestPriorityGreedyLoop(t *testing.T) {
 	re := MustCompile(`a*`)
 	input := []byte("aaa")
 	mc := &matchContext{}
-	mc.prepare(len(input), re.numSubexp)
+	mc.prepare(len(input), re.numSubexp, 0)
 
 	regs := make([]int, (re.numSubexp+1)*2)
 	start, end, prio := re.findSubmatchIndexInternal(input, mc, regs)
