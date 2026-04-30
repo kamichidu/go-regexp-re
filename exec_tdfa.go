@@ -223,12 +223,11 @@ func (re *Regexp) applyRawTags(mc *matchContext, regs []int, tags uint64, pos in
 	if tags == 0 {
 		return
 	}
-	absPos := pos + mc.absBase
 	for bit := 2; bit < 64; bit++ {
 		if (tags & (1 << uint(bit))) != 0 {
 			if bit < len(regs) {
 				if (bit%2 != 0) || regs[bit] == -1 {
-					regs[bit] = absPos
+					regs[bit] = pos
 				}
 			}
 		}

@@ -1,8 +1,18 @@
 package regexp
 
 import (
+	"unsafe"
+
 	"github.com/kamichidu/go-regexp-re/internal/ir"
 )
+
+func (re *Regexp) FindIndex(b []byte) []int {
+	start, end, _ := re.findIndexAt(b, 0, len(b), b)
+	if start < 0 {
+		return nil
+	}
+	return []int{start, end}
+}
 
 func (re *Regexp) Find(b []byte) []byte {
 	loc := re.FindIndex(b)
@@ -10,14 +20,6 @@ func (re *Regexp) Find(b []byte) []byte {
 		return nil
 	}
 	return b[loc[0]:loc[1]]
-}
-
-func (re *Regexp) FindIndex(b []byte) []int {
-	start, end, _ := re.findIndexAt(b, 0, len(b))
-	if start < 0 {
-		return nil
-	}
-	return []int{start, end}
 }
 
 func (re *Regexp) FindString(s string) string {
@@ -29,7 +31,27 @@ func (re *Regexp) FindString(s string) string {
 }
 
 func (re *Regexp) FindStringIndex(s string) []int {
-	return re.FindIndex([]byte(s))
+	b := unsafe.Slice(unsafe.StringData(s), len(s))
+	return re.FindIndex(b)
+}
+
+func (re *Regexp) FindStringSubmatch(s string) []string {
+	indices := re.FindStringSubmatchIndex(s)
+	if indices == nil {
+		return nil
+	}
+	result := make([]string, len(indices)/2)
+	for i := range result {
+		if start, end := indices[2*i], indices[2*i+1]; start >= 0 && end >= 0 {
+			result[i] = s[start:end]
+		}
+	}
+	return result
+}
+
+func (re *Regexp) FindStringSubmatchIndex(s string) []int {
+	b := unsafe.Slice(unsafe.StringData(s), len(s))
+	return re.findSubmatchIndexAt(b, 0, len(b), b)
 }
 
 func (re *Regexp) FindAll(b []byte, n int) [][]byte {
@@ -58,18 +80,15 @@ func (re *Regexp) FindAllString(s string, n int) []string {
 	if n == 0 {
 		return nil
 	}
-	b := []byte(s)
+	b := unsafe.Slice(unsafe.StringData(s), len(s))
 	var result []string
 	re.all(b, n, func(loc []int) {
-		result = append(result, string(b[loc[0]:loc[1]]))
+		result = append(result, s[loc[0]:loc[1]])
 	})
 	return result
 }
 
 func (re *Regexp) FindAllStringIndex(s string, n int) [][]int {
-	if n == 0 {
-		return nil
-	}
 	return re.FindAllIndex([]byte(s), n)
 }
 
@@ -105,7 +124,7 @@ func (re *Regexp) FindAllStringSubmatch(s string, n int) [][]string {
 	if n == 0 {
 		return nil
 	}
-	b := []byte(s)
+	b := unsafe.Slice(unsafe.StringData(s), len(s))
 	var result [][]string
 	re.allSubmatch(b, n, func(loc []int) {
 		sub := make([]string, len(loc)/2)
@@ -130,7 +149,7 @@ func (re *Regexp) all(b []byte, n int, deliver func([]int)) {
 	totalBytes := len(b)
 	pos := 0
 	for i := 0; i < n; i++ {
-		start, end, _ := re.findIndexAt(b[pos:], pos, totalBytes)
+		start, end, _ := re.findIndexAt(b[pos:], pos, totalBytes, b)
 		if start < 0 {
 			break
 		}
@@ -156,7 +175,7 @@ func (re *Regexp) allSubmatch(b []byte, n int, deliver func([]int)) {
 	totalBytes := len(b)
 	pos := 0
 	for i := 0; i < n; i++ {
-		loc := re.findSubmatchIndexAt(b[pos:], pos, totalBytes)
+		loc := re.findSubmatchIndexAt(b[pos:], pos, totalBytes, b)
 		if loc == nil {
 			break
 		}
@@ -184,14 +203,7 @@ func (re *Regexp) Split(s string, n int) []string {
 	}
 	var result []string
 	start := 0
-	matches := re.FindAllStringIndex(s, -1)
-	for _, m := range matches {
-		if n > 0 && len(result) >= n-1 {
-			break
-		}
-		if m[1] == m[0] && (start > 0 && m[0] == start || m[0] == 0) {
-			continue
-		}
+	for _, m := range re.FindAllStringIndex(s, n-1) {
 		result = append(result, s[start:m[0]])
 		start = m[1]
 	}

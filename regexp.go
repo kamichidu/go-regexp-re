@@ -34,7 +34,7 @@ type Regexp struct {
 
 type CompileOptions struct {
 	MaxMemory     int
-	forceStrategy matchStrategy // Internal use for testing (strategyFast or strategyExtended)
+	forceStrategy matchStrategy // Internal use for testing
 }
 
 func Compile(expr string) (*Regexp, error) { return CompileContext(context.Background(), expr) }
@@ -133,7 +133,11 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 		res.mapAnchors = ir.SelectBestAnchors(res.mapAnchors)
 	}
 
-	res.bindMatchStrategy()
+	if opts.forceStrategy != strategyNone {
+		res.strategy = opts.forceStrategy
+	} else {
+		res.bindMatchStrategy()
+	}
 	return res, nil
 }
 
@@ -179,69 +183,18 @@ func hasAnchors(prog *syntax.Prog) bool {
 }
 
 func (re *Regexp) Match(b []byte) bool {
-	start, _, _ := re.findIndexAt(b, 0, len(b))
+	start, _, _ := re.findIndexAt(b, 0, len(b), b)
 	return start >= 0
 }
 
 func (re *Regexp) MatchString(s string) bool {
 	b := unsafe.Slice(unsafe.StringData(s), len(s))
-	start, _, _ := re.findIndexAt(b, 0, len(b))
+	start, _, _ := re.findIndexAt(b, 0, len(b), b)
 	return start >= 0
 }
 
 func (re *Regexp) FindSubmatchIndex(b []byte) []int {
-	return re.findSubmatchIndexAt(b, 0, len(b))
-}
-
-func (re *Regexp) findSubmatchIndexAt(b []byte, pos int, totalBytes int) []int {
-	in := ir.Input{
-		B:          b,
-		AbsPos:     pos,
-		TotalBytes: totalBytes,
-		SearchEnd:  len(b),
-	}
-
-	if re.strategy == strategyLiteral {
-		regs := make([]int, (re.numSubexp+1)*2)
-		for i := range regs {
-			regs[i] = -1
-		}
-		if !re.literalMatcher.FindSubmatchIndexInto(in, regs) {
-			return nil
-		}
-		for i := range regs {
-			if regs[i] >= 0 {
-				regs[i] += pos
-			}
-		}
-		return regs
-	}
-
-	mc := matchContextPool.Get().(*matchContext)
-	defer matchContextPool.Put(mc)
-	mc.prepare(len(b), re.numSubexp, pos)
-
-	start, end, prio := re.findSubmatchIndexInternal(b, mc, mc.regs)
-	if start < 0 {
-		return nil
-	}
-
-	regs := mc.regs
-	// submatch results are relative to in.B, so add pos for absolute coordinates
-	regs[0], regs[1] = start+pos, end+pos
-	if re.numSubexp > 0 {
-		re.sparseTDFA_PathSelection(mc, b, start, end, prio)
-		re.sparseTDFA_Recap(mc, b, start, end, prio, regs)
-	}
-
-	res := make([]int, len(mc.regs))
-	copy(res, mc.regs)
-	return res
-}
-
-func (re *Regexp) FindStringSubmatchIndex(s string) []int {
-	b := unsafe.Slice(unsafe.StringData(s), len(s))
-	return re.findSubmatchIndexAt(b, 0, len(b))
+	return re.findSubmatchIndexAt(b, 0, len(b), b)
 }
 
 func MustCompile(expr string) *Regexp {
@@ -256,18 +209,4 @@ func (re *Regexp) String() string { return re.expr }
 
 func (re *Regexp) LiteralPrefix() (prefix string, complete bool) {
 	return string(re.prefix), re.complete
-}
-
-func (re *Regexp) FindStringSubmatch(s string) []string {
-	indices := re.FindStringSubmatchIndex(s)
-	if indices == nil {
-		return nil
-	}
-	result := make([]string, len(indices)/2)
-	for i := range result {
-		if start, end := indices[2*i], indices[2*i+1]; start >= 0 && end >= 0 {
-			result[i] = s[start:end]
-		}
-	}
-	return result
 }

@@ -4,44 +4,51 @@ import (
 	"github.com/kamichidu/go-regexp-re/syntax"
 )
 
+// Input represents the search input with absolute coordinate context.
 type Input struct {
-	B           []byte // スキャン対象スライス
-	AbsPos      int    // スライス先頭の絶対位置
-	TotalBytes  int    // 入力全体の長さ
-	SearchStart int    // B内での相対開始位置
-	SearchEnd   int    // B内での相対終了位置
+	B           []byte // The virtual slice currently being scanned
+	OriginalB   []byte // The full original input buffer
+	AbsPos      int    // The absolute position of B[0] in OriginalB
+	TotalBytes  int    // The total length of OriginalB
+	SearchStart int    // Relative start position in B
+	SearchEnd   int    // Relative end position in B
 }
 
+// VerifyBegin checks for ^ and \A anchors using absolute context.
 func VerifyBegin(in Input, i int, req syntax.EmptyOp) bool {
 	if (req & (syntax.EmptyBeginText | syntax.EmptyBeginLine)) == 0 {
 		return true
 	}
-	if (in.AbsPos + i) == 0 {
+	absPos := in.AbsPos + i
+	if absPos == 0 {
 		return true
 	}
-	return (req&syntax.EmptyBeginLine) != 0 && i > 0 && in.B[i-1] == '\n'
+	return (req&syntax.EmptyBeginLine) != 0 && absPos > 0 && in.OriginalB[absPos-1] == '\n'
 }
 
+// VerifyEnd checks for $ and \z anchors using absolute context.
 func VerifyEnd(in Input, i int, req syntax.EmptyOp) bool {
 	if (req & (syntax.EmptyEndText | syntax.EmptyEndLine)) == 0 {
 		return true
 	}
-	if (in.AbsPos + i) == in.TotalBytes {
+	absPos := in.AbsPos + i
+	if absPos == in.TotalBytes {
 		return true
 	}
-	return (req&syntax.EmptyEndLine) != 0 && i < len(in.B) && in.B[i] == '\n'
+	return (req&syntax.EmptyEndLine) != 0 && absPos < in.TotalBytes && in.OriginalB[absPos] == '\n'
 }
 
+// VerifyWord checks for \b and \B anchors using absolute context.
 func VerifyWord(in Input, i int, req syntax.EmptyOp) bool {
 	if (req & (syntax.EmptyWordBoundary | syntax.EmptyNoWordBoundary)) == 0 {
 		return true
 	}
-	numBytes := len(in.B)
+	absPos := in.AbsPos + i
 	var wordLeft, wordRight bool
-	if i > 0 && in.B[i-1] < 0x80 && syntax.IsWordChar(rune(in.B[i-1])) {
+	if absPos > 0 && in.OriginalB[absPos-1] < 0x80 && syntax.IsWordChar(rune(in.OriginalB[absPos-1])) {
 		wordLeft = true
 	}
-	if i < numBytes && in.B[i] < 0x80 && syntax.IsWordChar(rune(in.B[i])) {
+	if absPos < in.TotalBytes && in.OriginalB[absPos] < 0x80 && syntax.IsWordChar(rune(in.OriginalB[absPos])) {
 		wordRight = true
 	}
 	if wordLeft != wordRight {

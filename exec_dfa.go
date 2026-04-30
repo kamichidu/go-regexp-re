@@ -33,6 +33,7 @@ func fastMatchExecLoop(re *Regexp, in ir.Input) (int, int, int) {
 	}
 
 	i := in.SearchStart
+	prio = i * ir.SearchRestartPenalty
 	ccWarps := d.CCWarpTable()
 	for i < numBytes {
 		sidx := state & ir.StateIDMask
@@ -354,7 +355,7 @@ func fastMatchExecLoop(re *Regexp, in ir.Input) (int, int, int) {
 				if anchorStart {
 					bestStart = 0
 				} else {
-					bestStart = p / ir.SearchRestartPenalty
+					bestStart = prio / ir.SearchRestartPenalty
 				}
 			}
 		}
@@ -389,6 +390,7 @@ func extendedMatchExecLoop(re *Regexp, in ir.Input) (int, int, int) {
 	}
 
 	i := in.SearchStart
+	prio = i * ir.SearchRestartPenalty
 	ccWarps := d.CCWarpTable()
 	for i < numBytes {
 		sidx := state & ir.StateIDMask
@@ -718,7 +720,7 @@ func extendedMatchExecLoop(re *Regexp, in ir.Input) (int, int, int) {
 				if anchorStart {
 					bestStart = 0
 				} else {
-					bestStart = p / ir.SearchRestartPenalty
+					bestStart = prio / ir.SearchRestartPenalty
 				}
 			}
 		}
@@ -753,6 +755,7 @@ func extendedSubmatchExecLoop(re *Regexp, in ir.Input, mc *matchContext) (int, i
 	}
 
 	i := in.SearchStart
+	prio = i * ir.SearchRestartPenalty
 	ccWarps := d.CCWarpTable()
 	mc.appendRaw(state & ir.StateIDMask) // Initial state at pos 0
 
@@ -1111,14 +1114,14 @@ func extendedSubmatchExecLoop(re *Regexp, in ir.Input, mc *matchContext) (int, i
 	sidx := state & ir.StateIDMask
 	if (state & ir.AcceptingStateFlag) != 0 {
 		req := guards[sidx]
-		if req == 0 || (ir.VerifyEnd(in, numBytes, req) && ir.VerifyBegin(in, numBytes, req) && ir.VerifyWord(in, numBytes, req)) {
+		if req == 0 || (ir.VerifyEnd(in, i, req) && ir.VerifyBegin(in, i, req) && ir.VerifyWord(in, i, req)) {
 			p := prio + d.MatchPriority(sidx)
 			if p <= bestPriority {
 				bestPriority, bestEnd = p, numBytes
 				if anchorStart {
 					bestStart = 0
 				} else {
-					bestStart = p / ir.SearchRestartPenalty
+					bestStart = prio / ir.SearchRestartPenalty
 				}
 			}
 		}
