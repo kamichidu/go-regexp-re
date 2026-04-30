@@ -155,13 +155,12 @@ func (re *Regexp) all(b []byte, n int, deliver func([]int)) {
 		if start < 0 {
 			break
 		}
-		absStart, absEnd := start+pos, end+pos
-		deliver([]int{absStart, absEnd})
+		deliver([]int{start, end})
 		if pos >= totalBytes {
 			break
 		}
-		// Correct advancement: 'end' is already the byte index to advance by
-		advance := end
+		// 'end' is now absolute, so 'end - pos' is the relative advancement
+		advance := end - pos
 		if advance <= 0 {
 			advance = 1 + ir.GetTrailingByteCount(b[pos])
 		}
@@ -183,20 +182,11 @@ func (re *Regexp) allSubmatch(b []byte, n int, deliver func([]int)) {
 		if loc == nil {
 			break
 		}
-		// findSubmatchIndexAt returns relative coordinates for the PROVIDED slice,
-		// but since we provided b[pos:], we must add pos to get absolute coordinates.
-		absStart, absEnd := loc[0]+pos, loc[1]+pos
-		loc[0], loc[1] = absStart, absEnd
-		for j := 1; j < len(loc)/2; j++ {
-			if loc[2*j] >= 0 {
-				loc[2*j] += pos
-				loc[2*j+1] += pos
-			}
-		}
 		deliver(loc)
 		if pos >= totalBytes {
 			break
 		}
+		// 'loc[1]' is now absolute
 		advance := loc[1] - pos
 		if advance <= 0 {
 			advance = 1 + ir.GetTrailingByteCount(b[pos])
