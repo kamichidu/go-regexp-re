@@ -4,126 +4,95 @@ import (
 	"github.com/kamichidu/go-regexp-re/internal/ir"
 )
 
-func (re *Regexp) sparseTDFA_PathSelection(mc *matchContext, b []byte, start, end, finalPrio int) {
+func (re *Regexp) sparseTDFA_PathSelection(mc *matchContext, b []byte, start, end, prio int) {
 	d := re.dfa
-	history := mc.history
-	recapTables := d.RecapTables()
-	if len(recapTables) == 0 || len(history) == 0 {
-		return
-	}
-	recap := recapTables[0]
+	recap := d.RecapTables()[0]
 
-	// Tracing backwards
-	currentPrio := int16(finalPrio)
+	currPrio := int32(prio)
+	mc.pathHistory[end] = currPrio
 
-	// Collect steps first
-	type step struct {
-		sidx uint32
-		byte byte
-	}
-	var steps []step
-	currPos := start
-	for _, h := range history {
+	for curr := end - 1; curr >= start; curr-- {
+		h := mc.history[curr-start]
 		sidx := h & ir.StateIDMask
-		count := 1
-		if (h & 0x80000000) != 0 {
-			count = int((h & 0x7FF00000) >> 20)
+		byteVal := byte(0)
+		if curr < len(b) {
+			byteVal = b[curr]
 		}
-		for j := 0; j < count; j++ {
-			if currPos >= end {
-				break
-			}
-			byteVal := byte(0)
-			if currPos < len(b) {
-				byteVal = b[currPos]
-			}
-			steps = append(steps, step{sidx, byteVal})
-			currPos++
-		}
-		if currPos >= end {
-			break
-		}
-	}
 
-	// Trace backwards
-	for i := len(steps) - 1; i >= 0; i-- {
-		mc.pathHistory[i+1] = int32(currentPrio)
-		s := steps[i]
-		off := (int(s.sidx) << 8) | int(s.byte)
+		off := (int(sidx) << 8) | int(byteVal)
 		found := false
-		for _, e := range recap.Transitions[off] {
-			if e.NextPriority == currentPrio {
-				currentPrio = e.InputPriority
-				found = true
-				break
+		bestInputPrio := int32(1 << 30)
+
+		if off < len(recap.Transitions) {
+			for _, entry := range recap.Transitions[off] {
+				if entry.NextPriority == currPrio {
+					// For the last byte, ensure we pick a transition that reached a match.
+					if curr == end-1 && !entry.IsMatch {
+						continue
+					}
+					if entry.InputPriority < bestInputPrio {
+						bestInputPrio = entry.InputPriority
+						found = true
+					}
+				}
 			}
 		}
+
 		if !found {
-			// Fallback: assume priority 0 if path is broken
-			currentPrio = 0
+			// If not found, try without IsMatch constraint as fallback (should not happen if history is consistent)
+			if curr == end-1 {
+				for _, entry := range recap.Transitions[off] {
+					if entry.NextPriority == currPrio {
+						if entry.InputPriority < bestInputPrio {
+							bestInputPrio = entry.InputPriority
+							found = true
+						}
+					}
+				}
+			}
 		}
+
+		if found {
+			currPrio = bestInputPrio
+		} else {
+			currPrio = 0
+		}
+		mc.pathHistory[curr] = currPrio
 	}
-	mc.pathHistory[0] = int32(currentPrio)
 }
 
-func (re *Regexp) sparseTDFA_Recap(mc *matchContext, b []byte, start, end, finalPrio int, regs []int) {
+func (re *Regexp) sparseTDFA_Recap(mc *matchContext, b []byte, start, end, prio int, regs []int) {
 	d := re.dfa
-	history := mc.history
-	recapTables := d.RecapTables()
-	if len(recapTables) == 0 || len(history) == 0 {
-		return
-	}
-	recap := recapTables[0]
+	recap := d.RecapTables()[0]
 
-	curr := start
-	stepIdx := 0
+	re.applyEntryTags(regs, d.StartUpdates(), mc.pathHistory[start], start)
 
-	// Apply initial tags at match start using pathHistory[0]
-	currentPrio := int16(mc.pathHistory[0])
-	for _, u := range d.StartUpdates() {
-		if int16(u.NextPriority) == currentPrio {
-			applyTags(regs, u.Tags, curr, 0)
-			// Do NOT break here, OR tags if multiple start updates exist (shouldn't happen with dedup)
-		}
-	}
-
-	for i, h := range history {
+	for curr := start; curr < end; curr++ {
+		h := mc.history[curr-start]
 		sidx := h & ir.StateIDMask
-		count := 1
-		if (h & 0x80000000) != 0 {
-			count = int((h & 0x7FF00000) >> 20)
+		byteVal := b[curr]
+		if curr < len(b) {
+			byteVal = b[curr]
 		}
 
-		for j := 0; j < count; j++ {
-			if curr >= end {
-				break
-			}
-			byteVal := byte(0)
-			if curr < len(b) {
-				byteVal = b[curr]
-			}
+		pathID := mc.pathHistory[curr]
+		nextPathID := mc.pathHistory[curr+1]
 
-			currentPrio = int16(mc.pathHistory[stepIdx])
-			nextPrio := int16(mc.pathHistory[stepIdx+1])
-
-			off := (int(sidx) << 8) | int(byteVal)
-			entries := recap.Transitions[off]
-			for _, e := range entries {
-				if e.InputPriority == currentPrio && e.NextPriority == nextPrio {
-					applyTags(regs, e.PreTags, curr, 0)
-					applyTags(regs, e.PostTags, curr+1, 0)
+		off := (int(sidx) << 8) | int(byteVal)
+		if off < len(recap.Transitions) {
+			for _, entry := range recap.Transitions[off] {
+				if entry.InputPriority == pathID && entry.NextPriority == nextPathID {
+					if curr == end-1 && !entry.IsMatch {
+						continue
+					}
+					re.applyRawTags(regs, entry.PreTags, curr)
+					re.applyRawTags(regs, entry.PostTags, curr+1)
 					break
 				}
 			}
-			curr++
-			stepIdx++
-		}
-		if curr >= end || i == len(history)-1 {
-			break
 		}
 	}
 
-	// Final mapping of indices to absolute coordinates exactly once
 	absBase := mc.absBase
 	for i := range regs {
 		if regs[i] >= 0 {
@@ -133,18 +102,26 @@ func (re *Regexp) sparseTDFA_Recap(mc *matchContext, b []byte, start, end, final
 	regs[0], regs[1] = start+absBase, end+absBase
 }
 
-func applyTags(regs []int, tags uint64, pos int, absBase int) {
+func (re *Regexp) applyRawTags(regs []int, tags uint64, pos int) {
 	if tags == 0 {
 		return
 	}
-	for i := uint(0); i < 32; i++ {
-		if (tags & (1 << (2 * i))) != 0 {
-			if regs[2*i] < 0 {
-				regs[2*i] = pos + absBase
+	for bit := 2; bit < 64; bit++ {
+		if (tags & (1 << uint(bit))) != 0 {
+			if bit < len(regs) {
+				// Even bits: Start tags (leftmost win). Odd bits: End tags (latest win).
+				if (bit%2 != 0) || regs[bit] == -1 {
+					regs[bit] = pos
+				}
 			}
 		}
-		if (tags & (1 << (2*i + 1))) != 0 {
-			regs[2*i+1] = pos + absBase
+	}
+}
+
+func (re *Regexp) applyEntryTags(regs []int, updates []ir.PathTagUpdate, pathID int32, pos int) {
+	for _, u := range updates {
+		if u.NextPriority == pathID {
+			re.applyRawTags(regs, u.PreTags|u.PostTags, pos)
 		}
 	}
 }

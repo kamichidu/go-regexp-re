@@ -91,11 +91,9 @@ func (re *Regexp) findSubmatchIndexAt(b []byte, pos int, totalBytes int, origina
 	}
 
 	regs := mc.regs
-	// sparseTDFA_Recap will set results relative to in.B[0]
 	re.sparseTDFA_PathSelection(mc, b, start, end, prio)
 	re.sparseTDFA_Recap(mc, b, start, end, prio, regs)
 
-	// Results from Recap are already absolute because Recap adds mc.absBase
 	res := make([]int, len(mc.regs))
 	copy(res, mc.regs)
 	return res

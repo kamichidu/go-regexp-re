@@ -136,7 +136,9 @@ func NewDFAWithMemoryLimit(ctx context.Context, re *syntax.Regexp, prog *syntax.
 				normalized[i].Priority -= minP
 			}
 			closure = normalized
-			matchP -= int(minP)
+			if matchP != 1<<30-1 {
+				matchP -= int(minP)
+			}
 		}
 		key := dfaStateKey{hashSet(closure, d.Naked), matchP, isSearch}
 		if id, ok := nfaToDfa[key]; ok {
@@ -212,17 +214,18 @@ func NewDFAWithMemoryLimit(ctx context.Context, re *syntax.Regexp, prog *syntax.
 			}
 			if nextAnchors != 0 {
 				rawNext |= AnchorVerifyFlag | (uint32(nextAnchors) << 22)
+				d.hasAnchors = true
+			}
+
+			minNextPrio := int32(1<<30 - 1)
+			for _, p := range nextPaths {
+				if p.Priority < minNextPrio {
+					minNextPrio = p.Priority
+				}
 			}
 
 			if len(nextRes.Updates) > 0 {
-				minNextPrio := nextRes.NextClosure[0].Priority
-				for _, p := range nextRes.NextClosure {
-					if p.Priority < minNextPrio {
-						minNextPrio = p.Priority
-					}
-				}
-				basePrio := minNextPrio // Simplified for now
-				d.tagUpdates = append(d.tagUpdates, TransitionUpdate{BasePriority: basePrio, PreUpdates: nextRes.Updates})
+				d.tagUpdates = append(d.tagUpdates, TransitionUpdate{BasePriority: minNextPrio, PreUpdates: nextRes.Updates})
 				d.tagUpdateIndices[idx] = uint32(len(d.tagUpdates) - 1)
 				rawNext |= TaggedStateFlag
 			}
@@ -230,15 +233,21 @@ func NewDFAWithMemoryLimit(ctx context.Context, re *syntax.Regexp, prog *syntax.
 
 			var entries []RecapEntry
 			for _, u := range nextRes.Updates {
-				var pre uint64
-				for _, eu := range d.stateEntryTags[i] {
-					if eu.NextPriority == u.RelativePriority {
-						pre |= eu.Tags
-					}
-				}
-				entries = append(entries, RecapEntry{InputPriority: int16(u.RelativePriority), NextPriority: int16(u.NextPriority), PreTags: pre, PostTags: u.Tags})
+				entries = append(entries, RecapEntry{
+					InputPriority: u.RelativePriority + minNextPrio - d.stateMinPriority[i],
+					NextPriority:  u.NextPriority,
+					IsMatch:       u.IsMatch,
+					PreTags:       u.PreTags,
+					PostTags:      u.PostTags,
+				})
 			}
 			d.recapTables[0].Transitions[idx] = entries
+		}
+	}
+	for _, g := range d.acceptingGuards {
+		if g != 0 {
+			d.hasAnchors = true
+			break
 		}
 	}
 	d.ccWarpTable = make([]CCWarpInfo, d.numStates)
@@ -255,6 +264,7 @@ func epsilonClosureWithAnchorWall(prog *syntax.Prog, paths []NFAPath) ClosureRes
 		p          NFAPath
 		newTags    uint64
 		sourcePrio int32
+		preTags    uint64
 	}
 	stack := make([]pathWithMeta, 0, len(paths))
 	var updates []PathTagUpdate
@@ -264,10 +274,10 @@ func epsilonClosureWithAnchorWall(prog *syntax.Prog, paths []NFAPath) ClosureRes
 			minPriority[p.Priority] = make(map[stateKey]int32)
 		}
 		minPriority[p.Priority][sk] = p.Priority
-		stack = append(stack, pathWithMeta{p, 0, p.Priority})
+		stack = append(stack, pathWithMeta{p, 0, p.Priority, p.Tags})
 		inst := prog.Inst[p.ID]
 		if p.NodeID != 0 || !isEpsilon(inst.Op) {
-			updates = append(updates, PathTagUpdate{RelativePriority: p.Priority, NextPriority: p.Priority, Tags: 0})
+			updates = append(updates, PathTagUpdate{RelativePriority: p.Priority, NextPriority: p.Priority, IsMatch: p.NodeID == 0 && inst.Op == syntax.InstMatch, PreTags: p.Tags, PostTags: 0})
 		}
 	}
 	resMap := make(map[stateKey]NFAPath)
@@ -281,9 +291,9 @@ func epsilonClosureWithAnchorWall(prog *syntax.Prog, paths []NFAPath) ClosureRes
 		}
 		inst := prog.Inst[p.ID]
 		if p.NodeID != 0 || !isEpsilon(inst.Op) {
-			p.Tags |= ph.newTags
-			updates = append(updates, PathTagUpdate{RelativePriority: ph.sourcePrio, NextPriority: p.Priority, Tags: ph.newTags})
 			rk := stateKey{p.ID, p.NodeID, p.Anchors}
+			updates = append(updates, PathTagUpdate{RelativePriority: ph.sourcePrio, NextPriority: p.Priority, IsMatch: p.NodeID == 0 && inst.Op == syntax.InstMatch, PreTags: ph.preTags, PostTags: ph.newTags})
+			p.Tags = ph.preTags | ph.newTags
 			if existing, ok := resMap[rk]; !ok || p.Priority < existing.Priority {
 				resMap[rk] = p
 			} else if p.Priority == existing.Priority {
@@ -307,7 +317,7 @@ func epsilonClosureWithAnchorWall(prog *syntax.Prog, paths []NFAPath) ClosureRes
 				}
 				if m, ok := minPriority[ph.sourcePrio][nsk]; !ok || next.p <= m {
 					minPriority[ph.sourcePrio][nsk] = next.p
-					stack = append(stack, pathWithMeta{NFAPath{ID: next.id, Priority: next.p, Anchors: p.Anchors, Tags: p.Tags}, ph.newTags, ph.sourcePrio})
+					stack = append(stack, pathWithMeta{NFAPath{ID: next.id, Priority: next.p, Anchors: p.Anchors, Tags: p.Tags}, ph.newTags, ph.sourcePrio, ph.preTags})
 				}
 			}
 		case syntax.InstCapture:
@@ -322,7 +332,7 @@ func epsilonClosureWithAnchorWall(prog *syntax.Prog, paths []NFAPath) ClosureRes
 				if (inst.Arg&1 != 0) || (p.Tags&tagBit) == 0 {
 					nt |= tagBit
 				}
-				stack = append(stack, pathWithMeta{NFAPath{ID: inst.Out, Priority: p.Priority, Anchors: p.Anchors, Tags: p.Tags | tagBit}, nt, ph.sourcePrio})
+				stack = append(stack, pathWithMeta{NFAPath{ID: inst.Out, Priority: p.Priority, Anchors: p.Anchors, Tags: p.Tags | tagBit}, nt, ph.sourcePrio, ph.preTags})
 			}
 		case syntax.InstEmptyWidth, syntax.InstNop:
 			na := p.Anchors
@@ -335,7 +345,7 @@ func epsilonClosureWithAnchorWall(prog *syntax.Prog, paths []NFAPath) ClosureRes
 			}
 			if m, ok := minPriority[ph.sourcePrio][nsk]; !ok || p.Priority <= m {
 				minPriority[ph.sourcePrio][nsk] = p.Priority
-				stack = append(stack, pathWithMeta{NFAPath{ID: inst.Out, Priority: p.Priority, Anchors: na, Tags: p.Tags}, ph.newTags, ph.sourcePrio})
+				stack = append(stack, pathWithMeta{NFAPath{ID: inst.Out, Priority: p.Priority, Anchors: na, Tags: p.Tags}, ph.newTags, ph.sourcePrio, ph.preTags})
 			}
 		}
 	}
@@ -363,38 +373,37 @@ func epsilonClosureWithAnchorWall(prog *syntax.Prog, paths []NFAPath) ClosureRes
 		}
 		return resPaths[i].Priority < resPaths[j].Priority
 	})
-	type updateKey struct{ rel, next int32 }
-	dedup := make(map[updateKey]uint64)
+	type updateKey struct {
+		rel, next int32
+		isMatch   bool
+	}
+	dedup := make(map[updateKey]PathTagUpdate)
 	for _, u := range updates {
-		dedup[updateKey{u.RelativePriority, u.NextPriority}] |= u.Tags
+		k := updateKey{u.RelativePriority, u.NextPriority, u.IsMatch}
+		existing := dedup[k]
+		existing.RelativePriority, existing.NextPriority, existing.IsMatch = u.RelativePriority, u.NextPriority, u.IsMatch
+		existing.PreTags |= u.PreTags
+		existing.PostTags |= u.PostTags
+		dedup[k] = existing
 	}
 	updates = updates[:0]
-	for k, v := range dedup {
-		updates = append(updates, PathTagUpdate{RelativePriority: k.rel, NextPriority: k.next, Tags: v})
+	keys := make([]updateKey, 0, len(dedup))
+	for k := range dedup {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].rel != keys[j].rel {
+			return keys[i].rel < keys[j].rel
+		}
+		if keys[i].next != keys[j].next {
+			return keys[i].next < keys[j].next
+		}
+		return !keys[i].isMatch && keys[j].isMatch
+	})
+	for _, k := range keys {
+		updates = append(updates, dedup[k])
 	}
 	return ClosureResult{resPaths, updates, matchAnchors}
-}
-
-func isEpsilon(op syntax.InstOp) bool {
-	switch op {
-	case syntax.InstAlt, syntax.InstAltMatch, syntax.InstCapture, syntax.InstEmptyWidth, syntax.InstNop:
-		return true
-	}
-	return false
-}
-
-func hashSet(closure []NFAPath, naked bool) uint64 {
-	h := uint64(14695981039346656037)
-	for _, p := range closure {
-		h = (h ^ uint64(p.ID)) * 1099511628211
-		h = (h ^ uint64(p.NodeID)) * 1099511628211
-		h = (h ^ uint64(p.Priority)) * 1099511628211
-		if !naked {
-			h = (h ^ uint64(p.Tags)) * 1099511628211
-		}
-		h = (h ^ uint64(p.Anchors)) * 1099511628211
-	}
-	return h
 }
 
 func CheckCompatibility(re *syntax.Regexp) error {
@@ -447,10 +456,6 @@ func hasEmptyAlternative(re *syntax.Regexp) bool {
 		if len(re.Sub) == 0 {
 			return true
 		}
-		// In a concat, it's an empty alternative only if ALL components can match empty
-		// AND it's physically empty or consists only of empty matches.
-		// Actually, for "empty alternative", we usually mean "one of the paths is empty".
-		// But here it's used to check if a capture can match an empty string.
 		for _, sub := range re.Sub {
 			if !hasEmptyAlternative(sub) {
 				return false
@@ -505,12 +510,10 @@ func hasEpsilonCycle(prog *syntax.Prog, id uint32, visited, onStack map[uint32]b
 	visited[id] = true
 	onStack[id] = true
 	defer func() { onStack[id] = false }()
-
 	inst := prog.Inst[id]
 	if !isEpsilon(inst.Op) {
 		return false
 	}
-
 	switch inst.Op {
 	case syntax.InstAlt, syntax.InstAltMatch:
 		return hasEpsilonCycle(prog, inst.Out, visited, onStack) || hasEpsilonCycle(prog, inst.Arg, visited, onStack)
@@ -518,4 +521,26 @@ func hasEpsilonCycle(prog *syntax.Prog, id uint32, visited, onStack map[uint32]b
 		return hasEpsilonCycle(prog, inst.Out, visited, onStack)
 	}
 	return false
+}
+
+func isEpsilon(op syntax.InstOp) bool {
+	switch op {
+	case syntax.InstAlt, syntax.InstAltMatch, syntax.InstCapture, syntax.InstEmptyWidth, syntax.InstNop:
+		return true
+	}
+	return false
+}
+
+func hashSet(closure []NFAPath, naked bool) uint64 {
+	h := uint64(14695981039346656037)
+	for _, p := range closure {
+		h = (h ^ uint64(p.ID)) * 1099511628211
+		h = (h ^ uint64(p.NodeID)) * 1099511628211
+		h = (h ^ uint64(p.Priority)) * 1099511628211
+		if !naked {
+			h = (h ^ uint64(p.Tags)) * 1099511628211
+		}
+		h = (h ^ uint64(p.Anchors)) * 1099511628211
+	}
+	return h
 }
