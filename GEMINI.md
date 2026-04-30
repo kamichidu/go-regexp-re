@@ -133,12 +133,14 @@ To maintain 100% compatibility, MAP MUST adhere to safety constraints:
 - **Nullable Pattern Protection**: If a pattern can match an empty string (`minLength == 0`), Pass 0 (MAP rejection) MUST be **disabled** to prevent missing matches (e.g., `a*` matching `""`).
 - **Complex Anchor Fallback**: Context-dependent anchors (e.g., `\b`, multiline `^`/`$`) MUST be handled by the DFA; MAP MUST be disabled if safe validation is impossible.
 
-### 2.22 Absolute Coordinate Context Propagation (Mandate)
+#### 2.22 Absolute Coordinate Context Propagation (Mandate)
 To ensure 100% accurate anchor verification and submatch extraction regardless of the internal scan's starting point, the engine MUST propagate an **Absolute Coordinate Context** via the `ir.Input` structure.
-- **Context Components**: Internal execution loops MUST receive an `ir.Input` containing the byte slice (`B`), its absolute offset (`AbsPos`), and the total input length (`TotalBytes`).
-- **Zero-Ambiguity Anchors**: `VerifyBegin`, `VerifyEnd`, and `VerifyWord` MUST use `(in.AbsPos + i)` to determine the true position within the text.
-- **Internal Consistency**: Submatch extraction (Pass 2 & 3) MUST utilize `mc.absBase` to ensure that indices stored in the result buffer are always absolute relative to the original input.
+- **Virtual Slicing (Allocation Exclusion)**: `ir.Input` MUST hold the full, original byte slice (`OriginalB`) to act as a zero-allocation alternative to repeated slice truncations.
+- **Relative-Coordinate Hot Loops**: Internal execution loops MUST maintain a **Relative Coordinate System**. Loop variables (`i`), priority (`prio`), and internal capture indices MUST be 0-based relative to the start of the current virtual slice (`in.AbsPos`). This ensures that absolute coordinate addition is excluded from the $O(1)$ hot path.
+- **Zero-Ambiguity Contextual Anchors**: `VerifyBegin`, `VerifyEnd`, and `VerifyWord (\b)` MUST use `(in.AbsPos + i)` to index into `in.OriginalB`. This allows accurate boundary assessment even when the virtual slice starts in the middle of a word or line.
+- **Exit-Only Absolute Conversion**: Conversion from relative to absolute coordinates (e.g., `regs[i] += in.AbsPos`) MUST be performed **exactly once** at the public API boundary before returning results to the caller.
 - **Encapsulation**: This absolute coordinate system is an internal architectural detail. Public APIs MUST continue to provide standard, buffer-relative indices (0-based from the provided slice) to maintain 100% compatibility with Go's `regexp` package.
+
 
 ## 3. Feature Selection Policy
 
