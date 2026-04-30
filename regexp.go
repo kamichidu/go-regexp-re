@@ -55,6 +55,9 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 
 	s = syntax.Simplify(s)
 	s = syntax.Optimize(s)
+	if err := ir.CheckCompatibility(s); err != nil {
+		return nil, err
+	}
 	prog, err := syntax.Compile(s)
 	if err != nil {
 		return nil, err

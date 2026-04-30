@@ -2,7 +2,9 @@ package ir
 
 import (
 	"context"
+	"fmt"
 	"sort"
+	"strings"
 	"unicode"
 
 	"github.com/kamichidu/go-regexp-re/syntax"
@@ -20,8 +22,23 @@ type dfaStateKey struct {
 	IsSearch bool
 }
 
-func NewDFAWithMemoryLimit(ctx context.Context, re *syntax.Regexp, prog *syntax.Prog, maxMemory int, naked bool) (*DFA, error) {
-	d := &DFA{
+func NewDFAWithMemoryLimit(ctx context.Context, re *syntax.Regexp, prog *syntax.Prog, maxMemory int, naked bool) (d *DFA, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			if s, ok := r.(string); ok && strings.HasPrefix(s, "regexp: ") {
+				err = fmt.Errorf("%s", s)
+				return
+			}
+			panic(r)
+		}
+	}()
+	if err := CheckCompatibility(re); err != nil {
+		return nil, err
+	}
+	if err := checkEpsilonLoop(prog); err != nil {
+		return nil, err
+	}
+	d = &DFA{
 		storage: &memoryNfaSetStorage{},
 		Naked:   naked,
 	}
@@ -94,6 +111,11 @@ func NewDFAWithMemoryLimit(ctx context.Context, re *syntax.Regexp, prog *syntax.
 	}
 
 	nfaToDfa := make(map[dfaStateKey]uint32)
+	maxStates := maxMemory / 2048
+	if maxStates < 100 {
+		maxStates = 100
+	}
+
 	addDfaState := func(closure []NFAPath, updates []PathTagUpdate, matchAnchors syntax.EmptyOp, isSearch bool) uint32 {
 		minP := int32(1<<30 - 1)
 		matchP := 1<<30 - 1
@@ -119,6 +141,9 @@ func NewDFAWithMemoryLimit(ctx context.Context, re *syntax.Regexp, prog *syntax.
 		key := dfaStateKey{hashSet(closure, d.Naked), matchP, isSearch}
 		if id, ok := nfaToDfa[key]; ok {
 			return id
+		}
+		if d.numStates >= maxStates {
+			panic(fmt.Sprintf("regexp: pattern too large or ambiguous (states: %d, max: %d)", d.numStates, maxStates))
 		}
 		id := uint32(d.numStates)
 		nfaToDfa[key] = id
@@ -370,4 +395,127 @@ func hashSet(closure []NFAPath, naked bool) uint64 {
 		h = (h ^ uint64(p.Anchors)) * 1099511628211
 	}
 	return h
+}
+
+func CheckCompatibility(re *syntax.Regexp) error {
+	if re == nil {
+		return nil
+	}
+	switch re.Op {
+	case syntax.OpCapture:
+		if hasEmptyAlternative(re.Sub[0]) {
+			return &syntax.UnsupportedError{Op: "empty alternative in capture"}
+		}
+	case syntax.OpQuest, syntax.OpStar, syntax.OpPlus, syntax.OpRepeat:
+		if hasCapture(re.Sub[0]) && matchesEmpty(re.Sub[0]) {
+			return &syntax.UnsupportedError{Op: "optional empty capture"}
+		}
+	}
+	for _, sub := range re.Sub {
+		if err := CheckCompatibility(sub); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func hasCapture(re *syntax.Regexp) bool {
+	if re.Op == syntax.OpCapture {
+		return true
+	}
+	for _, sub := range re.Sub {
+		if hasCapture(sub) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasEmptyAlternative(re *syntax.Regexp) bool {
+	switch re.Op {
+	case syntax.OpEmptyMatch:
+		return true
+	case syntax.OpCapture:
+		return hasEmptyAlternative(re.Sub[0])
+	case syntax.OpAlternate:
+		for _, sub := range re.Sub {
+			if hasEmptyAlternative(sub) {
+				return true
+			}
+		}
+	case syntax.OpConcat:
+		if len(re.Sub) == 0 {
+			return true
+		}
+		// In a concat, it's an empty alternative only if ALL components can match empty
+		// AND it's physically empty or consists only of empty matches.
+		// Actually, for "empty alternative", we usually mean "one of the paths is empty".
+		// But here it's used to check if a capture can match an empty string.
+		for _, sub := range re.Sub {
+			if !hasEmptyAlternative(sub) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+func matchesEmpty(re *syntax.Regexp) bool {
+	switch re.Op {
+	case syntax.OpEmptyMatch, syntax.OpStar, syntax.OpQuest:
+		return true
+	case syntax.OpRepeat:
+		if re.Min == 0 {
+			return true
+		}
+	case syntax.OpCapture, syntax.OpAlternate:
+		for _, sub := range re.Sub {
+			if matchesEmpty(sub) {
+				return true
+			}
+		}
+	case syntax.OpConcat:
+		for _, sub := range re.Sub {
+			if !matchesEmpty(sub) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+func checkEpsilonLoop(prog *syntax.Prog) error {
+	for i := range prog.Inst {
+		if hasEpsilonCycle(prog, uint32(i), make(map[uint32]bool), make(map[uint32]bool)) {
+			return &syntax.UnsupportedError{Op: "epsilon loop"}
+		}
+	}
+	return nil
+}
+
+func hasEpsilonCycle(prog *syntax.Prog, id uint32, visited, onStack map[uint32]bool) bool {
+	if onStack[id] {
+		return true
+	}
+	if visited[id] {
+		return false
+	}
+	visited[id] = true
+	onStack[id] = true
+	defer func() { onStack[id] = false }()
+
+	inst := prog.Inst[id]
+	if !isEpsilon(inst.Op) {
+		return false
+	}
+
+	switch inst.Op {
+	case syntax.InstAlt, syntax.InstAltMatch:
+		return hasEpsilonCycle(prog, inst.Out, visited, onStack) || hasEpsilonCycle(prog, inst.Arg, visited, onStack)
+	case syntax.InstCapture, syntax.InstEmptyWidth, syntax.InstNop:
+		return hasEpsilonCycle(prog, inst.Out, visited, onStack)
+	}
+	return false
 }
