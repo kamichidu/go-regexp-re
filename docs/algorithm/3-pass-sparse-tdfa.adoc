@@ -61,3 +61,13 @@ Patterns that match empty strings in a loop (Epsilon Cycles) or contain ambiguou
 *   **Strict $O(n)$ Complexity**: All three passes are linear relative to input length.
 *   **Zero-Allocation Submatch Extraction**: Operates entirely on pre-allocated buffers and stack-resident state. The `matchContext` provides a re-usable `regs` buffer for submatch indices to eliminate allocation of the result slice on every match.
 *   **100% Go Compatibility**: Guarantees leftmost-first match results identical to `regexp`.
+
+=== Absolute Coordinate Context (Stability Mandate)
+To ensure that anchor verification (`^`, `$`, `\b`) and submatch extraction are correct even when scanning middle segments of a large input, the engine utilizes an **Absolute Coordinate Context**.
+
+*   **`ir.Input` Structure**: Every phase of the TDFA receives an `ir.Input` object containing:
+    *   `B`: The byte slice currently being scanned.
+    *   `AbsPos`: The distance of `B[0]` from the start of the original input.
+    *   `TotalBytes`: The total size of the original input.
+*   **Anchor Stability**: `VerifyBegin` and `VerifyEnd` calculate the absolute position as `AbsPos + i`. This allows a search starting at offset 100 to correctly identify that it is NOT at the beginning of the text, even if it is at the beginning of the provided byte slice.
+*   **Absolute Submatch Registers**: During Phase 3, tags are applied using `pos + mc.absBase`. This ensures that the indices stored in the result buffer are always absolute relative to the original input, maintaining consistency across internal search restarts.

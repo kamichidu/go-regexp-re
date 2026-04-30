@@ -115,7 +115,7 @@ To ensure DFA determinism and $O(1)$ transitions, the behavior of `.` (dot) is s
 - **Submatch Precision**: Internal capturing group boundaries that fall within an invalid UTF-8 sequence are handled on a best-effort basis and may deviate from standard `regexp` to maintain $O(n)$ performance.
 
 #### 2.19.2 Calculation-Free Boundary Analysis Mandate
-Junction verification for anchors (`\b`, `^`, `$`) MUST NOT employ `utf8.DecodeRune`. Word boundaries (`\b`) are defined as **ASCII Word Boundaries**; multi-byte bytes (0x80+) are treated as non-word characters.
+Junction verification for anchors (`\b`, `^`, `$`) MUST NOT employ `utf8.DecodeRune`. Word boundaries (`\b`) are defined as **ASCII Word Boundaries**; multi-byte bytes (0x80+) are treated as non-word characters. **Execution loops MUST propagate the Absolute Position Context via `ir.Input` to ensure accurate boundary evaluation even when scanning partial segments.**
 
 ### 2.20 Byte-Parallel SWAR Execution (Mandate)
 To achieve the $O(n)$ physical throughput goal, the engine MUST implement a hierarchical SWAR (SIMD Within A Register) execution strategy for character classes and repetitions.
@@ -132,6 +132,13 @@ To achieve the $O(n)$ physical throughput goal, the engine MUST implement a hier
 To maintain 100% compatibility, MAP MUST adhere to safety constraints:
 - **Nullable Pattern Protection**: If a pattern can match an empty string (`minLength == 0`), Pass 0 (MAP rejection) MUST be **disabled** to prevent missing matches (e.g., `a*` matching `""`).
 - **Complex Anchor Fallback**: Context-dependent anchors (e.g., `\b`, multiline `^`/`$`) MUST be handled by the DFA; MAP MUST be disabled if safe validation is impossible.
+
+### 2.22 Absolute Coordinate Context Propagation (Mandate)
+To ensure 100% accurate anchor verification and submatch extraction regardless of the internal scan's starting point, the engine MUST propagate an **Absolute Coordinate Context** via the `ir.Input` structure.
+- **Context Components**: Internal execution loops MUST receive an `ir.Input` containing the byte slice (`B`), its absolute offset (`AbsPos`), and the total input length (`TotalBytes`).
+- **Zero-Ambiguity Anchors**: `VerifyBegin`, `VerifyEnd`, and `VerifyWord` MUST use `(in.AbsPos + i)` to determine the true position within the text.
+- **Internal Consistency**: Submatch extraction (Pass 2 & 3) MUST utilize `mc.absBase` to ensure that indices stored in the result buffer are always absolute relative to the original input.
+- **Encapsulation**: This absolute coordinate system is an internal architectural detail. Public APIs MUST continue to provide standard, buffer-relative indices (0-based from the provided slice) to maintain 100% compatibility with Go's `regexp` package.
 
 ## 3. Feature Selection Policy
 

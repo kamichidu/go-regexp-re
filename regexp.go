@@ -186,10 +186,10 @@ func hasAnchors(prog *syntax.Prog) bool {
 }
 
 func (re *Regexp) FindSubmatchIndex(b []byte) []int {
-	return re.FindSubmatchIndexAt(b, 0, len(b))
+	return re.findSubmatchIndexAt(b, 0, len(b))
 }
 
-func (re *Regexp) FindSubmatchIndexAt(b []byte, pos int, totalBytes int) []int {
+func (re *Regexp) findSubmatchIndexAt(b []byte, pos int, totalBytes int) []int {
 	in := ir.Input{
 		B:          b,
 		AbsPos:     pos,
