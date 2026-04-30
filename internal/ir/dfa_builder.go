@@ -157,7 +157,7 @@ func (d *DFA) build(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, ma
 		d.matchState |= AcceptingStateFlag
 	}
 	d.startUpdates = startRes.Updates
-	d.searchState = addDfaState(startRes.NextClosure, startRes.Updates, startRes.MatchAnchors, true)
+	d.searchState = addDfaState(startRes.NextClosure, startRes.Updates, startRes.MatchAnchors, false)
 	if d.accepting[d.searchState] {
 		d.searchState |= AcceptingStateFlag
 	}
@@ -320,9 +320,6 @@ func (d *DFA) build(ctx context.Context, s *syntax.Regexp, prog *syntax.Prog, ma
 						nextPaths = append(nextPaths, NFAPath{ID: nextID, NodeID: nextNodeID, Priority: p.Priority, Tags: 0, Anchors: 0})
 					}
 				}
-			}
-			if d.stateIsSearch[i] {
-				nextPaths = append(nextPaths, NFAPath{ID: uint32(prog.Start), Priority: SearchRestartPenalty})
 			}
 			if len(nextPaths) == 0 {
 				continue

@@ -83,13 +83,14 @@ func (re *Regexp) FindAllString(s string, n int) []string {
 	b := unsafe.Slice(unsafe.StringData(s), len(s))
 	var result []string
 	re.all(b, n, func(loc []int) {
-		result = append(result, s[loc[0]:loc[1]])
+		result = append(result, string(b[loc[0]:loc[1]]))
 	})
 	return result
 }
 
 func (re *Regexp) FindAllStringIndex(s string, n int) [][]int {
-	return re.FindAllIndex([]byte(s), n)
+	b := unsafe.Slice(unsafe.StringData(s), len(s))
+	return re.FindAllIndex(b, n)
 }
 
 func (re *Regexp) FindAllSubmatch(b []byte, n int) [][][]byte {
@@ -139,26 +140,29 @@ func (re *Regexp) FindAllStringSubmatch(s string, n int) [][]string {
 }
 
 func (re *Regexp) FindAllStringSubmatchIndex(s string, n int) [][]int {
-	return re.FindAllSubmatchIndex([]byte(s), n)
+	b := unsafe.Slice(unsafe.StringData(s), len(s))
+	return re.FindAllSubmatchIndex(b, n)
 }
 
 func (re *Regexp) all(b []byte, n int, deliver func([]int)) {
 	if n < 0 {
 		n = len(b) + 1
 	}
-	totalBytes := len(b)
 	pos := 0
+	totalBytes := len(b)
 	for i := 0; i < n; i++ {
 		start, end, _ := re.findIndexAt(b[pos:], pos, totalBytes, b)
 		if start < 0 {
 			break
 		}
-		deliver([]int{start, end})
+		absStart, absEnd := start+pos, end+pos
+		deliver([]int{absStart, absEnd})
 		if pos >= totalBytes {
 			break
 		}
-		advance := end - pos
-		if advance == 0 {
+		// Correct advancement: 'end' is already the byte index to advance by
+		advance := end
+		if advance <= 0 {
 			advance = 1 + ir.GetTrailingByteCount(b[pos])
 		}
 		pos += advance
@@ -172,19 +176,29 @@ func (re *Regexp) allSubmatch(b []byte, n int, deliver func([]int)) {
 	if n < 0 {
 		n = len(b) + 1
 	}
-	totalBytes := len(b)
 	pos := 0
+	totalBytes := len(b)
 	for i := 0; i < n; i++ {
 		loc := re.findSubmatchIndexAt(b[pos:], pos, totalBytes, b)
 		if loc == nil {
 			break
+		}
+		// findSubmatchIndexAt returns relative coordinates for the PROVIDED slice,
+		// but since we provided b[pos:], we must add pos to get absolute coordinates.
+		absStart, absEnd := loc[0]+pos, loc[1]+pos
+		loc[0], loc[1] = absStart, absEnd
+		for j := 1; j < len(loc)/2; j++ {
+			if loc[2*j] >= 0 {
+				loc[2*j] += pos
+				loc[2*j+1] += pos
+			}
 		}
 		deliver(loc)
 		if pos >= totalBytes {
 			break
 		}
 		advance := loc[1] - pos
-		if advance == 0 {
+		if advance <= 0 {
 			advance = 1 + ir.GetTrailingByteCount(b[pos])
 		}
 		pos += advance
@@ -203,7 +217,10 @@ func (re *Regexp) Split(s string, n int) []string {
 	}
 	var result []string
 	start := 0
-	for _, m := range re.FindAllStringIndex(s, n-1) {
+	for _, m := range re.FindAllStringIndex(s, n) {
+		if len(result) == n-1 {
+			break
+		}
 		result = append(result, s[start:m[0]])
 		start = m[1]
 	}

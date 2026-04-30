@@ -1,247 +1,88 @@
 package regexp
 
-import (
-	"github.com/kamichidu/go-regexp-re/internal/ir"
-)
-
-func (re *Regexp) sparseTDFA_PathSelection(mc *matchContext, b []byte, start, end, prio int) {
-	d := re.dfa
-	recap := d.RecapTables()[0]
-	uIndices, uUpdates := d.TagUpdateIndices(), d.TagUpdates()
-
-	// 1. Find the history entry that covers the 'end' position.
-	histIdx := -1
-	byteOffset := 0
-	for i, entry := range mc.history {
-		length := 1
-		if (entry & histWarpMarker) != 0 {
-			length = int((entry & histLengthMask) >> histLengthShift)
-		}
-		if byteOffset+length > end {
-			histIdx = i
-			break
-		}
-		byteOffset += length
-	}
-
-	if histIdx == -1 {
-		return
-	}
-
-	// Initial priority from the state at 'end'.
-	entry := mc.history[histIdx]
-	currPrio := int16(d.MatchPriority(entry & histStateMask))
-	mc.pathHistory[end] = int32(currPrio)
-
-	currPos := end
-	// 2. Trace backward from end to start.
-	// We need to use the transition: State(pos-1) --(byte at pos-1)--> State(pos)
-	for i := histIdx; i >= 0; i-- {
-		if currPos <= start {
-			break
-		}
-
-		entry := mc.history[i]
-		length := 1
-		if (entry & histWarpMarker) != 0 {
-			length = int((entry & histLengthMask) >> histLengthShift)
-		}
-
-		// Calculate how many bytes of this segment are within [start, currPos]
-		segStart := byteOffset
-		segEnd := byteOffset + length
-
-		inSegEnd := currPos
-		if segEnd < inSegEnd {
-			// This should not happen in the first iteration because histIdx covers 'end'
-			// In subsequent iterations, segEnd is always currPos.
-			inSegEnd = segEnd
-		}
-		inSegStart := segStart
-		if inSegStart < start {
-			inSegStart = start
-		}
-
-		inSegLen := inSegEnd - inSegStart
-
-		if (entry & histWarpMarker) != 0 {
-			// Warp jump: Priority remains constant because SWAR is tag-free.
-			for k := 0; k < inSegLen; k++ {
-				currPos--
-				mc.pathHistory[currPos] = int32(currPrio)
-			}
-		} else {
-			// Normal entry: perform priority transition.
-			currPos--
-			if currPos < start {
-				break
-			}
-			byteVal := b[currPos]
-
-			// Source state is in the PREVIOUS entry (mc.history[i-1]).
-			// Wait, what if currPos is in the middle of a warp?
-			// That's handled by the Warp block above.
-			// So here length is 1, and the source state is indeed mc.history[i-1].
-			if i == 0 {
-				break // Should not happen as we checked currPos > start
-			}
-			prevEntry := mc.history[i-1]
-			sidx := prevEntry & histStateMask
-
-			off := (int(sidx) << 8) | int(byteVal)
-			found := false
-			bestInputPrio := int16(32767)
-			if off < len(recap.Transitions) {
-				basePrio := int16(0)
-				if off < len(uIndices) {
-					uIdx := uIndices[off]
-					if int(uIdx) < len(uUpdates) {
-						basePrio = int16(uUpdates[uIdx].BasePriority)
-					}
-				}
-				for _, entry := range recap.Transitions[off] {
-					if int16(entry.NextPriority) == currPrio {
-						p := entry.InputPriority + basePrio
-						if p < bestInputPrio {
-							bestInputPrio = p
-							found = true
-						}
-					}
-				}
-			}
-			if found {
-				currPrio = bestInputPrio
-			}
-			mc.pathHistory[currPos] = int32(currPrio)
-		}
-
-		// Update byteOffset for the segment BEFORE this one.
-		if i > 0 {
-			prevEntry := mc.history[i-1]
-			prevLen := 1
-			if (prevEntry & histWarpMarker) != 0 {
-				prevLen = int((prevEntry & histLengthMask) >> histLengthShift)
-			}
-			byteOffset -= prevLen
-		}
-	}
+func (re *Regexp) sparseTDFA_PathSelection(mc *matchContext, b []byte, start, end, finalPrio int) {
 }
 
-func (re *Regexp) sparseTDFA_Recap(mc *matchContext, b []byte, start, end, prio int, regs []int) {
+func (re *Regexp) sparseTDFA_Recap(mc *matchContext, b []byte, start, end, finalPrio int, regs []int) {
 	d := re.dfa
-	recap := d.RecapTables()[0]
-	uIndices, uUpdates := d.TagUpdateIndices(), d.TagUpdates()
+	history := mc.history
+	recapTables := d.RecapTables()
+	if len(recapTables) == 0 || len(history) == 0 {
+		return
+	}
+	recap := recapTables[0]
 
-	re.applyEntryTags(mc, regs, d.StartUpdates(), mc.pathHistory[start], start)
+	currentPrio := int16(0)
+	curr := start
 
-	// 1. Find the starting history entry
-	histIdx := 0
-	byteOffset := 0
-	for i, entry := range mc.history {
-		length := 1
-		if (entry & histWarpMarker) != 0 {
-			length = int((entry & histLengthMask) >> histLengthShift)
-		}
-		if byteOffset+length > start {
-			histIdx = i
+	// Apply initial tags at match start
+	for _, u := range d.StartUpdates() {
+		if int16(u.NextPriority) == currentPrio {
+			applyTags(regs, u.Tags, curr, 0)
 			break
 		}
-		byteOffset += length
 	}
 
-	currPos := start
-	for i := histIdx; i < len(mc.history); i++ {
-		entry := mc.history[i]
-		if currPos >= end {
-			break
+	for i, h := range history {
+		sidx := h & histStateMask
+		count := 1
+		if (h & histWarpMarker) != 0 {
+			count = int((h & histLengthMask) >> histLengthShift)
 		}
 
-		length := 1
-		if (entry & histWarpMarker) != 0 {
-			length = int((entry & histLengthMask) >> histLengthShift)
-		}
-
-		if (entry & histWarpMarker) != 0 {
-			// Warp jump: No tag updates in this segment.
-			// The first warp might be partially covered if it starts before 'start'
-			warpStart := byteOffset
-			warpEnd := byteOffset + length
-
-			actualLength := length
-			if warpStart < start {
-				actualLength = warpEnd - start
+		for j := 0; j < count; j++ {
+			if curr >= end {
+				break
 			}
-			if currPos+actualLength > end {
-				actualLength = end - currPos
+			byteVal := byte(0)
+			if curr < len(b) {
+				byteVal = b[curr]
 			}
-
-			currPos += actualLength
-			byteOffset += length
-			continue
-		}
-
-		// Normal entry: process tags
-		sidx := entry & histStateMask
-		pathID := mc.pathHistory[currPos]
-		byteVal := b[currPos]
-		off := (int(sidx) << 8) | int(byteVal)
-
-		step := 1
-		rawNext := d.Transitions()[off]
-		if byteVal >= 0x80 && rawNext != ir.InvalidState && (rawNext&ir.WarpStateFlag) != 0 {
-			step = 1 + ir.GetTrailingByteCount(byteVal)
-		}
-
-		if off < len(recap.Transitions) {
-			basePrio := int16(0)
-			if off < len(uIndices) {
-				uIdx := uIndices[off]
-				if int(uIdx) < len(uUpdates) {
-					basePrio = int16(uUpdates[uIdx].BasePriority)
-				}
-			}
-
-			nextPathID := int32(0)
-			if currPos+step <= end {
-				nextPathID = mc.pathHistory[currPos+step]
-			}
-
-			for _, entry := range recap.Transitions[off] {
-				if entry.InputPriority == int16(pathID)-basePrio && int32(entry.NextPriority) == nextPathID {
-					re.applyRawTags(mc, regs, entry.PreTags, currPos)
-					re.applyRawTags(mc, regs, entry.PostTags, currPos+step)
+			off := (int(sidx) << 8) | int(byteVal)
+			entries := recap.Transitions[off]
+			found := false
+			for _, e := range entries {
+				if e.InputPriority == currentPrio {
+					applyTags(regs, e.PreTags, curr, 0)
+					applyTags(regs, e.PostTags, curr+1, 0)
+					currentPrio = e.NextPriority
+					found = true
 					break
 				}
 			}
+			if !found {
+				break
+			}
+			curr++
 		}
-		currPos += step
-		byteOffset += length
+		if curr >= end || i == len(history)-1 {
+			break
+		}
 	}
+
+	// Final mapping of indices to absolute coordinates exactly once
+	absBase := mc.absBase
+	for i := range regs {
+		if regs[i] >= 0 {
+			regs[i] += absBase
+		}
+	}
+	// regs[0], regs[1] must be set correctly using absolute coordinates
+	regs[0], regs[1] = start+absBase, end+absBase
 }
 
-func (re *Regexp) applyRawTags(mc *matchContext, regs []int, tags uint64, pos int) {
+func applyTags(regs []int, tags uint64, pos int, absBase int) {
 	if tags == 0 {
 		return
 	}
-	for bit := 2; bit < 64; bit++ {
-		if (tags & (1 << uint(bit))) != 0 {
-			if bit < len(regs) {
-				if (bit%2 != 0) || regs[bit] == -1 {
-					regs[bit] = pos
-				}
+	for i := uint(0); i < 32; i++ {
+		if (tags & (1 << (2 * i))) != 0 {
+			if regs[2*i] < 0 {
+				regs[2*i] = pos + absBase
 			}
 		}
-	}
-}
-
-func (re *Regexp) applyEntryTags(mc *matchContext, regs []int, updates []ir.PathTagUpdate, pathID int32, pos int) {
-	matchID := pathID
-	if pathID >= ir.SearchRestartPenalty {
-		matchID = pathID % ir.SearchRestartPenalty
-	}
-	for _, u := range updates {
-		if int32(u.NextPriority) == matchID {
-			re.applyRawTags(mc, regs, u.Tags, pos)
+		if (tags & (1 << (2*i + 1))) != 0 {
+			regs[2*i+1] = pos + absBase
 		}
 	}
 }

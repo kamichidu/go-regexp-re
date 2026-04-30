@@ -60,6 +60,10 @@ func (mc *matchContext) prepare(n int, numSubexp int, absBase int) {
 	}
 }
 
+func (mc *matchContext) clearHistory() {
+	mc.history = mc.history[:0]
+}
+
 func (mc *matchContext) appendRaw(sidx uint32) {
 	mc.history = append(mc.history, sidx&histStateMask)
 }
