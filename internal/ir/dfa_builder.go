@@ -17,9 +17,9 @@ type ClosureResult struct {
 }
 
 type dfaStateKey struct {
-	Hash     uint64
-	MatchP   int
-	IsSearch bool
+	hash          uint64
+	matchPriority int
+	isSearch      bool
 }
 
 func NewDFAWithMemoryLimit(ctx context.Context, re *syntax.Regexp, prog *syntax.Prog, maxMemory int, naked bool) (d *DFA, err error) {
@@ -440,8 +440,8 @@ func hashSet(closure []NFAPath, naked bool) uint64 {
 	for _, p := range closure {
 		h = (h ^ uint64(p.ID)) * 1099511628211
 		h = (h ^ uint64(p.NodeID)) * 1099511628211
-		h = (h ^ uint64(p.Priority)) * 1099511628211
 		if !naked {
+			h = (h ^ uint64(p.Priority)) * 1099511628211
 			h = (h ^ uint64(p.Tags)) * 1099511628211
 		}
 		h = (h ^ uint64(p.Anchors)) * 1099511628211
