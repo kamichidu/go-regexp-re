@@ -31,7 +31,9 @@ type AnchorInfo struct {
 	Class        CCWarpInfo // If Anchor is empty, use this SWAR class anchor
 	HasClass     bool
 	Type         AnchorType
-	Distance     int // Estimated distance from the start of the match
+	Distance     int  // Minimum distance from the start of the match
+	IsFixed      bool // True if Distance is the EXACT distance
+	Mandatory    bool // True if this anchor must be present in every match
 	Forward      []Constraint
 	Backward     []Constraint
 	HasBeginText bool // This anchor path is strictly anchored to ^
@@ -49,7 +51,8 @@ func ExtractAnchors(re *syntax.Regexp) []AnchorInfo {
 	if flatRE == nil {
 		return nil
 	}
-	anchors := extractAnchors(flatRE, 0, false, true, false)
+	anchors := extractAnchors(flatRE, 0, true, true, false)
+	// ...
 
 	// Suffix identification
 	totalMin := minLength(re)
@@ -136,8 +139,8 @@ func stripCaptures(re *syntax.Regexp) *syntax.Regexp {
 // extractAnchors identifies mandatory anchors.
 // atStart: the path is currently at the beginning of the regex.
 // hasBegin: the path has already encountered OpBeginText.
-func extractAnchors(re *syntax.Regexp, offset int, inOptional bool, atStart bool, hasBegin bool) []AnchorInfo {
-	if inOptional || re == nil {
+func extractAnchors(re *syntax.Regexp, offset int, mandatory bool, atStart bool, hasBegin bool) []AnchorInfo {
+	if re == nil {
 		return nil
 	}
 
@@ -145,7 +148,7 @@ func extractAnchors(re *syntax.Regexp, offset int, inOptional bool, atStart bool
 
 	switch re.Op {
 	case syntax.OpBeginText:
-		// Do nothing, but flags will be passed down if atStart is true.
+		// Do nothing
 	case syntax.OpLiteral:
 		if re.Flags&syntax.FoldCase == 0 {
 			var buf []byte
@@ -159,6 +162,8 @@ func extractAnchors(re *syntax.Regexp, offset int, inOptional bool, atStart bool
 					Anchor:       buf,
 					Type:         AnchorPivot,
 					Distance:     offset,
+					IsFixed:      true,
+					Mandatory:    mandatory,
 					HasBeginText: hasBegin,
 				})
 			}
@@ -172,6 +177,8 @@ func extractAnchors(re *syntax.Regexp, offset int, inOptional bool, atStart bool
 					Anchor:       b[:n],
 					Type:         AnchorPivot,
 					Distance:     offset,
+					IsFixed:      true,
+					Mandatory:    mandatory,
 					HasBeginText: hasBegin,
 				})
 			} else if info, ok := toCCWarp(re); ok {
@@ -180,32 +187,39 @@ func extractAnchors(re *syntax.Regexp, offset int, inOptional bool, atStart bool
 					HasClass:     true,
 					Type:         AnchorPivot,
 					Distance:     offset,
+					IsFixed:      true,
+					Mandatory:    mandatory,
 					HasBeginText: hasBegin,
 				})
 			}
 		}
 	case syntax.OpRepeat:
 		if re.Min > 0 {
-			anchors = append(anchors, extractAnchors(re.Sub[0], offset, false, atStart, hasBegin)...)
+			anchors = append(anchors, extractAnchors(re.Sub[0], offset, mandatory, atStart, hasBegin)...)
 		}
 	case syntax.OpQuest, syntax.OpStar:
-		// Optional
+		anchors = append(anchors, extractAnchors(re.Sub[0], offset, false, atStart, hasBegin)...)
 	case syntax.OpPlus:
-		anchors = append(anchors, extractAnchors(re.Sub[0], offset, false, atStart, hasBegin)...)
+		anchors = append(anchors, extractAnchors(re.Sub[0], offset, mandatory, atStart, hasBegin)...)
 	case syntax.OpCapture:
-		anchors = append(anchors, extractAnchors(re.Sub[0], offset, false, atStart, hasBegin)...)
+		anchors = append(anchors, extractAnchors(re.Sub[0], offset, mandatory, atStart, hasBegin)...)
 	case syntax.OpConcat:
 		currentOffset := offset
 		currentAtStart := atStart
 		currentHasBegin := hasBegin
+		currentIsFixed := true
 		for i, sub := range re.Sub {
-			subAnchors := extractAnchors(sub, currentOffset, false, currentAtStart, currentHasBegin)
+			subAnchors := extractAnchors(sub, currentOffset, mandatory, currentAtStart, currentHasBegin)
 			if i == 0 && offset == 0 {
 				for j := range subAnchors {
 					if subAnchors[j].Distance == 0 {
 						subAnchors[j].Type = AnchorPrefix
 					}
 				}
+			}
+			// Propagate currentIsFixed to subAnchors
+			for j := range subAnchors {
+				subAnchors[j].IsFixed = subAnchors[j].IsFixed && currentIsFixed
 			}
 			anchors = append(anchors, subAnchors...)
 
@@ -214,6 +228,11 @@ func extractAnchors(re *syntax.Regexp, offset int, inOptional bool, atStart bool
 			}
 
 			d := minLength(sub)
+			maxD := maxLength(sub)
+			if d != maxD {
+				currentIsFixed = false
+			}
+
 			if d > 0 {
 				currentAtStart = false
 			}
@@ -230,6 +249,64 @@ func extractAnchors(re *syntax.Regexp, offset int, inOptional bool, atStart bool
 	}
 
 	return anchors
+}
+
+func maxLength(re *syntax.Regexp) int {
+	if re == nil {
+		return 0
+	}
+	switch re.Op {
+	case syntax.OpEmptyMatch, syntax.OpBeginLine, syntax.OpEndLine, syntax.OpBeginText, syntax.OpEndText, syntax.OpWordBoundary, syntax.OpNoWordBoundary:
+		return 0
+	case syntax.OpLiteral:
+		n := 0
+		for _, r := range re.Rune {
+			n += utf8.RuneLen(r)
+		}
+		return n
+	case syntax.OpCharClass:
+		return 1
+	case syntax.OpAnyChar, syntax.OpAnyCharNotNL:
+		return 1
+	case syntax.OpCapture:
+		return maxLength(re.Sub[0])
+	case syntax.OpConcat:
+		total := 0
+		for _, sub := range re.Sub {
+			d := maxLength(sub)
+			if d < 0 {
+				return -1
+			}
+			total += d
+		}
+		return total
+	case syntax.OpQuest:
+		return maxLength(re.Sub[0])
+	case syntax.OpStar, syntax.OpPlus:
+		return -1 // Infinite
+	case syntax.OpRepeat:
+		if re.Max == -1 {
+			return -1
+		}
+		d := maxLength(re.Sub[0])
+		if d < 0 {
+			return -1
+		}
+		return d * re.Max
+	case syntax.OpAlternate:
+		max := 0
+		for _, sub := range re.Sub {
+			d := maxLength(sub)
+			if d < 0 {
+				return -1
+			}
+			if d > max {
+				max = d
+			}
+		}
+		return max
+	}
+	return -1
 }
 
 func minLength(re *syntax.Regexp) int {
@@ -454,10 +531,67 @@ func SelectBestAnchors(anchors []AnchorInfo) []AnchorInfo {
 	if len(anchors) == 0 {
 		return nil
 	}
-	// Sort by score or filter duplicates.
-	// For now, return up to 4 good anchors.
-	// Duplicate anchors with different distances are fine.
-	return anchors
+
+	// Score each anchor and pick the best one.
+	// We MUST only pick Mandatory anchors for exclusive search.
+	var best AnchorInfo
+	maxScore := -1
+
+	for _, a := range anchors {
+		if !a.Mandatory {
+			continue
+		}
+		s := a.Score()
+		if s > maxScore {
+			maxScore = s
+			best = a
+		}
+	}
+
+	if maxScore <= 0 {
+		return nil
+	}
+	return []AnchorInfo{best}
+}
+
+func (a *AnchorInfo) Score() int {
+	// Mandatory anchors are the only ones we can safely use for exclusive skip.
+	if !a.Mandatory {
+		return 0
+	}
+
+	score := 0
+	if !a.HasClass {
+		// Literal anchor: length is key
+		score = len(a.Anchor) * 10
+	} else {
+		// Class anchor: specificity is key
+		switch a.Class.Kernel {
+		case CCWarpEqual:
+			score = 8
+		case CCWarpSingleRange:
+			score = 5
+		case CCWarpAnyChar, CCWarpAnyExceptNL:
+			score = 1
+		}
+	}
+
+	// Prefer anchors closer to the start of the match to reduce false starts
+	if a.Distance == 0 {
+		score += 5
+	}
+
+	// FIXED distance anchors are much more valuable as they allow exact restartBase skipping
+	if a.IsFixed {
+		score += 50
+	}
+
+	// Anchors strictly tied to text boundaries are very strong
+	if a.HasBeginText || a.HasEndText {
+		score += 20
+	}
+
+	return score
 }
 
 func (a *AnchorInfo) Validate(b []byte, p int) (int, bool) {

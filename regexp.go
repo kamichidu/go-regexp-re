@@ -30,6 +30,7 @@ type Regexp struct {
 	uPrioDeltas    []int32
 	searchWarp     ir.CCWarpInfo
 	mapAnchors     []ir.AnchorInfo
+	primaryAnchor  *ir.AnchorInfo
 }
 
 type CompileOptions struct {
@@ -134,6 +135,9 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 			res.mapAnchors = append(res.mapAnchors, anchors[i])
 		}
 		res.mapAnchors = ir.SelectBestAnchors(res.mapAnchors)
+		if len(res.mapAnchors) > 0 {
+			res.primaryAnchor = &res.mapAnchors[0]
+		}
 	}
 
 	if opts.forceStrategy != strategyNone {

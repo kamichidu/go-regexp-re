@@ -172,6 +172,9 @@ func BenchmarkCCWarp(b *testing.B) {
 		{"Bitmask", `[a-zA-Z0-9_]+`, strings.Repeat("Word1234", 2048)},
 		// 10. Negated Bitmask
 		{"NotBitmask", `[^a-z]+`, strings.Repeat("12345678", 2048)},
+		// 11. MAP Pivot/Suffix
+		{"MAP_Suffix", `.{100}target`, strings.Repeat("a", 1000) + "target" + strings.Repeat("a", 1000)},
+		{"MAP_Class", `.{100}[0-9]`, strings.Repeat("a", 1000) + "5" + strings.Repeat("a", 1000)},
 	}
 
 	for _, c := range cases {

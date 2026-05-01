@@ -96,9 +96,49 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 		i := restartBase
 		state, prio := matchState, 0
 
-		// Pass 1.1: SearchWarp (MAP-like skip to candidate)
+		// Pass 1.1: MAP (Multi-Point Anchor) Skip
 		if !anchorStart && bestStart < 0 && (matchState&ir.AcceptingStateFlag) == 0 && i < numBytes {
-			if len(re.prefix) > 0 {
+			if re.primaryAnchor != nil {
+				anchor := re.primaryAnchor
+				var pos int = -1
+				if !anchor.HasClass {
+					pos = bytes.Index(b[i:], anchor.Anchor)
+				} else {
+					if anchor.Class.IndexAny != "" {
+						pos = bytes.IndexAny(b[i:], anchor.Class.IndexAny)
+					} else {
+						pos = ir.IndexClass(anchor.Class, b[i:])
+					}
+				}
+				if pos < 0 {
+					break
+				}
+
+				if anchor.IsFixed {
+					candidateStart := i + pos - anchor.Distance
+					if candidateStart < i {
+						i = i + pos + 1
+						restartBase = i - 1
+						continue
+					}
+					if candidateStart >= numBytes {
+						break
+					}
+
+					// Pass 0: Pre-validation
+					if _, ok := anchor.Validate(b, i+pos); !ok {
+						i = i + pos + 1
+						restartBase = i - 1
+						continue
+					}
+
+					restartBase = candidateStart
+					i = restartBase
+				} else {
+					// Variable distance anchor: we must start from restartBase
+					// but we know a match is only possible if this anchor exists.
+				}
+			} else if len(re.prefix) > 0 {
 				pos := bytes.Index(b[i:], re.prefix)
 				if pos < 0 {
 					break
@@ -240,9 +280,49 @@ func fastMatchExecLoop(re *Regexp, in *ir.Input) (int, int, int) {
 		i := restartBase
 		state := matchState
 
-		// 1. SearchWarp (MAP-like Skip)
+		// 1. MAP (Multi-Point Anchor) Skip
 		if !anchorStart && bestStart < 0 && (matchState&ir.AcceptingStateFlag) == 0 && i < numBytes {
-			if len(re.prefix) > 0 {
+			if re.primaryAnchor != nil {
+				anchor := re.primaryAnchor
+				var pos int = -1
+				if !anchor.HasClass {
+					pos = bytes.Index(b[i:], anchor.Anchor)
+				} else {
+					if anchor.Class.IndexAny != "" {
+						pos = bytes.IndexAny(b[i:], anchor.Class.IndexAny)
+					} else {
+						pos = ir.IndexClass(anchor.Class, b[i:])
+					}
+				}
+				if pos < 0 {
+					break
+				}
+
+				if anchor.IsFixed {
+					candidateStart := i + pos - anchor.Distance
+					if candidateStart < i {
+						i = i + pos + 1
+						restartBase = i - 1
+						continue
+					}
+					if candidateStart >= numBytes {
+						break
+					}
+
+					// Pass 0: Pre-validation
+					if _, ok := anchor.Validate(b, i+pos); !ok {
+						i = i + pos + 1
+						restartBase = i - 1
+						continue
+					}
+
+					restartBase = candidateStart
+					i = restartBase
+				} else {
+					// Variable distance anchor: we must start from restartBase
+					// but we know a match is only possible if this anchor exists.
+				}
+			} else if len(re.prefix) > 0 {
 				pos := bytes.Index(b[i:], re.prefix)
 				if pos < 0 {
 					break
