@@ -1,11 +1,11 @@
 = Unsupported Regular Expression Patterns
 :toc: left
 
-This document details the regular expression patterns that `go-regexp-re` currently rejects at compile time. Due to the deterministic nature of the DFA engine and the constraints of the 3-Pass TDFA submatch extraction architecture, certain ambiguous or non-deterministic structures cannot be supported while guaranteeing $O(n)$ time complexity.
+This document details the regular expression patterns that `go-regexp-re` currently rejects at compile time. Due to the deterministic nature of the DFA engine and the constraints of the 3-Pass TDFA submatch extraction architecture, certain ambiguous or non-deterministic structures cannot be supported while **preserving DFA determinacy** and guaranteeing $O(n)$ time complexity.
 
 == 1. Structural Rejection (Compile-time Errors)
 
-When the engine encounters an unsupported pattern, it returns a `regexp.UnsupportedError`.
+When the engine encounters an unsupported pattern, it returns a `regexp.UnsupportedError`. Rejection occurs when a pattern would lead to non-deterministic state transitions or ambiguous tag updates that cannot be resolved in constant time.
 
 === 1.1 Epsilon Loops
 Patterns that can match an empty string in an infinite loop are rejected. These are problematic because they create non-deterministic paths where the engine cannot decide when to exit the loop without consuming input.
@@ -33,7 +33,17 @@ The DFA transition table is subject to a memory limit (default 64MiB). If a patt
 * **Cause**: Highly complex repetitions or large sets of overlapping character classes.
 * **Error**: `regexp: pattern too large or ambiguous (states: X, max: Y)`
 
-== 3. Feature Limitations (Standard Library Compatibility)
+== 3. Byte-Level Semantics (Invalid UTF-8)
+
+To maintain maximum throughput and avoid the overhead of rune decoding, the engine operates on physical bytes.
+
+=== 3.1 No \uFFFD Replacement
+Unlike the Go standard library, which may treat invalid UTF-8 sequences as the replacement character `\uFFFD`, `go-regexp-re` matches invalid bytes as raw, single-byte units.
+
+* **Behavior**: An invalid byte (e.g., `0xFF`) is matched literally by `.` or character classes, but it will NOT match a literal `\uFFFD` unless the input physically contains the UTF-8 encoding of that rune.
+* **Reasoning**: Strictly maintaining byte-level determinacy without runtime decoding.
+
+== 4. Feature Limitations (Standard Library Compatibility)
 
 The following features are strictly excluded to maintain $O(n)$ performance guarantees:
 

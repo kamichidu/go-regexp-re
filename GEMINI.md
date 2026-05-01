@@ -213,6 +213,7 @@ To prevent file bloat and maintain long-term maintainability, the codebase MUST 
 ### 6.2 IR & Compiler (`internal/ir/`)
 - **`dfa.go`**: core `DFA` structure, StateID layout constants, and basic getter methods.
 - **`dfa_builder.go`**: The DFA compiler, including subset construction, epsilon closure with anchor verification, and SWAR kernel detection.
+- **`validate.go`**: Pattern compatibility analysis and structural rejection logic (Epsilon loops, ambiguous captures).
 - **`anchor.go`**: Multi-Point Anchor extraction, constraint folding, and Pass 0 discovery kernels.
 - **`recap.go`**: Definitions for tag-carrying transition tables (`GroupRecapTable`, `RecapEntry`).
 - **`storage.go`**: Abstractions and implementations for NFA path set storage (`NFAPathStorage`).

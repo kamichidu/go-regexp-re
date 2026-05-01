@@ -38,9 +38,11 @@ We maintain parity in how invalid or unsupported patterns are handled.
 To maintain $O(n)$ complexity and deterministic transitions, the following features are explicitly unsupported or differ from the standard library.
 
 === 1. Unsupported Syntax
-These features are rejected at compile-time with `UnsupportedError`:
+Certain patterns are rejected at compile-time with `UnsupportedError` due to DFA/TDFA architecture constraints. For a complete list of unsupported patterns and examples, refer to `docs/unsupported-patterns.adoc`.
+
+Key examples:
 - **Backreferences**: Inherently non-DFA compatible.
-- **Empty Alternatives in Captures**: e.g., `(|a)`, `(a|)`, `(a||b)`. These cause non-deterministic tag updates that the 3-Pass TDFA cannot reliably resolve.
+- **Empty Alternatives in Captures**: e.g., `(|a)`, `(a|)`, `(a||b)`.
 - **Epsilon Cycles**: Patterns that match an empty string in a loop (e.g., `(|a)*`).
 
 === 2. ASCII-Only Word Boundaries
