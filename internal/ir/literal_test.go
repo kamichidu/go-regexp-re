@@ -42,11 +42,11 @@ func TestAnalyzeLiteralPattern(t *testing.T) {
 			SearchEnd:   len(tt.input),
 		}
 
-		if got := m.Match(in); got != tt.match {
+		if got := m.Match(&in); got != tt.match {
 			t.Errorf("Match(%q, %q) = %v; want %v", tt.pattern, tt.input, got, tt.match)
 		}
 
-		gotIndices := m.FindSubmatchIndex(in)
+		gotIndices := m.FindSubmatchIndex(&in)
 		if !reflect.DeepEqual(gotIndices, tt.indices) {
 			t.Errorf("FindSubmatchIndex(%q, %q) = %v; want %v", tt.pattern, tt.input, gotIndices, tt.indices)
 		}

@@ -41,14 +41,7 @@ func (re *Regexp) findIndexAt(b []byte, pos int, totalBytes int, originalB []byt
 	var start, end, prio int
 	switch re.strategy {
 	case strategyLiteral:
-		if !re.literalMatcher.Match(in) {
-			return -1, -1, 0
-		}
-		// Match found. For LiteralMatcher, we need the start/end.
-		// Since we want to avoid allocation, we use a specialized call.
-		// But wait, LiteralMatcher.Match doesn't return boundaries.
-		// Let's add a non-allocating FindIndex method.
-		start, end = re.literalMatcher.FindIndex(in)
+		start, end = re.literalMatcher.FindIndex(&in)
 		prio = 0
 	default:
 		start, end, prio = re.match(&in)
@@ -75,7 +68,7 @@ func (re *Regexp) findSubmatchIndexAt(b []byte, pos int, totalBytes int, origina
 		defer matchContextPool.Put(mc)
 		mc.prepare(len(b), re.numSubexp, pos)
 
-		if !re.literalMatcher.FindSubmatchIndexInto(in, mc.regs) {
+		if !re.literalMatcher.FindSubmatchIndexInto(&in, mc.regs) {
 			return nil
 		}
 		// Adjust to absolute

@@ -25,7 +25,7 @@ type LiteralMatcher struct {
 }
 
 // Match reports whether the input matches the literal pattern.
-func (m *LiteralMatcher) Match(in Input) bool {
+func (m *LiteralMatcher) Match(in *Input) bool {
 	switch m.Strategy {
 	case LiteralStrategyExact:
 		return in.AbsPos == 0 && len(in.B) == in.TotalBytes && bytes.Equal(in.B, m.Literal)
@@ -40,7 +40,7 @@ func (m *LiteralMatcher) Match(in Input) bool {
 }
 
 // FindIndex returns the match boundaries [start, end] for the literal pattern without allocation.
-func (m *LiteralMatcher) FindIndex(in Input) (int, int) {
+func (m *LiteralMatcher) FindIndex(in *Input) (int, int) {
 	switch m.Strategy {
 	case LiteralStrategyExact:
 		if in.AbsPos == 0 && len(in.B) == in.TotalBytes && bytes.Equal(in.B, m.Literal) {
@@ -63,7 +63,7 @@ func (m *LiteralMatcher) FindIndex(in Input) (int, int) {
 }
 
 // FindSubmatchIndexInto populates regs with the submatch indices for the literal pattern.
-func (m *LiteralMatcher) FindSubmatchIndexInto(in Input, regs []int) bool {
+func (m *LiteralMatcher) FindSubmatchIndexInto(in *Input, regs []int) bool {
 	var start int
 	var matched bool
 
@@ -105,7 +105,7 @@ func (m *LiteralMatcher) FindSubmatchIndexInto(in Input, regs []int) bool {
 }
 
 // FindSubmatchIndex returns the submatch indices for the literal pattern.
-func (m *LiteralMatcher) FindSubmatchIndex(in Input) []int {
+func (m *LiteralMatcher) FindSubmatchIndex(in *Input) []int {
 	res := make([]int, len(m.CapTemplate))
 	for i := range res {
 		res[i] = -1
