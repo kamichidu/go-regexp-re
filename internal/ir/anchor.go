@@ -582,6 +582,14 @@ func ValidateFixed(info CCWarpInfo, b []byte) bool {
 func Warp(info CCWarpInfo, b []byte) int {
 	i := 0
 	switch info.Kernel {
+	case CCWarpAnyChar:
+		return len(b)
+	case CCWarpAnyExceptNL:
+		pos := bytes.IndexByte(b, '\n')
+		if pos < 0 {
+			return len(b)
+		}
+		return pos
 	case CCWarpEqual:
 		target := byte(info.V0)
 		target64 := splat(uint64(target))
@@ -618,20 +626,17 @@ func Warp(info CCWarpInfo, b []byte) int {
 			}
 			i++
 		}
-	case CCWarpAnyChar:
-		for i+8 <= len(b) {
-			v := binary.LittleEndian.Uint64(b[i:])
-			if (v & 0x8080808080808080) != 0 {
-				break
-			}
-			i += 8
-		}
-		for i < len(b) && b[i] < 0x80 {
-			i++
-		}
-	case CCWarpAnyExceptNL:
+	case CCWarpEqualSet:
 		for i < len(b) {
-			if b[i] == '\n' || b[i] >= 0x80 {
+			target := b[i]
+			found := false
+			for _, v := range info.Extra {
+				if byte(v) == target {
+					found = true
+					break
+				}
+			}
+			if !found {
 				break
 			}
 			i++
@@ -643,6 +648,19 @@ func Warp(info CCWarpInfo, b []byte) int {
 func IndexClass(info CCWarpInfo, b []byte) int {
 	i := 0
 	switch info.Kernel {
+	case CCWarpAnyChar:
+		if len(b) > 0 {
+			return 0
+		}
+		return -1
+	case CCWarpAnyExceptNL:
+		for i < len(b) {
+			if b[i] != '\n' {
+				return i
+			}
+			i++
+		}
+		return -1
 	case CCWarpEqual:
 		return bytes.IndexByte(b, byte(info.V0))
 	case CCWarpSingleRange:
@@ -663,26 +681,6 @@ func IndexClass(info CCWarpInfo, b []byte) int {
 			if b[i] >= low && b[i] <= high {
 				return i
 			}
-		}
-	case CCWarpAnyChar:
-		for i+8 <= len(b) {
-			v := binary.LittleEndian.Uint64(b[i:])
-			if (^v & 0x8080808080808080) != 0 {
-				break
-			}
-			i += 8
-		}
-		for ; i < len(b); i++ {
-			if b[i] < 0x80 {
-				return i
-			}
-		}
-	case CCWarpAnyExceptNL:
-		for i < len(b) {
-			if b[i] < 0x80 && b[i] != '\n' {
-				return i
-			}
-			i++
 		}
 	case CCWarpNotEqual:
 		target := byte(info.V0)

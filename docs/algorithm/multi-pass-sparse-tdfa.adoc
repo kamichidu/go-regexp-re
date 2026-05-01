@@ -14,19 +14,26 @@ The engine selects the most efficient execution path based on pattern complexity
 *   **Mechanism**: Uses SIMD-accelerated standard library functions (`bytes.Index`, `bytes.IndexByte`) or custom **SWAR (SIMD Within A Register)** character class filters.
 *   **Outcome**: Jumps directly to a potential match candidate position, bypassing the DFA execution for "noise" bytes.
 
-=== Pass 1: Naked Discovery (Fast Forward Scan)
-*   **Objective**: Determine the exact match boundaries `[start, end]` with deterministic $O(n)$ precision.
-*   **Mechanism**: Uses a **Naked Search DFA** (using `SearchState`).
-    *   **No History Recording**: To maximize throughput and CPU cache efficiency, this pass does **not** record any execution history.
-    *   **Greedy Finality**: The scan continues past initial accepting states until an unbeatable match (`IsBestMatch`) is reached or no further transitions are possible.
-*   **Outcome**: Accurate match boundaries `[start, end]` and the final winning priority.
+=== Pass 1: Boundary Discovery (Searching DFA)
+*   **Objective**: Determine the exact match end position and the winning priority in $O(n)$.
+*   **Mechanism**: Uses a **Safe Searching DFA** (implemented in `internal/ir/dfa_builder.go`).
+    *   **Construction**: The start NFA node is merged ONLY into a dedicated `SearchState`. This prevents the state explosion found in traditional searching DFAs while providing a high-speed search entry point.
+    *   **Deterministic Discovery**: The engine identifies the `matchEnd` and the winning priority in a single forward pass.
+*   **Outcome**: Accurate match end and the final winning priority.
+
+=== Pass 1.5: Leftmost Start Discovery
+*   **Objective**: Resolve the exact leftmost match start position corresponding to the identified end.
+*   **Mechanism**: Since searching DFAs naturally conflate start positions, the engine performs a targeted manual scan.
+    *   **Candidate Search**: Uses MAP (Pass 0) or SIMD skips to find potential start candidates.
+    *   **Anchored Validation**: Performs an anchored match from each candidate until it reaches the `targetEnd` with the correct `targetPrio`.
+*   **Outcome**: The exact `[start, end]` boundaries for the winning match.
 
 === Pass 2: Anchored Recording (Precise Forward Scan)
 *   **Objective**: Generate a clean, noise-free execution history for the winning NFA path.
-*   **Mechanism**: Re-runs the DFA **only over the match range `[start, end]`** identified in Pass 1.
-    *   **Strictly Anchored**: Uses `MatchState` (fixed start) to ensure the scan starts exactly at `start`.
+*   **Mechanism**: Re-runs an **Anchored DFA** strictly over the identified match range `[start, end]`.
+    *   **On-Demand Initialization**: Memory for history is prepared **only for the match range** at this stage, keeping the `prepare` cost $O(1)$ relative to total input length.
     *   **History Recording**: Records state transitions into a compressed `history []uint32` using **Hybrid RLE History** (see xref:hybrid-rle-history.adoc[Hybrid RLE History]).
-*   **Outcome**: A clean history buffer containing only the transitions that contributed to the winning match, free from search-restart pollution.
+*   **Outcome**: A clean history buffer containing only the transitions that contributed to the winning match.
 
 === Pass 3: Path Identity Selection (Backward Trace)
 *   **Objective**: Uniquely identify the winning NFA path by tracing priorities backward.

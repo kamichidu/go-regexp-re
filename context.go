@@ -71,9 +71,12 @@ func (mc *matchContext) clearHistory() {
 
 func (mc *matchContext) resetForRecording(start, end int) {
 	mc.history = mc.history[:0]
-	// pathHistory needs to cover [start, end]
-	if end+1 > len(mc.pathHistory) {
-		mc.pathHistory = make([]int32, end+1)
+	// pathHistory needs to cover [0, match_length] where match_length = end - start.
+	// But current implementation uses absolute indices for pathHistory.
+	// Let's clear only the necessary portion.
+	needed := end + 1
+	if needed > len(mc.pathHistory) {
+		mc.pathHistory = make([]int32, needed)
 	}
 	for i := start; i <= end; i++ {
 		mc.pathHistory[i] = -1

@@ -135,7 +135,7 @@ func (re *Regexp) applyRawTags(regs []int, tags uint64, pos int) {
 				regs[bit] = pos
 			}
 		}
-		tags &= ^(uint64(1) << uint(bit))
+		tags &= tags - 1
 	}
 }
 
