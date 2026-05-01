@@ -22,10 +22,11 @@ The match boundaries `[start, end]` (indices 0 and 1) MUST strictly match the st
 - **UTF-8 Boundaries**: Must handle multi-byte characters correctly (refer to `docs/algorithm/multibyte-warp-optimization.adoc`).
 
 === Tier 2: Submatch Boundary Precision (Best Effort)
-For internal capturing groups (indices 2+), the engine aims for standard parity but acknowledges limitations in the 3-Pass TDFA architecture.
+For internal capturing groups (indices 2+), the engine aims for standard parity but acknowledges limitations in the Multi-Pass Sparse TDFA architecture.
+
 
 - **Standard Case**: Patterns with deterministic boundaries (e.g., `a(b)c`) MUST match exactly.
-- **Ambiguous Case**: Patterns where submatch boundaries depend on lookahead or complex priority arbitration (e.g., `a*(a)`, `(a|ab)c`) may be treated as a **SKIP (Known Limitation)** if the 3-Pass TDFA produces a slightly different boundary that still spans the correct overall match.
+- **Ambiguous Case**: Patterns where submatch boundaries depend on lookahead or complex priority arbitration (e.g., `a*(a)`, `(a|ab)c`) may be treated as a **SKIP (Known Limitation)** if the Multi-Pass Sparse TDFA produces a slightly different boundary that still spans the correct overall match.
 
 === Tier 3: Error Compatibility
 We maintain parity in how invalid or unsupported patterns are handled.
@@ -33,23 +34,51 @@ We maintain parity in how invalid or unsupported patterns are handled.
 - **Syntax Errors**: If a pattern is invalid in standard Go (e.g., mismatched parens), the engine MUST also return a syntax error.
 - **Engine Limitations**: If a pattern uses features that violate the DFA/TDFA architecture (e.g., backreferences, epsilon loops), the engine MUST return a `regexp.UnsupportedError`. This is treated as a **SKIP** in compatibility reports to indicate an acknowledged architectural boundary.
 
-== Acknowledged Architectural Limitations
+== Unsupported Patterns & Structural Rejection
 
-To maintain $O(n)$ complexity and deterministic transitions, the following features are explicitly unsupported or differ from the standard library.
+Due to the deterministic nature of the DFA engine and the constraints of the Multi-Pass Sparse TDFA submatch extraction architecture, certain ambiguous or non-deterministic structures cannot be supported while **preserving DFA determinacy** and guaranteeing $O(n)$ time complexity.
 
-=== 1. Unsupported Syntax
-Certain patterns are rejected at compile-time with `UnsupportedError` due to DFA/TDFA architecture constraints. For a complete list of unsupported patterns and examples, refer to `docs/unsupported-patterns.adoc`.
+When the engine encounters an unsupported pattern, it returns a `regexp.UnsupportedError`. Rejection occurs when a pattern would lead to non-deterministic state transitions or ambiguous tag updates that cannot be resolved in constant time.
 
-Key examples:
-- **Backreferences**: Inherently non-DFA compatible.
-- **Empty Alternatives in Captures**: e.g., `(|a)`, `(a|)`, `(a||b)`.
-- **Epsilon Cycles**: Patterns that match an empty string in a loop (e.g., `(|a)*`).
+=== 1. Epsilon Loops
+Patterns that can match an empty string in an infinite loop are rejected. These are problematic because they create non-deterministic paths where the engine cannot decide when to exit the loop without consuming input.
 
-=== 2. ASCII-Only Word Boundaries
+* **Example**: `(|a)*`, `(a?)*`, `(a*)*`
+* **Error**: `regexp: unsupported operator: epsilon loop`
+
+=== 2. Empty Alternatives in Captures
+If a capturing group contains an alternative that matches an empty string, it is rejected. This prevents ambiguity in tag updates where multiple winning paths could exist for the same input byte.
+
+* **Example**: `(a|)`, `(|a)`, `(a||b)`
+* **Error**: `regexp: unsupported operator: empty alternative in capture`
+
+=== 3. Optional Empty Captures
+Capturing groups that are made optional (via `?`) and can match an empty string internally are rejected.
+
+* **Example**: `(a*)?`
+* **Error**: `regexp: unsupported operator: optional empty capture`
+
+=== 4. Backreferences & Lookaround
+These features are strictly excluded as they are inherently incompatible with a DFA-based engine and would break the $O(n)$ performance guarantee.
+
+* **Example**: `(a)\1`, `(?=...)`, `(?!...)`
+
+== Architectural Limitations & Behavioral Differences
+
+=== 1. ASCII-Only Word Boundaries
 In alignment with the Go standard library, word boundaries (`\b`, `\B`) are defined based on ASCII word characters `[a-zA-Z0-9_]`. Multi-byte UTF-8 characters are treated as non-word characters. This allows the engine to maintain $O(1)$ junction verification without rune decoding while preserving parity with standard `regexp` behavior.
 
-=== 3. Invalid UTF-8 Handling
-The engine treats invalid UTF-8 bytes as single-byte units. While we aim for parity with the standard library's "match every byte" behavior for `.`, subtle differences in internal submatch offsets may occur within invalid sequences.
+=== 2. Byte-Level Semantics (Invalid UTF-8)
+To maintain maximum throughput and avoid the overhead of rune decoding, the engine operates on physical bytes.
+
+* **No \uFFFD Replacement**: Unlike the Go standard library, which may treat invalid UTF-8 sequences as the replacement character `\uFFFD`, `go-regexp-re` matches invalid bytes as raw, single-byte units.
+* **Behavior**: An invalid byte (e.g., `0xFF`) is matched literally by `.` or character classes, but it will NOT match a literal `\uFFFD` unless the input physically contains the UTF-8 encoding of that rune.
+
+=== 3. State Explosion Protection
+The DFA transition table is subject to a memory limit (default 64MiB). If a pattern is too complex and causes the number of DFA states to exceed the threshold, the engine will fail.
+
+* **Cause**: Highly complex repetitions or large sets of overlapping character classes.
+* **Error**: `regexp: pattern too large or ambiguous (states: X, max: Y)`
 
 == Verification Suites
 

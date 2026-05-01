@@ -1,6 +1,7 @@
 = Multi-byte Warp Optimization & State Explosion Protection
+:sectnums:
 
-This document describes the design and implementation of two synergistic optimizations: the **Multi-byte Warp** for $O(1)$ character throughput, and **Priority-based Uniquing** for state explosion protection.
+This document describes the design and implementation of two synergistic optimizations: the **Multi-byte Warp** for $O(1)$ character throughput, and **Naked State Identity** for state explosion protection.
 
 == 1. Objective
 
@@ -28,20 +29,19 @@ The total length $L$ of a UTF-8 character can be determined from its first byte 
 
 The execution engine uses a robust `ir.GetTrailingByteCount(byteVal)` which employs range checks to correctly identify the skip distance $N$ and avoid over-skipping on invalid UTF-8 sequences.
 
-=== 2.2 Execution Engine Logic (`matchExecLoop` / `submatchExecLoop`)
+=== 2.2 Execution Engine Logic (`fastMatchExecLoop` / `extendedMatchExecLoop`)
 
-When the engine encounters a Lead Byte with `WarpStateFlag` (Bit 23) set in the transition table:
+When the engine encounters a Lead Byte with `WarpStateFlag` (Bit 21) set in the transition table:
 
 [source,go]
 ----
-// Logic inside DFA execution loop
+// Logic inside DFA execution loop (simplified)
 if (rawNext & ir.WarpStateFlag) != 0 {
     skip := ir.GetTrailingByteCount(byteVal)
 
-    // For submatch extraction, we fill the history for intermediate bytes
-    for j := 1; j <= skip; j++ {
-        mc.history[i+j] = state & ir.StateIDMask
-    }
+    // For submatch extraction, we record a Warp Entry in history
+    mc.appendWarp(stateID, skip)
+
     i += 1 + skip
 }
 ----
@@ -56,11 +56,11 @@ During DFA construction, rune-based instructions are expanded into a series of b
 2. **Determinism**: The DFA correctly handles overlapping byte prefixes (e.g., "あ" and "い" share the same lead byte `0xE3`).
 3. **Standard Compatibility**: `.` (dot) matches any valid UTF-8 character by following the trie paths.
 
-== 3. State Explosion Protection (Priority Uniquing)
+== 3. State Explosion Protection (Naked State Identity)
 
 State explosion occurs when loop structures create a vast set of NFA paths with diverging priorities.
 
-=== 3.1 Winner-Takes-All Policy
+=== 3.1 Winner-Takes-All Policy (Priority Uniquing)
 
 In `epsilonClosureWithPathTags`, the engine enforces a strict uniquing rule based on the **Leftmost-First** principle:
 
@@ -68,15 +68,20 @@ In `epsilonClosureWithPathTags`, the engine enforces a strict uniquing rule base
 * Any lower-priority path reaching the same NFA state is discarded immediately, as it can never "win" the match.
 * This convergence prevents the creation of thousands of DFA states for simple patterns like `.*` or `a*`.
 
-=== 3.2 isBestMatch Optimization
+=== 3.2 Priority Separation (DFA State Identity)
 
-A match is only finalized (`isBestMatch = true`) if **no other active NFA path** with equal or better priority can still reach a match. This ensures the engine correctly identifies the longest match in greedy repetitions.
+To prevent incorrect match boundary extensions (e.g., `aa|a` matching `aaaa` as `[0 4]`), DFA states MUST include the **MatchPriority** (the highest priority NFA path in the state) in their identity key. This ensures that states with identical NFA IDs but different leftmost-first implications are physically separated.
+
+=== 3.3 isBestMatch Optimization
+
+A match is considered unbeatable (`IsBestMatch = true`) ONLY if it is an accepting state with the highest possible priority and starts at the earliest possible position in the current search window. This ensures the engine correctly identifies the longest match in greedy repetitions.
 
 == 4. Implementation Details
 
-* **WarpStateFlag (Bit 23)**: Marks transitions that cover a full UTF-8 character.
-* **StateIDMask (0x007FFFFF)**: Reserves bits for flags while allowing 8M states.
-* **Minimization Preservation**: The `minimize` function uses bitwise operations to ensure `WarpStateFlag` and `TaggedStateFlag` are carried over to the minimized transition table.
+* **AcceptingStateFlag (Bit 29)**: Embedded in State ID for $O(1)$ match detection in the hot loop.
+* **WarpStateFlag (Bit 21)**: Marks transitions that cover a full UTF-8 character.
+* **StateIDMask (0x1FFFFFFF)**: Reserves bits for flags while allowing 512M states.
+* **Minimization Preservation**: The `minimize` function ensures `WarpStateFlag` is preserved during state merging.
 * **Memory Tracking**: Construction caches (`nfaToDfa`, `closureCache`) are tracked against `MaxMemory` to prevent OOM.
 
 === Ambiguous Dot Junctions

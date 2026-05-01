@@ -59,8 +59,8 @@ This allows address calculation using a simple bit shift: `state << 8 + byte`, e
 === Zero-Cost Junction Verification
 Anchor guard verification is optimized to a single pointer lookup by inspecting the immediate surrounding bytes within the **Absolute Coordinate Context** provided by `ir.Input`:
 
-* **Junction Left**: `(in.AbsPos + i) == 0` implies `BeginText`. Otherwise, `in.B[i-1]` is inspected.
-* **Junction Right**: `(in.AbsPos + i) == in.TotalBytes` implies `EndText`. Otherwise, `in.B[i]` is inspected.
+* **Junction Left**: `(in.AbsPos + i) == 0` implies `BeginText`. Otherwise, `in.OriginalB[in.AbsPos+i-1]` is inspected.
+* **Junction Right**: `(in.AbsPos + i) == in.TotalBytes` implies `EndText`. Otherwise, `in.OriginalB[in.AbsPos+i]` is inspected.
 * **Word Class Shortcut**: `syntax.IsWordChar` is only applied if the byte is `< 0x80`. All multi-byte lead or continuation bytes (`>= 0x80`) are treated as `Non-Word` characters by definition.
 
 This bit-pattern-only analysis ensures that boundary checks remain O(1) and never incur the penalty of UTF-8 decoding or L2/L3 cache misses.

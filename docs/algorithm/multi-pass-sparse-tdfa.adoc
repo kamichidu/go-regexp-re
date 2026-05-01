@@ -1,0 +1,92 @@
+= Multi-Pass Sparse TDFA (Execution Pipeline)
+:sectnums:
+
+== Concept
+
+DFAs are traditionally poor at extracting submatches because the history of which specific NFA path was taken is lost during state merging. To achieve Go-compatible submatch extraction with $O(n)$ time complexity and peak throughput, this engine employs a **Multi-Pass Execution Pipeline** that decouples heuristic skipping, deterministic discovery, and precise extraction.
+
+== The Execution Pipeline
+
+The engine selects the most efficient execution path based on pattern complexity. For patterns requiring submatch extraction (capturing groups), the following 5-pass pipeline is used.
+
+=== Pass 0: Heuristic Warp (SIMD Prefilter)
+*   **Objective**: Rapidly eliminate large segments of the input that cannot possibly contain a match.
+*   **Mechanism**: Uses SIMD-accelerated standard library functions (`bytes.Index`, `bytes.IndexByte`) or custom **SWAR (SIMD Within A Register)** character class filters.
+*   **Outcome**: Jumps directly to a potential match candidate position, bypassing the DFA execution for "noise" bytes.
+
+=== Pass 1: Naked Discovery (Fast Forward Scan)
+*   **Objective**: Determine the exact match boundaries `[start, end]` with deterministic $O(n)$ precision.
+*   **Mechanism**: Uses a **Naked Search DFA** (using `SearchState`).
+    *   **No History Recording**: To maximize throughput and CPU cache efficiency, this pass does **not** record any execution history.
+    *   **Greedy Finality**: The scan continues past initial accepting states until an unbeatable match (`IsBestMatch`) is reached or no further transitions are possible.
+*   **Outcome**: Accurate match boundaries `[start, end]` and the final winning priority.
+
+=== Pass 2: Anchored Recording (Precise Forward Scan)
+*   **Objective**: Generate a clean, noise-free execution history for the winning NFA path.
+*   **Mechanism**: Re-runs the DFA **only over the match range `[start, end]`** identified in Pass 1.
+    *   **Strictly Anchored**: Uses `MatchState` (fixed start) to ensure the scan starts exactly at `start`.
+    *   **History Recording**: Records state transitions into a compressed `history []uint32` using **Hybrid RLE History** (see xref:hybrid-rle-history.adoc[Hybrid RLE History]).
+*   **Outcome**: A clean history buffer containing only the transitions that contributed to the winning match, free from search-restart pollution.
+
+=== Pass 3: Path Identity Selection (Backward Trace)
+*   **Objective**: Uniquely identify the winning NFA path by tracing priorities backward.
+*   **Mechanism**: Performs a backward trace from the `end` position using the `RecapTable`.
+    1.  Initialize `PathID` from the `MatchPriority` of the final state in the history.
+    2.  Work backward to the `start` position by matching `entry.NextPriority` in the `RecapTable`. **To maintain efficiency, the engine utilizes "Warp Jumps" to skip entire RLE-compressed segments in a single step.**
+    3.  Restores previous path identities using **Priority Deltas** stored in the `RecapTable`.
+*   **Outcome**: A sequence of `PathIDs` (recorded in `mc.pathHistory`) uniquely identifying the winning NFA path.
+
+=== Pass 4: Pure Forward Recap (Licking)
+*   **Objective**: Extract capturing group boundaries along the confirmed winning path.
+*   **Mechanism**: Iterates forward from `start` to `end` along the path identified in Pass 3.
+    *   **Warp Jump Preservation**: Skips RLE-compressed Warp Entries in a single step (guaranteed zero tag updates).
+    *   **Delta Tag Application**: Applies **delta tags** from each transition. Later tags on the same path overwrite earlier ones for end boundaries (licking).
+*   **Outcome**: Final submatch indices `regs []int` populated with 100% Go-compatible precision.
+
+== Technical Implementation Details
+
+=== Transition-Resident Delta Tags
+To prevent submatch boundary corruption, tags are never stored within DFA states.
+*   **Delta-Only**: Transitions only store the tags that were newly encountered during that specific byte consumption.
+*   **Priority Delta Propagation**: During the forward scan, the engine tracks priority using `BasePriority` deltas. This prevents absolute priority accumulation from corrupting search restart logic.
+
+=== Priority-Aware Anchor Masking (Mandate)
+To prevent **Anchor Pollution**, DFA subset construction must filter anchor verification requirements by NFA path priority.
+*   **Problem**: In search mode, a DFA state contains both high-priority continuation paths and low-priority search-restart paths. If anchor requirements are blindly merged, a low-priority path could impose a restriction that invalidates a high-priority transition.
+*   **Solution**: Anchor verification flags (`preGuard`) are derived **exclusively from the highest-priority NFA paths** matching a byte. This ensures that continuation paths are never blocked by anchors that only apply to new search restarts.
+
+=== Naked State Identity & State Separation
+*   **State Identity via MatchPriority**: To prevent incorrect match boundary extensions (e.g., `aa|a` matching `aaaa` as `[0 4]`), DFA states include the **MatchPriority** in their identity key. This ensures that states with identical NFA IDs but different leftmost-first implications are physically separated.
+
+=== Memory and Performance Optimizations
+
+*   **State-Resident Acceptance Flag**: To eliminate redundant memory lookups in hot loops, DFA state IDs MUST embed the `AcceptingStateFlag` (Bit 28). This allows the execution loop to identify accepting states via a single bitwise AND operation on the current state variable.
+*   **Tiny Inlineable Verify Functions**: Anchor verification (e.g., `^`, `$`, `\b`) MUST be implemented as tiny, specialized functions (`VerifyBegin`, `VerifyEnd`, `VerifyWord`) designed to be inlined by the Go compiler. This eliminates function call overhead and branch misprediction in the $O(1)$ hot path.
+*   **Zero-Allocation Execution**: All passes operate on pre-allocated buffers. The two-stage discovery (Pass 1 and 2) allows the engine to use a smaller, fixed-size history buffer since it only needs to cover the length of a single match, not the entire input.
+*   **Pre-calculated Search/Match States**: The initial `searchState` and `matchState` MUST be pre-calculated during compilation with all relevant flags already applied, eliminating per-match setup costs.
+
+=== Match Integrity Guard (Static Analysis)
+Patterns that match empty strings in a loop (Epsilon Cycles) or contain ambiguous explicit empty branches in captures are rejected at compile time.
+
+== Advantages
+
+*   **Logic Isolation**: Search logic (Pass 1) is physically separated from extraction logic (Pass 2), eliminating "history pollution" and ensuring 100% clean submatch data.
+*   **High Throughput**: Pass 0 and Pass 1 handle the bulk of the input at maximum speed without the overhead of history recording.
+*   **NFA-Free Execution**: No runtime NFA simulation, backtracking, or complex priority arbitration. All extraction logic is deterministic and $O(1)$ per step.
+*   **Strict $O(n)$ Guarantee**: Even with multiple passes, the execution time remains strictly linear relative to the input size.
+*   **Zero-Allocation Submatch Extraction**: Operates entirely on pre-allocated buffers and stack-resident state. The `matchContext` provides a re-usable `regs` buffer for submatch indices to eliminate allocation of the result slice on every match.
+*   **High-Fidelity Go Parity**: Guarantees the same leftmost-first overall match boundaries (`[start, end]`) as the standard `regexp` library. Internal submatch boundaries for ambiguous greedy patterns aim for pragmatic parity with standard Go behavior.
+
+=== Absolute Coordinate Context & Virtual Slicing (Mandate)
+To ensure that anchor verification (`^`, `$`, `\b`) and submatch extraction are correct even when scanning middle segments of a large input, the engine utilizes an **Absolute Coordinate Context** coupled with **Virtual Slicing**.
+
+*   **`ir.Input` Structure**: Every phase of the pipeline receives an `ir.Input` object containing:
+    *   `B`: The byte slice representing the current "Virtual Slice."
+    *   `OriginalB`: The full, original byte slice.
+    *   `AbsPos`: The distance of `B[0]` from the start of `OriginalB`.
+    *   `TotalBytes`: The total size of `OriginalB`.
+*   **Zero-Allocation Virtual Slicing**: By holding `OriginalB` and using `AbsPos` to track the current offset, the engine can "slice" the input logically without triggering physical slice truncations.
+*   **Relative-Coordinate Hot Loops**: For maximum performance, all internal execution loops (Pass 1-4) operate on a **Relative Coordinate System**. Loop variables (`i`), match priorities (`prio`), and internal history offsets are all 0-based relative to `B[0]`. This ensures that absolute addition is removed from the $O(1)$ hot path.
+*   **Context-Aware Anchor Verification**: Functions like `VerifyBegin`, `VerifyEnd`, and `VerifyWord (\b)` use `(in.AbsPos + i)` to index into `in.OriginalB`. This provides stable, unambiguous boundary assessment even when the virtual slice starts in the middle of a word or line.
+*   **Pointer-Passing for Context**: To avoid struct copy overhead, `*ir.Input` is passed to all critical functions.
+*   **Exit-Only Absolute Conversion**: Match results and capturing group registers are converted from relative to absolute coordinates **exactly once** at the public API boundary.

@@ -63,18 +63,17 @@ A core mandate of `go-regexp-re` is avoiding unnecessary rune decoding.
 - **Byte-Oriented Literal Anchors**: Anchors are raw byte sequences. Multi-byte runes are treated as their literal UTF-8 representation, ensuring `bytes.Index` remains valid.
 - **Lead-Byte Resilience**: SWAR kernels operate on raw bytes. The engine ensures that increments and skips do not split a multi-byte sequence unless the regex defines a byte-level constraint.
 
-== 6. Integration into 3-Pass TDFA
+== 6. Integration into the Execution Pipeline
 
-MAP acts as **Pass 0**.
+MAP acts as **Pass 0** in the Multi-Pass execution pipeline.
 
-1.  **Discovery (Pass 0)**: Locate the best anchors (Literal or Class) for each mandatory path.
-2.  **Validation (Pass 0)**: Apply SWAR Forward/Backward guards and Dynamic Warps.
-3.  **Discovery (Pass 1)**: If guards pass, the DFA starts from the **estimated start position**.
-4.  **Path Selection & Recap (Pass 2 & 3)**: Standard submatch extraction.
+1.  **Searching (Pass 0)**: Locate the best anchors (Literal or Class) for each mandatory path using SIMD/SWAR.
+2.  **Validation (Anchored DFA)**: Once a candidate is found, the engine switches to an **Anchored DFA** mode (Pass 1/2) to validate the match from the candidate position.
+3.  **Extraction (Pass 3 & 4)**: If submatches are required, the engine performs backward path selection and forward tag licking.
 
 == 7. Expected Performance Impact
 
 By shifting the burden of "noise rejection" from the DFA to SIMD and SWAR:
 - **Throughput**: Expected 2x-100x improvement on patterns with selective anchors.
-- **DFA Bypass**: DFA execution—the most instruction-heavy part—is only invoked for segments with a very high probability of matching.
-- **Latency**: Reduced compilation latency for literal-heavy patterns that can bypass DFA construction entirely.
+- **Search vs. Match Separation**: DFA execution is only invoked for candidate positions, significantly reducing the total number of bytes processed by the state machine.
+- **Latency**: Reduced compilation latency for literal-heavy patterns that can bypass complex DFA search-restart construction.
