@@ -156,7 +156,10 @@ func NewDFAWithMemoryLimit(ctx context.Context, re *syntax.Regexp, prog *syntax.
 		d.stateMinPriority = append(d.stateMinPriority, minP)
 		d.stateMatchPriority = append(d.stateMatchPriority, matchP)
 		d.stateEntryTags = append(d.stateEntryTags, updates)
-		d.stateIsBestMatch = append(d.stateIsBestMatch, matchP != 1<<30-1 && matchP <= 0)
+		// A state has an unbeatable match only if its match priority is 0 AND
+		// no other path (including restarts) has a lower priority.
+		d.stateIsBestMatch = append(d.stateIsBestMatch, matchP == 0 && minP == 0)
+
 		d.accepting = append(d.accepting, matchP != 1<<30-1)
 		d.acceptingGuards = append(d.acceptingGuards, matchAnchors)
 		d.numStates++

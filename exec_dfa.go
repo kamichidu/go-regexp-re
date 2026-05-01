@@ -90,11 +90,13 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 
 	bestStart, bestEnd, bestPriority := -1, -1, 1<<30-1
 
+	// Pass 1: High-Speed Discovery.
+	// We iterate through potential start positions using SearchWarp/SIMD skips.
 	for restartBase := 0; restartBase <= numBytes; restartBase++ {
 		i := restartBase
 		state, prio := matchState, 0
 
-		// MAP-like SearchWarp
+		// Pass 1.1: SearchWarp (MAP-like skip to candidate)
 		if !anchorStart && bestStart < 0 && (matchState&ir.AcceptingStateFlag) == 0 && i < numBytes {
 			if len(re.prefix) > 0 {
 				pos := bytes.Index(b[i:], re.prefix)
@@ -122,6 +124,8 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 		currentBestEnd := -1
 		currentBestPrio := 1<<30 - 1
 
+		// Pass 1.5: Leftmost-Longest Validation.
+		// From each candidate start, perform an anchored scan to find the best match.
 		if (state & ir.AcceptingStateFlag) != 0 {
 			sidx := state & ir.StateIDMask
 			req := guards[sidx]
