@@ -41,11 +41,15 @@ func (re *Regexp) findIndexAt(b []byte, pos int, totalBytes int, originalB []byt
 	var start, end, prio int
 	switch re.strategy {
 	case strategyLiteral:
-		res := re.literalMatcher.FindSubmatchIndex(in)
-		if res == nil {
+		if !re.literalMatcher.Match(in) {
 			return -1, -1, 0
 		}
-		start, end, prio = res[0], res[1], 0
+		// Match found. For LiteralMatcher, we need the start/end.
+		// Since we want to avoid allocation, we use a specialized call.
+		// But wait, LiteralMatcher.Match doesn't return boundaries.
+		// Let's add a non-allocating FindIndex method.
+		start, end = re.literalMatcher.FindIndex(in)
+		prio = 0
 	default:
 		start, end, prio = re.match(&in)
 	}
@@ -67,20 +71,22 @@ func (re *Regexp) findSubmatchIndexAt(b []byte, pos int, totalBytes int, origina
 	}
 
 	if re.strategy == strategyLiteral {
-		regs := make([]int, (re.numSubexp+1)*2)
-		for i := range regs {
-			regs[i] = -1
-		}
-		if !re.literalMatcher.FindSubmatchIndexInto(in, regs) {
+		mc := matchContextPool.Get().(*matchContext)
+		defer matchContextPool.Put(mc)
+		mc.prepare(len(b), re.numSubexp, pos)
+
+		if !re.literalMatcher.FindSubmatchIndexInto(in, mc.regs) {
 			return nil
 		}
 		// Adjust to absolute
-		for i := range regs {
-			if regs[i] >= 0 {
-				regs[i] += pos
+		for i := range mc.regs {
+			if mc.regs[i] >= 0 {
+				mc.regs[i] += pos
 			}
 		}
-		return regs
+		res := make([]int, len(mc.regs))
+		copy(res, mc.regs)
+		return res
 	}
 
 	mc := matchContextPool.Get().(*matchContext)
