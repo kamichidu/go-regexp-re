@@ -50,10 +50,6 @@ func (mc *matchContext) prepare(n int, numSubexp int, absBase int) {
 		mc.pathHistory = mc.pathHistoryBuf[:required]
 	}
 
-	for i := range mc.pathHistory {
-		mc.pathHistory[i] = -1
-	}
-
 	requiredRegs := (numSubexp + 1) * 2
 	if requiredRegs <= len(mc.regsBuf) {
 		mc.regs = mc.regsBuf[:requiredRegs]

@@ -7,7 +7,7 @@ import (
 	"github.com/kamichidu/go-regexp-re/syntax"
 )
 
-func anchoredRecordingLoop(re *Regexp, in ir.Input, mc *matchContext, start, end int) int {
+func anchoredRecordingLoop(re *Regexp, in *ir.Input, mc *matchContext, start, end int) int {
 	d := re.dfa
 	trans := d.Transitions()
 	uIndices := re.uIndices
@@ -50,7 +50,7 @@ func anchoredRecordingLoop(re *Regexp, in ir.Input, mc *matchContext, start, end
 
 		if (rawNext & ir.AnchorVerifyFlag) != 0 {
 			req := syntax.EmptyOp((rawNext & ir.AnchorMask) >> 22)
-			if !(ir.VerifyEnd(&in, i, req) && ir.VerifyBegin(&in, i, req) && ir.VerifyWord(&in, i, req)) {
+			if !(ir.VerifyEnd(in, i, req) && ir.VerifyBegin(in, i, req) && ir.VerifyWord(in, i, req)) {
 				break
 			}
 		}
@@ -76,7 +76,7 @@ func anchoredRecordingLoop(re *Regexp, in ir.Input, mc *matchContext, start, end
 	return prio + d.MatchPriority(state&ir.StateIDMask)
 }
 
-func fastDiscoveryLoop(re *Regexp, in ir.Input) (int, int, int) {
+func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 	d := re.dfa
 	trans := d.Transitions()
 	guards := d.AcceptingGuards()
@@ -125,7 +125,7 @@ func fastDiscoveryLoop(re *Regexp, in ir.Input) (int, int, int) {
 		if (state & ir.AcceptingStateFlag) != 0 {
 			sidx := state & ir.StateIDMask
 			req := guards[sidx]
-			if req == 0 || (ir.VerifyEnd(&in, i, req) && ir.VerifyBegin(&in, i, req) && ir.VerifyWord(&in, i, req)) {
+			if req == 0 || (ir.VerifyEnd(in, i, req) && ir.VerifyBegin(in, i, req) && ir.VerifyWord(in, i, req)) {
 				currentBestEnd = i
 				currentBestPrio = prio + d.MatchPriority(sidx)
 			}
@@ -141,7 +141,7 @@ func fastDiscoveryLoop(re *Regexp, in ir.Input) (int, int, int) {
 					i += skipped
 					if (state & ir.AcceptingStateFlag) != 0 {
 						req := guards[sidx]
-						if req == 0 || (ir.VerifyEnd(&in, i, req) && ir.VerifyBegin(&in, i, req) && ir.VerifyWord(&in, i, req)) {
+						if req == 0 || (ir.VerifyEnd(in, i, req) && ir.VerifyBegin(in, i, req) && ir.VerifyWord(in, i, req)) {
 							currentBestEnd = i
 							currentBestPrio = prio + d.MatchPriority(sidx)
 						}
@@ -160,7 +160,7 @@ func fastDiscoveryLoop(re *Regexp, in ir.Input) (int, int, int) {
 
 			if (rawNext & ir.AnchorVerifyFlag) != 0 {
 				req := syntax.EmptyOp((rawNext & ir.AnchorMask) >> 22)
-				if !(ir.VerifyEnd(&in, i, req) && ir.VerifyBegin(&in, i, req) && ir.VerifyWord(&in, i, req)) {
+				if !(ir.VerifyEnd(in, i, req) && ir.VerifyBegin(in, i, req) && ir.VerifyWord(in, i, req)) {
 					break
 				}
 			}
@@ -181,7 +181,7 @@ func fastDiscoveryLoop(re *Regexp, in ir.Input) (int, int, int) {
 			if (state & ir.AcceptingStateFlag) != 0 {
 				sidx = state & ir.StateIDMask
 				req := guards[sidx]
-				if req == 0 || (ir.VerifyEnd(&in, i, req) && ir.VerifyBegin(&in, i, req) && ir.VerifyWord(&in, i, req)) {
+				if req == 0 || (ir.VerifyEnd(in, i, req) && ir.VerifyBegin(in, i, req) && ir.VerifyWord(in, i, req)) {
 					p := prio + d.MatchPriority(sidx)
 					if p <= currentBestPrio {
 						currentBestEnd = i
@@ -199,9 +199,6 @@ func fastDiscoveryLoop(re *Regexp, in ir.Input) (int, int, int) {
 			if currentBestPrio < bestPriority {
 				bestStart, bestEnd, bestPriority = restartBase, currentBestEnd, currentBestPrio
 			}
-			// Since we found a match at restartBase, any match starting at restartBase+1
-			// would be lower priority (Go's leftmost-first).
-			// So we can return early for standard Match/FindIndex.
 			return bestStart, bestEnd, bestPriority
 		}
 		if anchorStart {
@@ -211,7 +208,7 @@ func fastDiscoveryLoop(re *Regexp, in ir.Input) (int, int, int) {
 	return bestStart, bestEnd, bestPriority
 }
 
-func fastMatchExecLoop(re *Regexp, in ir.Input) (int, int, int) {
+func fastMatchExecLoop(re *Regexp, in *ir.Input) (int, int, int) {
 	d := re.dfa
 	trans := d.Transitions()
 	guards := d.AcceptingGuards()
@@ -220,7 +217,7 @@ func fastMatchExecLoop(re *Regexp, in ir.Input) (int, int, int) {
 	matchState := re.matchState
 	anchorStart := re.anchorStart
 
-	bestStart, bestEnd, bestPriority := -1, -1, 1<<60-1
+	bestStart, bestEnd, bestPriority := -1, -1, 1<<30-1
 	if len(trans) > 0 {
 		_ = trans[len(trans)-1]
 	}
@@ -264,7 +261,7 @@ func fastMatchExecLoop(re *Regexp, in ir.Input) (int, int, int) {
 		if (state & ir.AcceptingStateFlag) != 0 {
 			sidx := state & ir.StateIDMask
 			req := guards[sidx]
-			if req == 0 || (ir.VerifyEnd(&in, i, req) && ir.VerifyBegin(&in, i, req) && ir.VerifyWord(&in, i, req)) {
+			if req == 0 || (ir.VerifyEnd(in, i, req) && ir.VerifyBegin(in, i, req) && ir.VerifyWord(in, i, req)) {
 				currentBestEnd = i
 			}
 		}
@@ -279,7 +276,7 @@ func fastMatchExecLoop(re *Regexp, in ir.Input) (int, int, int) {
 					i += skipped
 					if (state & ir.AcceptingStateFlag) != 0 {
 						req := guards[sidx]
-						if req == 0 || (ir.VerifyEnd(&in, i, req) && ir.VerifyBegin(&in, i, req) && ir.VerifyWord(&in, i, req)) {
+						if req == 0 || (ir.VerifyEnd(in, i, req) && ir.VerifyBegin(in, i, req) && ir.VerifyWord(in, i, req)) {
 							currentBestEnd = i
 						}
 					}
@@ -297,7 +294,7 @@ func fastMatchExecLoop(re *Regexp, in ir.Input) (int, int, int) {
 
 			if (rawNext & ir.AnchorVerifyFlag) != 0 {
 				req := syntax.EmptyOp((rawNext & ir.AnchorMask) >> 22)
-				if !(ir.VerifyEnd(&in, i, req) && ir.VerifyBegin(&in, i, req) && ir.VerifyWord(&in, i, req)) {
+				if !(ir.VerifyEnd(in, i, req) && ir.VerifyBegin(in, i, req) && ir.VerifyWord(in, i, req)) {
 					break
 				}
 			}
@@ -311,7 +308,7 @@ func fastMatchExecLoop(re *Regexp, in ir.Input) (int, int, int) {
 			if (state & ir.AcceptingStateFlag) != 0 {
 				sidx = state & ir.StateIDMask
 				req := guards[sidx]
-				if req == 0 || (ir.VerifyEnd(&in, i, req) && ir.VerifyBegin(&in, i, req) && ir.VerifyWord(&in, i, req)) {
+				if req == 0 || (ir.VerifyEnd(in, i, req) && ir.VerifyBegin(in, i, req) && ir.VerifyWord(in, i, req)) {
 					currentBestEnd = i
 				}
 			}
@@ -326,7 +323,6 @@ func fastMatchExecLoop(re *Regexp, in ir.Input) (int, int, int) {
 	}
 	return bestStart, bestEnd, bestPriority
 }
-
 func extendedMatchExecLoop(re *Regexp, in ir.Input) (int, int, int) {
 	d := re.dfa
 	trans := d.Transitions()

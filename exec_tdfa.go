@@ -1,6 +1,8 @@
 package regexp
 
 import (
+	"math/bits"
+
 	"github.com/kamichidu/go-regexp-re/internal/ir"
 )
 
@@ -126,17 +128,14 @@ func (re *Regexp) sparseTDFA_Recap(mc *matchContext, b []byte, start, end, prio 
 }
 
 func (re *Regexp) applyRawTags(regs []int, tags uint64, pos int) {
-	if tags == 0 {
-		return
-	}
-	for bit := 2; bit < 64; bit++ {
-		if (tags & (1 << uint(bit))) != 0 {
-			if bit < len(regs) {
-				if (bit%2 != 0) || regs[bit] == -1 {
-					regs[bit] = pos
-				}
+	for tags != 0 {
+		bit := bits.TrailingZeros64(tags)
+		if bit < len(regs) {
+			if (bit&1) != 0 || regs[bit] == -1 {
+				regs[bit] = pos
 			}
 		}
+		tags &= ^(uint64(1) << uint(bit))
 	}
 }
 

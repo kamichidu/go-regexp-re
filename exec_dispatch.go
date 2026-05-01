@@ -19,10 +19,12 @@ func (re *Regexp) bindMatchStrategy() {
 		return
 	}
 
-	if re.dfa != nil && re.dfa.HasAnchors() {
-		re.strategy = strategyExtended
-	} else {
+	// If the pattern has no capturing groups and no complex priority shifts,
+	// we can use the fastest match loop.
+	if re.numSubexp == 0 && (re.dfa == nil || !re.dfa.HasAnchors()) {
 		re.strategy = strategyFast
+	} else {
+		re.strategy = strategyExtended
 	}
 }
 
@@ -45,7 +47,7 @@ func (re *Regexp) findIndexAt(b []byte, pos int, totalBytes int, originalB []byt
 		}
 		start, end, prio = res[0], res[1], 0
 	default:
-		start, end, prio = re.match(in)
+		start, end, prio = re.match(&in)
 	}
 
 	if start >= 0 {
@@ -86,13 +88,13 @@ func (re *Regexp) findSubmatchIndexAt(b []byte, pos int, totalBytes int, origina
 	mc.prepare(len(b), re.numSubexp, pos)
 
 	// Pass 0 & 1: Discovery
-	matchStart, matchEnd, prio := fastDiscoveryLoop(re, in)
+	matchStart, matchEnd, prio := fastDiscoveryLoop(re, &in)
 	if matchStart < 0 {
 		return nil
 	}
 
 	// Pass 2: Anchored Recording
-	prio = anchoredRecordingLoop(re, in, mc, matchStart, matchEnd)
+	prio = anchoredRecordingLoop(re, &in, mc, matchStart, matchEnd)
 
 	// Pass 3 & 4: Extraction
 	regs := mc.regs
@@ -104,8 +106,8 @@ func (re *Regexp) findSubmatchIndexAt(b []byte, pos int, totalBytes int, origina
 	return res
 }
 
-func (re *Regexp) match(in ir.Input) (int, int, int) {
-	return fastDiscoveryLoop(re, in)
+func (re *Regexp) match(in *ir.Input) (int, int, int) {
+	return fastMatchExecLoop(re, in)
 }
 
 func (re *Regexp) submatch(in ir.Input, mc *matchContext) (int, int, int) {
