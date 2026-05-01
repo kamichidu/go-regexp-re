@@ -234,7 +234,7 @@ func NewDFAWithMemoryLimit(ctx context.Context, re *syntax.Regexp, prog *syntax.
 			var entries []RecapEntry
 			for _, u := range nextRes.Updates {
 				entries = append(entries, RecapEntry{
-					InputPriority: u.RelativePriority + minNextPrio - d.stateMinPriority[i],
+					InputPriority: u.RelativePriority + minNextPrio,
 					NextPriority:  u.NextPriority,
 					IsMatch:       u.IsMatch,
 					PreTags:       u.PreTags,
@@ -244,12 +244,14 @@ func NewDFAWithMemoryLimit(ctx context.Context, re *syntax.Regexp, prog *syntax.
 			d.recapTables[0].Transitions[idx] = entries
 		}
 	}
+
 	for _, g := range d.acceptingGuards {
 		if g != 0 {
 			d.hasAnchors = true
 			break
 		}
 	}
+
 	d.ccWarpTable = make([]CCWarpInfo, d.numStates)
 	return d, nil
 }
@@ -292,7 +294,13 @@ func epsilonClosureWithAnchorWall(prog *syntax.Prog, paths []NFAPath) ClosureRes
 		inst := prog.Inst[p.ID]
 		if p.NodeID != 0 || !isEpsilon(inst.Op) {
 			rk := stateKey{p.ID, p.NodeID, p.Anchors}
-			updates = append(updates, PathTagUpdate{RelativePriority: ph.sourcePrio, NextPriority: p.Priority, IsMatch: p.NodeID == 0 && inst.Op == syntax.InstMatch, PreTags: ph.preTags, PostTags: ph.newTags})
+			updates = append(updates, PathTagUpdate{
+				RelativePriority: ph.sourcePrio,
+				NextPriority:     p.Priority,
+				IsMatch:          p.NodeID == 0 && inst.Op == syntax.InstMatch,
+				PreTags:          ph.preTags,
+				PostTags:         ph.newTags,
+			})
 			p.Tags = ph.preTags | ph.newTags
 			if existing, ok := resMap[rk]; !ok || p.Priority < existing.Priority {
 				resMap[rk] = p
@@ -317,7 +325,12 @@ func epsilonClosureWithAnchorWall(prog *syntax.Prog, paths []NFAPath) ClosureRes
 				}
 				if m, ok := minPriority[ph.sourcePrio][nsk]; !ok || next.p <= m {
 					minPriority[ph.sourcePrio][nsk] = next.p
-					stack = append(stack, pathWithMeta{NFAPath{ID: next.id, Priority: next.p, Anchors: p.Anchors, Tags: p.Tags}, ph.newTags, ph.sourcePrio, ph.preTags})
+					stack = append(stack, pathWithMeta{
+						p:          NFAPath{ID: next.id, Priority: next.p, Anchors: p.Anchors, Tags: p.Tags},
+						newTags:    ph.newTags,
+						sourcePrio: ph.sourcePrio,
+						preTags:    ph.preTags,
+					})
 				}
 			}
 		case syntax.InstCapture:
@@ -328,11 +341,14 @@ func epsilonClosureWithAnchorWall(prog *syntax.Prog, paths []NFAPath) ClosureRes
 			}
 			if m, ok := minPriority[ph.sourcePrio][nsk]; !ok || p.Priority <= m {
 				minPriority[ph.sourcePrio][nsk] = p.Priority
-				nt := ph.newTags
-				if (inst.Arg&1 != 0) || (p.Tags&tagBit) == 0 {
-					nt |= tagBit
-				}
-				stack = append(stack, pathWithMeta{NFAPath{ID: inst.Out, Priority: p.Priority, Anchors: p.Anchors, Tags: p.Tags | tagBit}, nt, ph.sourcePrio, ph.preTags})
+				// ALWAYS record all tags hit in epsilon closure to support greedy updates.
+				nt := ph.newTags | tagBit
+				stack = append(stack, pathWithMeta{
+					p:          NFAPath{ID: inst.Out, Priority: p.Priority, Anchors: p.Anchors, Tags: p.Tags | tagBit},
+					newTags:    nt,
+					sourcePrio: ph.sourcePrio,
+					preTags:    ph.preTags,
+				})
 			}
 		case syntax.InstEmptyWidth, syntax.InstNop:
 			na := p.Anchors
@@ -345,7 +361,12 @@ func epsilonClosureWithAnchorWall(prog *syntax.Prog, paths []NFAPath) ClosureRes
 			}
 			if m, ok := minPriority[ph.sourcePrio][nsk]; !ok || p.Priority <= m {
 				minPriority[ph.sourcePrio][nsk] = p.Priority
-				stack = append(stack, pathWithMeta{NFAPath{ID: inst.Out, Priority: p.Priority, Anchors: na, Tags: p.Tags}, ph.newTags, ph.sourcePrio, ph.preTags})
+				stack = append(stack, pathWithMeta{
+					p:          NFAPath{ID: inst.Out, Priority: p.Priority, Anchors: na, Tags: p.Tags},
+					newTags:    ph.newTags,
+					sourcePrio: ph.sourcePrio,
+					preTags:    ph.preTags,
+				})
 			}
 		}
 	}

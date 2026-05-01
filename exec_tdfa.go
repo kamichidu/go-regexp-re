@@ -8,7 +8,9 @@ func (re *Regexp) sparseTDFA_PathSelection(mc *matchContext, b []byte, start, en
 	d := re.dfa
 	recap := d.RecapTables()[0]
 
-	currPrio := int32(prio)
+	// mc.history has entries for pos start, start+1, ..., end
+	lastSidx := mc.history[end-start] & ir.StateIDMask
+	currPrio := int32(d.MatchPriority(lastSidx))
 	mc.pathHistory[end] = currPrio
 
 	for curr := end - 1; curr >= start; curr-- {
@@ -23,30 +25,23 @@ func (re *Regexp) sparseTDFA_PathSelection(mc *matchContext, b []byte, start, en
 		found := false
 		bestInputPrio := int32(1 << 30)
 
-		if off < len(recap.Transitions) {
-			for _, entry := range recap.Transitions[off] {
-				if entry.NextPriority == currPrio {
-					// For the last byte, ensure we pick a transition that reached a match.
-					if curr == end-1 && !entry.IsMatch {
-						continue
-					}
-					if entry.InputPriority < bestInputPrio {
-						bestInputPrio = entry.InputPriority
-						found = true
-					}
+		isLast := curr == end-1
+		for _, entry := range recap.Transitions[off] {
+			if entry.NextPriority == currPrio && entry.IsMatch == isLast {
+				if entry.InputPriority < bestInputPrio {
+					bestInputPrio = entry.InputPriority
+					found = true
 				}
 			}
 		}
 
 		if !found {
-			// If not found, try without IsMatch constraint as fallback (should not happen if history is consistent)
-			if curr == end-1 {
-				for _, entry := range recap.Transitions[off] {
-					if entry.NextPriority == currPrio {
-						if entry.InputPriority < bestInputPrio {
-							bestInputPrio = entry.InputPriority
-							found = true
-						}
+			// Fallback: try without IsMatch constraint if trace is broken (should not happen)
+			for _, entry := range recap.Transitions[off] {
+				if entry.NextPriority == currPrio {
+					if entry.InputPriority < bestInputPrio {
+						bestInputPrio = entry.InputPriority
+						found = true
 					}
 				}
 			}
@@ -70,7 +65,7 @@ func (re *Regexp) sparseTDFA_Recap(mc *matchContext, b []byte, start, end, prio 
 	for curr := start; curr < end; curr++ {
 		h := mc.history[curr-start]
 		sidx := h & ir.StateIDMask
-		byteVal := b[curr]
+		byteVal := byte(0)
 		if curr < len(b) {
 			byteVal = b[curr]
 		}
@@ -79,12 +74,10 @@ func (re *Regexp) sparseTDFA_Recap(mc *matchContext, b []byte, start, end, prio 
 		nextPathID := mc.pathHistory[curr+1]
 
 		off := (int(sidx) << 8) | int(byteVal)
+		isLast := curr == end-1
 		if off < len(recap.Transitions) {
 			for _, entry := range recap.Transitions[off] {
-				if entry.InputPriority == pathID && entry.NextPriority == nextPathID {
-					if curr == end-1 && !entry.IsMatch {
-						continue
-					}
+				if entry.InputPriority == pathID && entry.NextPriority == nextPathID && entry.IsMatch == isLast {
 					re.applyRawTags(regs, entry.PreTags, curr)
 					re.applyRawTags(regs, entry.PostTags, curr+1)
 					break
@@ -109,7 +102,6 @@ func (re *Regexp) applyRawTags(regs []int, tags uint64, pos int) {
 	for bit := 2; bit < 64; bit++ {
 		if (tags & (1 << uint(bit))) != 0 {
 			if bit < len(regs) {
-				// Even bits: Start tags (leftmost win). Odd bits: End tags (latest win).
 				if (bit%2 != 0) || regs[bit] == -1 {
 					regs[bit] = pos
 				}
