@@ -7,6 +7,210 @@ import (
 	"github.com/kamichidu/go-regexp-re/syntax"
 )
 
+func anchoredRecordingLoop(re *Regexp, in ir.Input, mc *matchContext, start, end int) int {
+	d := re.dfa
+	trans := d.Transitions()
+	uIndices := re.uIndices
+	uPrioDeltas := re.uPrioDeltas
+	b := in.B
+	matchState := re.matchState
+	ccWarps := d.CCWarpTable()
+
+	mc.resetForRecording(start, end)
+
+	state, prio := matchState, 0
+	i := start
+
+	for {
+		sidx := state & ir.StateIDMask
+		mc.appendRaw(sidx)
+
+		if i >= end {
+			break
+		}
+
+		if (state & ir.CCWarpFlag) != 0 {
+			info := ccWarps[sidx]
+			skipped := ir.Warp(info, b[i:end])
+			if skipped > 0 {
+				mc.appendWarp(sidx, skipped)
+				i += skipped
+				continue
+			}
+		}
+
+		byteVal := b[i]
+		off := (int(sidx) << 8) | int(byteVal)
+		rawNext := trans[off]
+
+		// In anchored recording, we expect to follow a valid path to 'end'
+		if rawNext == ir.InvalidState {
+			break
+		}
+
+		if (rawNext & ir.AnchorVerifyFlag) != 0 {
+			req := syntax.EmptyOp((rawNext & ir.AnchorMask) >> 22)
+			if !(ir.VerifyEnd(&in, i, req) && ir.VerifyBegin(&in, i, req) && ir.VerifyWord(&in, i, req)) {
+				break
+			}
+		}
+
+		if (rawNext&ir.TaggedStateFlag) != 0 && off < len(uIndices) {
+			uIdx := uIndices[off]
+			if int(uIdx) < len(uPrioDeltas) {
+				prio += int(uPrioDeltas[uIdx])
+			}
+		}
+
+		state = rawNext
+		step := 1
+		if byteVal >= 0x80 && (rawNext&ir.WarpStateFlag) != 0 {
+			step += ir.GetTrailingByteCount(byteVal)
+		}
+		if step > 1 {
+			mc.appendWarp(state&ir.StateIDMask, step-1)
+		}
+		i += step
+	}
+
+	return prio + d.MatchPriority(state&ir.StateIDMask)
+}
+
+func fastDiscoveryLoop(re *Regexp, in ir.Input) (int, int, int) {
+	d := re.dfa
+	trans := d.Transitions()
+	guards := d.AcceptingGuards()
+	uIndices := re.uIndices
+	uPrioDeltas := re.uPrioDeltas
+	b := in.B
+	numBytes := len(b)
+	matchState := re.matchState
+	anchorStart := re.anchorStart
+	ccWarps := d.CCWarpTable()
+
+	bestStart, bestEnd, bestPriority := -1, -1, 1<<30-1
+
+	for restartBase := 0; restartBase <= numBytes; restartBase++ {
+		i := restartBase
+		state, prio := matchState, 0
+
+		// MAP-like SearchWarp
+		if !anchorStart && bestStart < 0 && (matchState&ir.AcceptingStateFlag) == 0 && i < numBytes {
+			if len(re.prefix) > 0 {
+				pos := bytes.Index(b[i:], re.prefix)
+				if pos < 0 {
+					break
+				}
+				restartBase += pos
+				i = restartBase
+			} else if re.searchWarp.Kernel != ir.CCWarpNone {
+				info := re.searchWarp
+				var pos int = -1
+				if info.IndexAny != "" {
+					pos = bytes.IndexAny(b[i:], info.IndexAny)
+				} else {
+					pos = ir.IndexClass(info, b[i:])
+				}
+				if pos < 0 {
+					break
+				}
+				restartBase += pos
+				i = restartBase
+			}
+		}
+
+		currentBestEnd := -1
+		currentBestPrio := 1<<30 - 1
+
+		if (state & ir.AcceptingStateFlag) != 0 {
+			sidx := state & ir.StateIDMask
+			req := guards[sidx]
+			if req == 0 || (ir.VerifyEnd(&in, i, req) && ir.VerifyBegin(&in, i, req) && ir.VerifyWord(&in, i, req)) {
+				currentBestEnd = i
+				currentBestPrio = prio + d.MatchPriority(sidx)
+			}
+		}
+
+		for i < numBytes {
+			sidx := state & ir.StateIDMask
+
+			if (state & ir.CCWarpFlag) != 0 {
+				info := ccWarps[sidx]
+				skipped := ir.Warp(info, b[i:])
+				if skipped > 0 {
+					i += skipped
+					if (state & ir.AcceptingStateFlag) != 0 {
+						req := guards[sidx]
+						if req == 0 || (ir.VerifyEnd(&in, i, req) && ir.VerifyBegin(&in, i, req) && ir.VerifyWord(&in, i, req)) {
+							currentBestEnd = i
+							currentBestPrio = prio + d.MatchPriority(sidx)
+						}
+					}
+					continue
+				}
+			}
+
+			byteVal := b[i]
+			off := (int(sidx) << 8) | int(byteVal)
+			rawNext := trans[off]
+
+			if rawNext == ir.InvalidState {
+				break
+			}
+
+			if (rawNext & ir.AnchorVerifyFlag) != 0 {
+				req := syntax.EmptyOp((rawNext & ir.AnchorMask) >> 22)
+				if !(ir.VerifyEnd(&in, i, req) && ir.VerifyBegin(&in, i, req) && ir.VerifyWord(&in, i, req)) {
+					break
+				}
+			}
+
+			if (rawNext&ir.TaggedStateFlag) != 0 && off < len(uIndices) {
+				uIdx := uIndices[off]
+				if int(uIdx) < len(uPrioDeltas) {
+					prio += int(uPrioDeltas[uIdx])
+				}
+			}
+
+			state = rawNext
+			i += 1
+			if byteVal >= 0x80 && (rawNext&ir.WarpStateFlag) != 0 {
+				i += ir.GetTrailingByteCount(byteVal)
+			}
+
+			if (state & ir.AcceptingStateFlag) != 0 {
+				sidx = state & ir.StateIDMask
+				req := guards[sidx]
+				if req == 0 || (ir.VerifyEnd(&in, i, req) && ir.VerifyBegin(&in, i, req) && ir.VerifyWord(&in, i, req)) {
+					p := prio + d.MatchPriority(sidx)
+					if p <= currentBestPrio {
+						currentBestEnd = i
+						currentBestPrio = p
+					}
+				}
+				if currentBestEnd >= 0 && d.IsBestMatch(state) && prio == 0 {
+					// Unbeatable match found
+					return restartBase, currentBestEnd, currentBestPrio
+				}
+			}
+		}
+
+		if currentBestEnd >= 0 {
+			if currentBestPrio < bestPriority {
+				bestStart, bestEnd, bestPriority = restartBase, currentBestEnd, currentBestPrio
+			}
+			// Since we found a match at restartBase, any match starting at restartBase+1
+			// would be lower priority (Go's leftmost-first).
+			// So we can return early for standard Match/FindIndex.
+			return bestStart, bestEnd, bestPriority
+		}
+		if anchorStart {
+			break
+		}
+	}
+	return bestStart, bestEnd, bestPriority
+}
+
 func fastMatchExecLoop(re *Regexp, in ir.Input) (int, int, int) {
 	d := re.dfa
 	trans := d.Transitions()

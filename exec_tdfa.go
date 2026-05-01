@@ -8,24 +8,39 @@ func (re *Regexp) sparseTDFA_PathSelection(mc *matchContext, b []byte, start, en
 	d := re.dfa
 	recap := d.RecapTables()[0]
 
-	// Defensive: last state is at the end of history.
 	hIdx := len(mc.history) - 1
 	if hIdx < 0 {
 		return
 	}
 
-	lastSidx := mc.history[hIdx] & ir.StateIDMask
+	lastSidx := mc.history[hIdx] & histStateMask
 	currPrio := int32(d.MatchPriority(lastSidx))
 	mc.pathHistory[end] = currPrio
 
-	for curr := end - 1; curr >= start; curr-- {
+	curr := end
+	for hIdx > 0 {
 		hIdx--
-		if hIdx < 0 {
-			break
+
+		// The state BEFORE the current byte(s)
+		prevH := mc.history[hIdx]
+		sidx := prevH & histStateMask
+
+		if (prevH & histWarpMarker) != 0 {
+			// TRICKY: If prevH is a warp, it means the state at hIdx-1
+			// transitioned via this warp to the state at hIdx.
+			// But wait, anchoredRecordingLoop records [S_i, Warp(S_i, n), S_{i+n}].
+			// So if history[hIdx] is a Warp, the state BEFORE it is history[hIdx-1].
+			length := int((prevH & histLengthMask) >> histLengthShift)
+			for j := 0; j < length; j++ {
+				curr--
+				mc.pathHistory[curr] = currPrio
+			}
+			// Move hIdx to the state before the warp
+			hIdx--
+			continue
 		}
 
-		h := mc.history[hIdx]
-		sidx := h & ir.StateIDMask
+		curr--
 		byteVal := byte(0)
 		if curr < len(b) {
 			byteVal = b[curr]
@@ -47,7 +62,6 @@ func (re *Regexp) sparseTDFA_PathSelection(mc *matchContext, b []byte, start, en
 		}
 
 		if !found {
-			// Fallback: stay at current priority
 			mc.pathHistory[curr] = currPrio
 		}
 	}
@@ -64,14 +78,22 @@ func (re *Regexp) sparseTDFA_Recap(mc *matchContext, b []byte, start, end, prio 
 	re.applyEntryTags(regs, d.StartUpdates(), mc.pathHistory[start], start)
 
 	hIdx := 0
-	for curr := start; curr < end; curr++ {
-		if hIdx >= len(mc.history) {
-			break
-		}
+	curr := start
+	for hIdx < len(mc.history)-1 {
 		h := mc.history[hIdx]
 		hIdx++
 
-		sidx := h & ir.StateIDMask
+		sidx := h & histStateMask
+
+		// If the next entry is a warp, it covers transitions from 'h'
+		nextH := mc.history[hIdx]
+		if (nextH & histWarpMarker) != 0 {
+			length := int((nextH & histLengthMask) >> histLengthShift)
+			curr += length
+			hIdx++ // Skip the state recorded after the warp
+			continue
+		}
+
 		byteVal := byte(0)
 		if curr < len(b) {
 			byteVal = b[curr]
@@ -91,6 +113,7 @@ func (re *Regexp) sparseTDFA_Recap(mc *matchContext, b []byte, start, end, prio 
 				}
 			}
 		}
+		curr++
 	}
 
 	absBase := mc.absBase

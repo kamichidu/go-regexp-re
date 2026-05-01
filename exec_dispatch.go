@@ -85,11 +85,16 @@ func (re *Regexp) findSubmatchIndexAt(b []byte, pos int, totalBytes int, origina
 	defer matchContextPool.Put(mc)
 	mc.prepare(len(b), re.numSubexp, pos)
 
-	matchStart, matchEnd, prio := re.submatch(in, mc)
+	// Pass 0 & 1: Discovery
+	matchStart, matchEnd, prio := fastDiscoveryLoop(re, in)
 	if matchStart < 0 {
 		return nil
 	}
 
+	// Pass 2: Anchored Recording
+	prio = anchoredRecordingLoop(re, in, mc, matchStart, matchEnd)
+
+	// Pass 3 & 4: Extraction
 	regs := mc.regs
 	re.sparseTDFA_PathSelection(mc, b, matchStart, matchEnd, prio)
 	re.sparseTDFA_Recap(mc, b, matchStart, matchEnd, prio, regs)
@@ -100,12 +105,7 @@ func (re *Regexp) findSubmatchIndexAt(b []byte, pos int, totalBytes int, origina
 }
 
 func (re *Regexp) match(in ir.Input) (int, int, int) {
-	switch re.strategy {
-	case strategyExtended:
-		return extendedMatchExecLoop(re, in)
-	default:
-		return fastMatchExecLoop(re, in)
-	}
+	return fastDiscoveryLoop(re, in)
 }
 
 func (re *Regexp) submatch(in ir.Input, mc *matchContext) (int, int, int) {
