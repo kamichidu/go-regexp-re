@@ -129,6 +129,9 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 				currentBestEnd = i
 				currentBestPrio = prio + d.MatchPriority(sidx)
 			}
+			if currentBestEnd >= 0 && d.IsBestMatch(state) && prio == 0 {
+				return restartBase, currentBestEnd, currentBestPrio
+			}
 		}
 
 		for i < numBytes {
@@ -199,6 +202,8 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 			if currentBestPrio < bestPriority {
 				bestStart, bestEnd, bestPriority = restartBase, currentBestEnd, currentBestPrio
 			}
+			// Since we found a match at restartBase, any match starting at restartBase+1
+			// would be lower priority (Go's leftmost-first).
 			return bestStart, bestEnd, bestPriority
 		}
 		if anchorStart {

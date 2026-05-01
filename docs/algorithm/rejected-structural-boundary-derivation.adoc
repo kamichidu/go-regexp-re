@@ -1,0 +1,43 @@
+= Rejected: Structural Boundary Derivation (Idle State Tracking)
+:sectnums:
+
+== Overview
+
+During the implementation of the Multi-Pass Sparse TDFA, an attempt was made to derive match boundaries (`matchStart` and `matchEnd`) structurally in a single pass (Pass 1) without a manual search loop or complex registers.
+
+The proposed logic was:
+- **`matchStart`**: The index `i` where the DFA first transitions out of the `searchState` (Idle state).
+- **`matchEnd`**: The index `i` of the first/longest accepting state.
+
+While elegant, this approach was **rejected** due to fundamental incompatibilities with the current DFA builder's normalization logic.
+
+== Technical Reason for Failure
+
+=== 1. Priority Normalization & State Conflation
+The engine's `dfa_builder.go` performs aggressive state deduplication by hashing NFA path sets using **relative priorities** (normalized such that the minimum priority in a state is always 0).
+
+For patterns with non-greedy loops (e.g., `a*?`), this causes an **Engaged State** (tracking an active match) to map to the **EXACT SAME DFA State ID** as the initial **Idle State**.
+
+**Example: `a*?` against `aaaa`**
+1. **Initial (i=0)**: `SearchState` contains `{Match (prio 0), 'a' (prio 1)}`.
+2. **Step 1 (i=1)**: After consuming 'a', the DFA transitions. The only surviving path is the one that consumed 'a' (prio 1).
+3. **Closure (i=1)**: The closure of the 'a' path is `{Match (prio 1), 'a' (prio 2)}`.
+4. **Normalization**: The builder subtracts the minimum priority (1), resulting in `{Match (prio 0), 'a' (prio 1)}`.
+
+Because this normalized set is identical to the `SearchState`, the DFA identifies them as the same state.
+
+=== 2. The Reset Loop
+If the execution loop uses `if state == searchState { matchStart = i }` to derive the start:
+- At `i=1`, the DFA enters the state after 'a'.
+- Because this state ID is identical to `searchState`, the engine **falsely resets** `matchStart = 1` and `prio = 0`.
+- The engine effectively "forgets" that it was in the middle of a match and erases the priority penalty of the non-greedy path.
+
+This resulted in `a*?` returning `[0, 1]` (greedy-like) instead of the correct `[0, 0]`.
+
+== Conclusion & Future Work
+
+To implement a true 1-pass Searching DFA, the DFA builder must be modified to **physically separate** Search-Restart transitions from Continuation transitions. This could be achieved by:
+- Adding a "Virtual Start Tag" to the NFA paths in the start state.
+- Including an `isEngaged` bit in the DFA state identity key to prevent conflation of search-restart and match-continuation paths.
+
+Until such deep refactoring is performed, Pass 1 MUST utilize the heavily optimized **Manual Search Loop (`restartBase`)** to guarantee 100% Go compatibility for all edge cases.
