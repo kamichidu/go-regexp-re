@@ -22,11 +22,11 @@ func ToDOT(d *DFA) string {
 		var labels []string
 		labels = append(labels, fmt.Sprintf("S%d", i))
 
-		if u == d.SearchState() {
-			labels[0] += " (search)"
-		}
 		if u == d.MatchState() {
 			labels[0] += " (match)"
+		}
+		if u == d.SearchState() {
+			labels[0] += " (search)"
 		}
 
 		if d.IsAccepting(u) {

@@ -34,7 +34,7 @@ type Regexp struct {
 
 type CompileOptions struct {
 	MaxMemory     int
-	forceStrategy matchStrategy // Internal use for testing (strategyFast or strategyExtended)
+	forceStrategy matchStrategy // Internal use for testing
 }
 
 func Compile(expr string) (*Regexp, error) { return CompileContext(context.Background(), expr) }
@@ -55,6 +55,9 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 
 	s = syntax.Simplify(s)
 	s = syntax.Optimize(s)
+	if err := ir.CheckCompatibility(s); err != nil {
+		return nil, err
+	}
 	prog, err := syntax.Compile(s)
 	if err != nil {
 		return nil, err
@@ -80,8 +83,6 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 	var searchWarp ir.CCWarpInfo
 
 	if literalMatcher == nil {
-		// Always build the heavy DFA to support correct FindSubmatchIndex results
-		// and capture groups, unless forced otherwise.
 		dfa, err = ir.NewDFAWithMemoryLimit(ctx, s, prog, opts.MaxMemory, true)
 		if err != nil {
 			return nil, err
@@ -126,7 +127,6 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 	if res.literalMatcher == nil && !ir.HasComplexAnchors(s) {
 		anchors := ir.ExtractAnchors(s)
 		for i := range anchors {
-			// Disable MAP for multiline anchored patterns for now
 			if (anchors[i].HasBeginText || anchors[i].HasEndText) && (s.Flags&syntax.OneLine == 0) {
 				continue
 			}
@@ -185,43 +185,19 @@ func hasAnchors(prog *syntax.Prog) bool {
 	return false
 }
 
-func (re *Regexp) FindSubmatchIndex(b []byte) []int {
-	if re.strategy == strategyLiteral {
-		regs := make([]int, (re.numSubexp+1)*2)
-		for i := range regs {
-			regs[i] = -1
-		}
-		if !re.literalMatcher.FindSubmatchIndexInto(b, regs) {
-			return nil
-		}
-		return regs
-	}
-
-	mc := matchContextPool.Get().(*matchContext)
-	defer matchContextPool.Put(mc)
-	mc.prepare(len(b), re.numSubexp)
-
-	start, end, prio := re.submatch(b, mc)
-	if start < 0 {
-		return nil
-	}
-
-	regs := mc.regs
-	regs[0], regs[1] = start, end
-	if re.numSubexp > 0 {
-		re.sparseTDFA_PathSelection(mc, b, start, end, prio)
-		re.sparseTDFA_Recap(mc, b, start, end, prio, regs)
-	}
-
-	// Must return a copy because mc is returned to Pool
-	res := make([]int, len(mc.regs))
-	copy(res, mc.regs)
-	return res
+func (re *Regexp) Match(b []byte) bool {
+	start, _, _ := re.findIndexAt(b, 0, len(b), b)
+	return start >= 0
 }
 
-func (re *Regexp) FindStringSubmatchIndex(s string) []int {
+func (re *Regexp) MatchString(s string) bool {
 	b := unsafe.Slice(unsafe.StringData(s), len(s))
-	return re.FindSubmatchIndex(b)
+	start, _, _ := re.findIndexAt(b, 0, len(b), b)
+	return start >= 0
+}
+
+func (re *Regexp) FindSubmatchIndex(b []byte) []int {
+	return re.findSubmatchIndexAt(b, 0, len(b), b)
 }
 
 func MustCompile(expr string) *Regexp {
@@ -236,18 +212,4 @@ func (re *Regexp) String() string { return re.expr }
 
 func (re *Regexp) LiteralPrefix() (prefix string, complete bool) {
 	return string(re.prefix), re.complete
-}
-
-func (re *Regexp) FindStringSubmatch(s string) []string {
-	indices := re.FindStringSubmatchIndex(s)
-	if indices == nil {
-		return nil
-	}
-	result := make([]string, len(indices)/2)
-	for i := range result {
-		if start, end := indices[2*i], indices[2*i+1]; start >= 0 && end >= 0 {
-			result[i] = s[start:end]
-		}
-	}
-	return result
 }

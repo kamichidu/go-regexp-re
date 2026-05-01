@@ -5,126 +5,144 @@ import (
 	"strings"
 )
 
-// NumSubexp returns the number of parenthesized subexpressions in this Regexp.
 func (re *Regexp) NumSubexp() int {
 	return re.numSubexp
 }
 
-// SubexpNames returns the names of the parenthesized subexpressions in this Regexp.
 func (re *Regexp) SubexpNames() []string {
 	return re.subexpNames
 }
 
-// SubexpIndex returns the index of the first subexpression with the given name.
 func (re *Regexp) SubexpIndex(name string) int {
 	if name == "" {
 		return -1
 	}
-	for i, n := range re.SubexpNames() {
-		if i > 0 && name == n {
+	for i, n := range re.subexpNames {
+		if n == name {
 			return i
 		}
 	}
 	return -1
 }
 
-// Expand appends the template to dst, replacing variables of the form $n or ${name}
-// in the template with corresponding submatches from src.
-func (re *Regexp) Expand(dst []byte, template []byte, src []byte, match []int) []byte {
-	return re.expand(dst, string(template), src, match)
-}
-
-// ExpandString is like Expand but the template and source are strings.
-func (re *Regexp) ExpandString(dst []byte, template string, src string, match []int) []byte {
-	return re.expand(dst, template, []byte(src), match)
-}
-
-func (re *Regexp) expand(dst []byte, template string, src []byte, match []int) []byte {
-	for i := 0; i < len(template); i++ {
-		ch := template[i]
-		if ch == '$' && i+1 < len(template) {
-			i++
-			if template[i] == '$' {
-				dst = append(dst, '$')
-				continue
-			}
-			var name string
-			if template[i] == '{' {
-				start := i + 1
-				end := strings.IndexByte(template[start:], '}')
-				if end >= 0 {
-					name = template[start : start+end]
-					i = start + end
-				}
-			} else {
-				start := i
-				for i < len(template) && (('a' <= template[i] && template[i] <= 'z') || ('A' <= template[i] && template[i] <= 'Z') || ('0' <= template[i] && template[i] <= '9') || template[i] == '_') {
-					i++
-				}
-				name = template[start:i]
-				i--
-			}
-
-			if name != "" {
-				index := -1
-				if isDigit(name[0]) {
-					index = 0
-					for j := 0; j < len(name); j++ {
-						if isDigit(name[j]) {
-							index = index*10 + int(name[j]-'0')
-						} else {
-							index = -1
-							break
-						}
-					}
-				} else {
-					index = re.SubexpIndex(name)
-				}
-				if index >= 0 && index*2+1 < len(match) {
-					sIdx, eIdx := match[index*2], match[index*2+1]
-					if sIdx >= 0 && eIdx >= sIdx && eIdx <= len(src) {
-						dst = append(dst, src[sIdx:eIdx]...)
-					}
-				}
-			}
-		} else {
-			dst = append(dst, ch)
-		}
-	}
-	return dst
-}
-
-func isDigit(b byte) bool {
-	return '0' <= b && b <= '9'
-}
-
-// MarshalText implements encoding.TextMarshaler.
 func (re *Regexp) MarshalText() ([]byte, error) {
 	return []byte(re.expr), nil
 }
 
-// UnmarshalText implements encoding.TextUnmarshaler.
 func (re *Regexp) UnmarshalText(text []byte) error {
-	newRe, err := Compile(string(text))
+	r, err := Compile(string(text))
 	if err != nil {
 		return err
 	}
-	*re = *newRe
+	*re = *r
 	return nil
 }
 
-// MatchReader reports whether the text read from r contains any match of the regular expression re.
-// Note: This implementation reads all data from the reader into memory before matching.
-// It is provided for interface compatibility with the standard library but is less memory-efficient
-// than other match methods.
 func (re *Regexp) MatchReader(r io.RuneReader) bool {
-	var b strings.Builder
+	var b []byte
 	for {
 		rn, _, err := r.ReadRune()
 		if err != nil {
 			break
 		}
-		b.WriteRune(rn)
+		var buf [8]byte
+		n := copy(buf[:], string(rn))
+		b = append(b, buf[:n]...)
 	}
-	return re.MatchString(b.String())
+	return re.Match(b)
+}
+
+func (re *Regexp) Expand(dst []byte, template []byte, src []byte, match []int) []byte {
+	// Standard library implementation of Expand logic
+	for i := 0; i < len(template); i++ {
+		b := template[i]
+		if b == '$' && i+1 < len(template) {
+			i++
+			b = template[i]
+			if b == '$' {
+				dst = append(dst, '$')
+				continue
+			}
+			var name string
+			if b == '{' {
+				start := i + 1
+				for i+1 < len(template) && template[i+1] != '}' {
+					i++
+				}
+				if i+1 < len(template) && template[i+1] == '}' {
+					name = string(template[start : i+1])
+					i++
+				} else {
+					// Invalid sequence
+					dst = append(dst, '$', '{')
+					i = start - 1
+					continue
+				}
+			} else if isNameStart(b) {
+				start := i
+				for i+1 < len(template) && isName(template[i+1]) {
+					i++
+				}
+				name = string(template[start : i+1])
+			} else {
+				dst = append(dst, '$', b)
+				continue
+			}
+
+			// Parse name as number or subexp name
+			num := -1
+			isNum := len(name) > 0
+			n := 0
+			for j := 0; j < len(name); j++ {
+				if name[j] >= '0' && name[j] <= '9' {
+					n = n*10 + int(name[j]-'0')
+				} else {
+					isNum = false
+					break
+				}
+			}
+			if isNum {
+				num = n
+			} else {
+				num = re.SubexpIndex(name)
+			}
+
+			if num >= 0 && num*2+1 < len(match) && match[num*2] >= 0 {
+				dst = append(dst, src[match[num*2]:match[num*2+1]]...)
+			}
+			continue
+		}
+		dst = append(dst, b)
+	}
+	return dst
+}
+
+func (re *Regexp) ExpandString(dst []byte, template string, src string, match []int) []byte {
+	return re.Expand(dst, []byte(template), []byte(src), match)
+}
+
+func isNameStart(b byte) bool {
+	return (b >= '0' && b <= '9') || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || b == '_'
+}
+
+func isName(b byte) bool {
+	return (b >= '0' && b <= '9') || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || b == '_'
+}
+
+func QuoteMeta(s string) string {
+	b := make([]byte, 2*len(s))
+	j := 0
+	for i := 0; i < len(s); i++ {
+		if special(s[i]) {
+			b[j] = '\\'
+			j++
+		}
+		b[j] = s[i]
+		j++
+	}
+	return string(b[0:j])
+}
+
+func special(b byte) bool {
+	return strings.ContainsRune(".+*?()|[]{}^$\\", rune(b))
 }

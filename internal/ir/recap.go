@@ -7,11 +7,13 @@ type TransitionUpdate struct {
 
 type PathTagUpdate struct {
 	RelativePriority, NextPriority int32
-	Tags                           uint64
+	IsMatch                        bool
+	PreTags, PostTags              uint64
 }
 
 type RecapEntry struct {
-	InputPriority, NextPriority int16
+	InputPriority, NextPriority int32
+	IsMatch                     bool
 	PreTags, PostTags           uint64
 	WarpTags                    []WarpTagBundle
 }

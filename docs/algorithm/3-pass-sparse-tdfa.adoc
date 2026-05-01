@@ -61,3 +61,16 @@ Patterns that match empty strings in a loop (Epsilon Cycles) or contain ambiguou
 *   **Strict $O(n)$ Complexity**: All three passes are linear relative to input length.
 *   **Zero-Allocation Submatch Extraction**: Operates entirely on pre-allocated buffers and stack-resident state. The `matchContext` provides a re-usable `regs` buffer for submatch indices to eliminate allocation of the result slice on every match.
 *   **100% Go Compatibility**: Guarantees leftmost-first match results identical to `regexp`.
+
+=== Absolute Coordinate Context & Virtual Slicing (Mandate)
+To ensure that anchor verification (`^`, `$`, `\b`) and submatch extraction are correct even when scanning middle segments of a large input, the engine utilizes an **Absolute Coordinate Context** coupled with **Virtual Slicing**.
+
+*   **`ir.Input` Structure**: Every phase of the TDFA receives an `ir.Input` object containing:
+    *   `B`: The byte slice representing the current "Virtual Slice."
+    *   `OriginalB`: The full, original byte slice.
+    *   `AbsPos`: The distance of `B[0]` from the start of `OriginalB`.
+    *   `TotalBytes`: The total size of `OriginalB`.
+*   **Zero-Allocation Virtual Slicing**: By holding `OriginalB` and using `AbsPos` to track the current offset, the engine can "slice" the input logically without triggering physical slice truncations (which, while small, add up in repetitive scans).
+*   **Relative-Coordinate Hot Loops**: For maximum performance, all internal execution loops (Pass 1-3) operate on a **Relative Coordinate System**. Loop variables (`i`), match priorities (`prio`), and internal history offsets are all 0-based relative to `B[0]`. This ensures that absolute addition is removed from the $O(1)$ hot path.
+*   **Context-Aware Anchor Verification**: Functions like `VerifyBegin`, `VerifyEnd`, and `VerifyWord (\b)` use `(in.AbsPos + i)` to index into `in.OriginalB`. This provides stable, unambiguous boundary assessment even when the virtual slice starts in the middle of a word or line.
+*   **Exit-Only Absolute Conversion**: Match results and capturing group registers are converted from relative to absolute coordinates **exactly once** at the public API boundary.

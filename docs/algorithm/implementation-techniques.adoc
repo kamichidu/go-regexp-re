@@ -65,23 +65,31 @@ Unlike many engines that decode UTF-8 into runes (`int32`) during execution, `go
 * **Mechanism**: During the NFA-to-DFA conversion, any non-ASCII character (UTF-8) is expanded into a byte-level Trie. This Trie is then "baked" directly into the DFA transition table.
 * **Benefit**: This eliminates the overhead of `utf8.DecodeRune` (which involves complex branching and bit shifting) and allows multi-byte characters to be matched with the same $O(1)$ per byte performance as ASCII characters.
 
-=== 6. Bitmask-First Short-Circuiting
+=== 6. Absolute Coordinate Context & Virtual Slicing (Mandate)
+To handle anchor verification and multi-pass submatch extraction correctly regardless of where a scan starts, the engine utilizes an **Absolute Coordinate Context** via the `ir.Input` structure, implemented as **Virtual Slicing**.
+
+*   **Semantic Correctness**: Anchors like `^` and `$` must identify the "True Start/End of Text." By propagating `AbsPos` (the offset of the current virtual slice from the original input), verification functions like `VerifyBegin` can determine truth using simple arithmetic: `(AbsPos + i) == 0`.
+*   **Virtual Slicing (Allocation Exclusion)**: Instead of repeated slice truncations (`b = b[advance:]`), `ir.Input` holds the `OriginalB` and manages the current scanning window via `AbsPos`. This eliminates the need for repeated slice header updates and ensures that the full context is always available for junction verification (`\b`, etc.).
+*   **Performance via Relative Coordinates**: While context is absolute, the core scanning logic (Pass 1-3) is strictly **Relative-Coordinate Based**. Loop variables (`i`), match priorities (`prio`), and internal history buffers use 0-based indices relative to the start of the current virtual slice. This removes coordinate addition from the $O(1)$ hot loop.
+*   **Exit-Only Conversion**: Submatch results are converted from relative to absolute coordinates (e.g., `regs[i] += in.AbsPos`) **exactly once** at the public API boundary before returning to the caller.
+
+=== 7. Bitmask-First Short-Circuiting
 Anchor verification functions (`VerifyBegin`, `VerifyEnd`, `VerifyWord`) are critical points in the hot loop. Even when they return `true`, the cost of their internal branching can be significant.
 
 * **Technique**: Every verification function MUST employ a single-instruction bitmask check at the very beginning to detect if any relevant flags are present in the request (`req`).
 [source,go]
 ----
-func VerifyBegin(b []byte, i int, req syntax.EmptyOp) bool {
+func VerifyBegin(in Input, i int, req syntax.EmptyOp) bool {
     // Single-instruction bitmask check
     if (req & (syntax.EmptyBeginText | syntax.EmptyBeginLine)) == 0 {
         return true
     }
-    // Detailed logic...
+    // Detailed logic using in.AbsPos + i...
 }
 ----
 * **Impact**: Field evidence showed that omitting this unified check in favor of individual flag checks (even if mathematically equivalent) causes a **30-60% throughput regression**. This is due to increased instruction count and branch misprediction in the CPU pipeline when processing transitions that only require subset of anchors (e.g., a transition requiring only `\b` still calls `VerifyBegin`).
 
-=== 7. Intelligent SWAR Pre-filtering
+=== 8. Intelligent SWAR Pre-filtering
 While `bytes.Index` provides SIMD-accelerated prefix scanning, many regex patterns (e.g., `[0-9]+`) do not have a constant literal prefix.
 * **Technique**: The engine extracts the "Start Set" (all possible first bytes) of the pattern. If this set is sufficiently small (< 64 bytes), a specialized **SearchWarp** is generated.
 * **Mechanism**: At the start of a match attempt, if the current DFA state is the `searchState`, the engine uses SWAR kernels to skip blocks of 8 bytes that do not contain any byte from the Start Set.

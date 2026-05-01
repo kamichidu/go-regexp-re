@@ -4,44 +4,51 @@ import (
 	"github.com/kamichidu/go-regexp-re/syntax"
 )
 
-// Tiny, inlineable anchor verification functions.
-// These use exact syntax.EmptyOp bits to stay efficient and correct.
+// Input represents the search input with absolute coordinate context.
+type Input struct {
+	B           []byte // The virtual slice currently being scanned
+	OriginalB   []byte // The full original input buffer
+	AbsPos      int    // The absolute position of B[0] in OriginalB
+	TotalBytes  int    // The total length of OriginalB
+	SearchStart int    // Relative start position in B
+	SearchEnd   int    // Relative end position in B
+}
 
-func VerifyBegin(b []byte, i int, req syntax.EmptyOp) bool {
-	// EmptyBeginText(4) | EmptyBeginLine(1)
+// VerifyBegin checks for ^ and \A anchors using absolute context.
+func VerifyBegin(in *Input, i int, req syntax.EmptyOp) bool {
 	if (req & (syntax.EmptyBeginText | syntax.EmptyBeginLine)) == 0 {
 		return true
 	}
-	if i == 0 {
-		// Text start satisfies both BeginText and BeginLine
+	absPos := in.AbsPos + i
+	if absPos == 0 {
 		return true
 	}
-	// Line start only satisfies BeginLine
-	return (req&syntax.EmptyBeginLine) != 0 && b[i-1] == '\n'
+	return (req&syntax.EmptyBeginLine) != 0 && absPos > 0 && in.OriginalB[absPos-1] == '\n'
 }
 
-func VerifyEnd(b []byte, i int, numBytes int, req syntax.EmptyOp) bool {
-	// EmptyEndText(8) | EmptyEndLine(2)
+// VerifyEnd checks for $ and \z anchors using absolute context.
+func VerifyEnd(in *Input, i int, req syntax.EmptyOp) bool {
 	if (req & (syntax.EmptyEndText | syntax.EmptyEndLine)) == 0 {
 		return true
 	}
-	if i == numBytes {
-		// Text end satisfies both EndText and EndLine
+	absPos := in.AbsPos + i
+	if absPos == in.TotalBytes {
 		return true
 	}
-	// Line end only satisfies EndLine
-	return (req&syntax.EmptyEndLine) != 0 && b[i] == '\n'
+	return (req&syntax.EmptyEndLine) != 0 && absPos < in.TotalBytes && in.OriginalB[absPos] == '\n'
 }
 
-func VerifyWord(b []byte, i int, numBytes int, req syntax.EmptyOp) bool {
+// VerifyWord checks for \b and \B anchors using absolute context.
+func VerifyWord(in *Input, i int, req syntax.EmptyOp) bool {
 	if (req & (syntax.EmptyWordBoundary | syntax.EmptyNoWordBoundary)) == 0 {
 		return true
 	}
+	absPos := in.AbsPos + i
 	var wordLeft, wordRight bool
-	if i > 0 && b[i-1] < 0x80 && syntax.IsWordChar(rune(b[i-1])) {
+	if absPos > 0 && in.OriginalB[absPos-1] < 0x80 && syntax.IsWordChar(rune(in.OriginalB[absPos-1])) {
 		wordLeft = true
 	}
-	if i < numBytes && b[i] < 0x80 && syntax.IsWordChar(rune(b[i])) {
+	if absPos < in.TotalBytes && in.OriginalB[absPos] < 0x80 && syntax.IsWordChar(rune(in.OriginalB[absPos])) {
 		wordRight = true
 	}
 	if wordLeft != wordRight {

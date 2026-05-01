@@ -27,7 +27,8 @@ Every implementation must adhere to these pillars to ensure maximum performance:
 To maximize throughput, the engine MUST select the most efficient execution loop based on pattern characteristics. The core execution loops are implemented in **`exec_dfa.go`** and dispatched via **`exec_dispatch.go`**:
 - **Pass 0 (Multi-Point Anchored Constraint Propagation - MAP)**: The primary search phase. It identifies all mandatory paths and extracts multiple anchor candidates (**Prefix**, **Pivot**, or **Suffix**). It utilizes SIMD (`bytes.Index`) and SWAR (`IndexClass`) to find match candidates and validates path-specific constraints before invoking the DFA. This handles complex patterns like `(^|[abc])literal` by checking multiple entry points.
 - **0-Pass (Literal Bypass)**: Selected for pure constant strings and anchored literals (e.g., `^abc$`, `^abc`, `abc$`). Bypasses all regex engines using SIMD-accelerated standard library search. It utilizes a **unified, interface-free `LiteralMatcher` component** (in `internal/ir/literal.go`) with a **Capture Template** to provide submatch indices with zero state-machine and zero dynamic-dispatch overhead. **When this strategy is selected, the engine MUST explicitly bypass all DFA construction to minimize compilation latency and memory footprint.**
-- **Fast Path (Pure DFA)**: Automatically selected for larger patterns. It utilizes a minimalist table-based execution loop (`fastMatchExecLoop`) with **Two-Phase SWAR Warping** (SearchWarp for pre-filtering noise and CCWarp for match fast-forwarding).
+- **Fast Path (Pure DFA)**: Automatically selected for larger patterns. It utilizes a manually implemented **Manual Search Loop** in Go that invokes a **Matching-only DFA** (one without internal search-restart paths). This ensures that `restartBase` accurately tracks the true match start, guaranteeing Go-compatible leftmost-longest precision. It employs minimalist table-based execution loops (`fastMatchExecLoop`) with **Two-Phase SWAR Warping**.
+- **Early Exit on Match Finality**: To maintain peak efficiency, execution loops MUST adopt an **Early Exit on Mismatch** strategy: once a match is found and the DFA can no longer transition, the loop returns the best match immediately instead of continuing a redundant search.
 - **SWAR Character Class Warp (CCWarp)**: A specialized execution strategy for "Pure Self-Loops"—DFA states that transition back to themselves without updating capture tags. It treats 64-bit registers as SIMD vectors to process 8 bytes in parallel, achieving up to 5 GB/s throughput.
 - **Anchor-Aware Guarded SIMD Warp**: Selected for patterns with anchors. Utilizes a separate `anchorTransitions` table and **guarded warp points** to allow SIMD skipping even in the presence of anchors (e.g., `^`, `$`, `\b`).
 
@@ -35,6 +36,7 @@ To maximize throughput, the engine MUST select the most efficient execution loop
 - **State-Resident Acceptance Flag**: To eliminate redundant memory lookups in hot loops, DFA state IDs MUST embed the `AcceptingStateFlag` (Bit 29). This allows the execution loop to identify accepting states via a single bitwise AND operation on the current state variable.
 - **Inlining-Friendly Anchor Verification**: Anchor verification logic (e.g., `^`, `$`, `\b`) MUST be implemented as tiny, specialized functions (e.g., `VerifyBegin`, `VerifyEnd`) to guarantee inlining by the Go compiler. Complex junction analysis MUST be avoided in favor of short-circuiting these specialized checks to minimize call-stack overhead and branch misprediction.
 - **Bitmask-First Short-Circuiting Mandate**: Every verification function MUST employ a single-instruction bitmask check (e.g., `if (req & MASK) == 0 { return true }`) as its first operation. This ensures that any transition not requiring specific anchor checks can exit in $O(1)$ with minimal pipeline disturbance. Failure to follow this pattern has been proven to cause 30-60% throughput regressions.
+- **Pointer-Passing for Input Context**: To avoid the 48-byte struct copy overhead (`runtime.duffcopy`) in hot loops, the `ir.Input` structure MUST be passed by pointer (`*ir.Input`) to all anchor verification and execution helper functions.
 - **Pre-calculated Search/Match States**: The initial `searchState` and `matchState` MUST be pre-calculated during compilation with all relevant flags already applied, eliminating per-match setup costs.
 
 ### 2.5 Submatch Extraction Architecture (3-Pass Sparse TDFA)
@@ -43,9 +45,12 @@ The engine follows a **3-Pass Sparse TDFA** strategy (implemented in **`exec_tdf
 - **NFA-Free & Calculation-Free Mandate**: Runtime NFA simulation, backtracking, or dynamic priority comparison is **STRICTLY PROHIBITED**. All submatch extraction decisions MUST be pre-calculated and "burned into" the transition tables during compilation.
 - **Pass 1: Naked Discovery**: A high-speed scan (DFA or BP-DFA) determines match boundaries `[start, end]` and records a history of deterministic states.
     - **Hybrid RLE History Mandate**: To eliminate the $O(n)$ memory bottleneck for submatch extraction, the engine MUST employ a **32-bit bit-packed RLE** strategy (managed in **`context.go`**) during SWAR skips. Consecutive bytes in the same state MUST be collapsed into a single "Warp Entry" with a length field (capped at 2047 bytes). This ensures that memory consumption for repetitive patterns (e.g., `.*`) is effectively $O(1)$ relative to the repetition length.
-    - **Priority Separation**: To prevent incorrect match boundary extensions (e.g., `aa|a` matching `aaaa` as `[0 4]`), Pass 1 DFA states MUST include the **MatchPriority** (the highest priority NFA path in the state) in their identity key. This ensures that states with the same NFA IDs but different leftmost-first implications are physically separated.
+    - **Priority Gating (State Explosion Prevention)**: To prevent state explosion in ambiguous repetitions (e.g. `(a|ab)*`), DFA state identity MUST gate NFA path priorities. During Pass 1 (Naked), internal priorities MUST be excluded from the hash set, using only the `matchPriority` in the DFA state key to ensure correct merging of equivalent search states.
 
-- **Pass 2: Path Identity Selection**: Identifies the unique "winning NFA path" by **performing a backward trace** from the match end point. This leverages the `MatchPriority` determined in Pass 1 to reconstruct the priority identity sequence without lookahead or ambiguity. **To maintain submatch precision for multi-byte runes, Pass 2 MUST trace every byte transition in the history, ensuring that priority shifts occurring within continuation bytes are correctly captured.** If multiple paths lead to the same result, the one with the **minimum InputPriority** MUST be selected to satisfy Go's leftmost-first rule.
+- **Pass 2: Path Identity Selection**: Identifies the unique "winning NFA path" by **performing a backward trace** from the match end point.
+    - **Defensive History Indexing Mandate**: To prevent `index out of range` panics in the Manual Search Loop, Pass 2 and Pass 3 MUST access `mc.history` using defensive indexing: the match-end state MUST be anchored at `len(mc.history)-1`, and backward steps MUST be relative to this tail index. This ensures robustness regardless of the search start position (`restartBase`).
+    - **Path Reconstruction**: This leverages the `MatchPriority` and **`IsMatch` flag** to reconstruct the priority identity sequence without lookahead or ambiguity. **To maintain submatch precision, Pass 2 MUST follow state-relative priority transitions (`InputPriority` -> `NextPriority`) pre-calculated in the `RecapTable`, ensuring perfect alignment with the compiled DFA logic.**
+
 - **Pass 3: Group-Specific Recap (Licking)**: Iterates forward along the confirmed winning path and applies delta tags from the `RecapTable`. This pass MUST be a pure, sequential update loop ("licking") where later tags on the path define the final boundaries. **When a Warp (jump) occurs, any tags bundled within the warped bytes MUST be applied at their relative offsets.**
 - **Transition-Resident Tags (Delta-Only)**: Because DFA states are "Naked", capturing group boundaries (tags) MUST be associated exclusively with **transitions** (`RecapEntry`). To prevent boundary corruption, these tags MUST be stored as **deltas** (newly encountered during that specific transition).
 - **Priority Delta Propagation**: During DFA execution, priority (`prio`) MUST be tracked using **Priority Deltas** stored in `TransitionUpdate.BasePriority`. This prevents absolute priority accumulation from corrupting search restart logic.
@@ -115,7 +120,7 @@ To ensure DFA determinism and $O(1)$ transitions, the behavior of `.` (dot) is s
 - **Submatch Precision**: Internal capturing group boundaries that fall within an invalid UTF-8 sequence are handled on a best-effort basis and may deviate from standard `regexp` to maintain $O(n)$ performance.
 
 #### 2.19.2 Calculation-Free Boundary Analysis Mandate
-Junction verification for anchors (`\b`, `^`, `$`) MUST NOT employ `utf8.DecodeRune`. Word boundaries (`\b`) are defined as **ASCII Word Boundaries**; multi-byte bytes (0x80+) are treated as non-word characters.
+Junction verification for anchors (`\b`, `^`, `$`) MUST NOT employ `utf8.DecodeRune`. Word boundaries (`\b`) are defined as **ASCII Word Boundaries**; multi-byte bytes (0x80+) are treated as non-word characters. **Execution loops MUST propagate the Absolute Position Context via `ir.Input` to ensure accurate boundary evaluation even when scanning partial segments.**
 
 ### 2.20 Byte-Parallel SWAR Execution (Mandate)
 To achieve the $O(n)$ physical throughput goal, the engine MUST implement a hierarchical SWAR (SIMD Within A Register) execution strategy for character classes and repetitions.
@@ -132,6 +137,15 @@ To achieve the $O(n)$ physical throughput goal, the engine MUST implement a hier
 To maintain 100% compatibility, MAP MUST adhere to safety constraints:
 - **Nullable Pattern Protection**: If a pattern can match an empty string (`minLength == 0`), Pass 0 (MAP rejection) MUST be **disabled** to prevent missing matches (e.g., `a*` matching `""`).
 - **Complex Anchor Fallback**: Context-dependent anchors (e.g., `\b`, multiline `^`/`$`) MUST be handled by the DFA; MAP MUST be disabled if safe validation is impossible.
+
+#### 2.22 Absolute Coordinate Context Propagation (Mandate)
+To ensure 100% accurate anchor verification and submatch extraction regardless of the internal scan's starting point, the engine MUST propagate an **Absolute Coordinate Context** via the `ir.Input` structure.
+- **Virtual Slicing (Allocation Exclusion)**: `ir.Input` MUST hold the full, original byte slice (`OriginalB`) to act as a zero-allocation alternative to repeated slice truncations.
+- **Relative-Coordinate Hot Loops**: Internal execution loops MUST maintain a **Relative Coordinate System**. Loop variables (`i`), priority (`prio`), and internal capture indices MUST be 0-based relative to the start of the current virtual slice (`in.AbsPos`). This ensures that absolute coordinate addition is excluded from the $O(1)$ hot path.
+- **Zero-Ambiguity Contextual Anchors**: `VerifyBegin`, `VerifyEnd`, and `VerifyWord (\b)` MUST use `(in.AbsPos + i)` to index into `in.OriginalB`. This allows accurate boundary assessment even when the virtual slice starts in the middle of a word or line.
+- **Exit-Only Absolute Conversion**: Conversion from relative to absolute coordinates (e.g., `regs[i] += in.AbsPos`) MUST be performed **exactly once** at the public API boundary before returning results to the caller.
+- **Encapsulation**: This absolute coordinate system is an internal architectural detail. Public APIs MUST continue to provide standard, buffer-relative indices (0-based from the provided slice) to maintain 100% compatibility with Go's `regexp` package.
+
 
 ## 3. Feature Selection Policy
 
@@ -203,6 +217,7 @@ To prevent file bloat and maintain long-term maintainability, the codebase MUST 
 ### 6.2 IR & Compiler (`internal/ir/`)
 - **`dfa.go`**: core `DFA` structure, StateID layout constants, and basic getter methods.
 - **`dfa_builder.go`**: The DFA compiler, including subset construction, epsilon closure with anchor verification, and SWAR kernel detection.
+- **`validate.go`**: Pattern compatibility analysis and structural rejection logic (Epsilon loops, ambiguous captures).
 - **`anchor.go`**: Multi-Point Anchor extraction, constraint folding, and Pass 0 discovery kernels.
 - **`recap.go`**: Definitions for tag-carrying transition tables (`GroupRecapTable`, `RecapEntry`).
 - **`storage.go`**: Abstractions and implementations for NFA path set storage (`NFAPathStorage`).

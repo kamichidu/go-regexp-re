@@ -19,10 +19,12 @@ type matchContext struct {
 	pathHistory    []int32
 	regsBuf        [32]int
 	regs           []int
+	absBase        int // Absolute position of the start of the current scan
 }
 
-func (mc *matchContext) prepare(n int, numSubexp int) {
-	required := n + 1
+func (mc *matchContext) prepare(n int, numSubexp int, absBase int) {
+	mc.absBase = absBase
+	required := n + 2
 	if required > len(mc.historyBuf) {
 		if cap(mc.history) < required {
 			mc.history = make([]uint32, 0, required)
@@ -56,6 +58,10 @@ func (mc *matchContext) prepare(n int, numSubexp int) {
 	for i := range mc.regs {
 		mc.regs[i] = -1
 	}
+}
+
+func (mc *matchContext) clearHistory() {
+	mc.history = mc.history[:0]
 }
 
 func (mc *matchContext) appendRaw(sidx uint32) {

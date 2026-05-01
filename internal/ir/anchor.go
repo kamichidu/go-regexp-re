@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"github.com/kamichidu/go-regexp-re/syntax"
+	"math/bits"
 	"unicode/utf8"
 )
 
@@ -460,12 +461,13 @@ func SelectBestAnchors(anchors []AnchorInfo) []AnchorInfo {
 }
 
 func (a *AnchorInfo) Validate(b []byte, p int) (int, bool) {
+	// ... (no changes here as Input is not used in AnchorInfo.Validate? Wait.)
 	for _, c := range a.Backward {
 		start := p + c.Offset
 		if start < 0 {
 			return p, false
 		}
-		if !validateFixed(c.Info, b[start:start+c.Length]) {
+		if !ValidateFixed(c.Info, b[start:start+c.Length]) {
 			return p, false
 		}
 	}
@@ -481,13 +483,13 @@ func (a *AnchorInfo) Validate(b []byte, p int) (int, bool) {
 			return p, false
 		}
 		if c.IsRepeat {
-			skipped := warp(c.Info, b[start:])
+			skipped := Warp(c.Info, b[start:])
 			endPos = start + skipped
 		} else {
 			if start+c.Length > len(b) {
 				return p, false
 			}
-			if !validateFixed(c.Info, b[start:start+c.Length]) {
+			if !ValidateFixed(c.Info, b[start:start+c.Length]) {
 				return p, false
 			}
 			endPos = start + c.Length
@@ -497,7 +499,7 @@ func (a *AnchorInfo) Validate(b []byte, p int) (int, bool) {
 	return endPos, true
 }
 
-func validateFixed(info CCWarpInfo, b []byte) bool {
+func ValidateFixed(info CCWarpInfo, b []byte) bool {
 	if len(b) == 0 {
 		return true
 	}
@@ -577,11 +579,22 @@ func validateFixed(info CCWarpInfo, b []byte) bool {
 	return true
 }
 
-func warp(info CCWarpInfo, b []byte) int {
+func Warp(info CCWarpInfo, b []byte) int {
 	i := 0
 	switch info.Kernel {
 	case CCWarpEqual:
 		target := byte(info.V0)
+		target64 := splat(uint64(target))
+		for i+8 <= len(b) {
+			v := binary.LittleEndian.Uint64(b[i:])
+			if v != target64 {
+				// Find first different byte
+				diff := v ^ target64
+				pos := bits.TrailingZeros64(diff) / 8
+				return i + pos
+			}
+			i += 8
+		}
 		for i < len(b) && b[i] == target {
 			i++
 		}
@@ -590,7 +603,11 @@ func warp(info CCWarpInfo, b []byte) int {
 		low64, high64 := splat(uint64(low)), splat(uint64(high))
 		for i+8 <= len(b) {
 			v := binary.LittleEndian.Uint64(b[i:])
-			if ((v+0x7f7f7f7f7f7f7f7f-high64)|(v-low64))&0x8080808080808080 != 0x8080808080808080 {
+			// Byte j is outside if (v_j < low) OR (v_j > high)
+			// has_less(v, low) = (v - low64) & ~v & 0x80...
+			// has_greater(v, high) = (high64 - v) & ~high64 & 0x80...
+			outside := ((v - low64) & ^v) | ((high64 - v) & ^high64)
+			if (outside & 0x8080808080808080) != 0 {
 				break
 			}
 			i += 8
@@ -604,7 +621,7 @@ func warp(info CCWarpInfo, b []byte) int {
 	case CCWarpAnyChar:
 		for i+8 <= len(b) {
 			v := binary.LittleEndian.Uint64(b[i:])
-			if v&0x8080808080808080 != 0 {
+			if (v & 0x8080808080808080) != 0 {
 				break
 			}
 			i += 8
@@ -633,7 +650,11 @@ func IndexClass(info CCWarpInfo, b []byte) int {
 		low64, high64 := splat(uint64(low)), splat(uint64(high))
 		for i+8 <= len(b) {
 			v := binary.LittleEndian.Uint64(b[i:])
-			if ((v+0x7f7f7f7f7f7f7f7f-high64)|(v-low64))&0x8080808080808080 != 0 {
+			// Byte j is inside if !((v_j < low) OR (v_j > high))
+			// is_outside has bit 7 set if byte is outside.
+			outside := ((v - low64) & ^v) | ((high64 - v) & ^high64)
+			inside := ^outside & 0x8080808080808080
+			if inside != 0 {
 				break
 			}
 			i += 8
@@ -644,11 +665,17 @@ func IndexClass(info CCWarpInfo, b []byte) int {
 			}
 		}
 	case CCWarpAnyChar:
-		for i < len(b) {
+		for i+8 <= len(b) {
+			v := binary.LittleEndian.Uint64(b[i:])
+			if (^v & 0x8080808080808080) != 0 {
+				break
+			}
+			i += 8
+		}
+		for ; i < len(b); i++ {
 			if b[i] < 0x80 {
 				return i
 			}
-			i++
 		}
 	case CCWarpAnyExceptNL:
 		for i < len(b) {
