@@ -436,7 +436,7 @@ func CheckCompatibility(re *syntax.Regexp) error {
 		if hasEmptyAlternative(re.Sub[0]) {
 			return &syntax.UnsupportedError{Op: "empty alternative in capture"}
 		}
-	case syntax.OpQuest, syntax.OpStar, syntax.OpPlus, syntax.OpRepeat:
+	case syntax.OpQuest:
 		if hasCapture(re.Sub[0]) && matchesEmpty(re.Sub[0]) {
 			return &syntax.UnsupportedError{Op: "optional empty capture"}
 		}
@@ -474,6 +474,7 @@ func hasEmptyAlternative(re *syntax.Regexp) bool {
 			}
 		}
 	case syntax.OpConcat:
+		// If a concat consists only of empty matches, it's an empty alternative
 		if len(re.Sub) == 0 {
 			return true
 		}
@@ -492,15 +493,9 @@ func matchesEmpty(re *syntax.Regexp) bool {
 	case syntax.OpEmptyMatch, syntax.OpStar, syntax.OpQuest:
 		return true
 	case syntax.OpRepeat:
-		if re.Min == 0 {
-			return true
-		}
-	case syntax.OpCapture, syntax.OpAlternate:
-		for _, sub := range re.Sub {
-			if matchesEmpty(sub) {
-				return true
-			}
-		}
+		return re.Min == 0
+	case syntax.OpCapture:
+		return matchesEmpty(re.Sub[0])
 	case syntax.OpConcat:
 		for _, sub := range re.Sub {
 			if !matchesEmpty(sub) {
@@ -508,40 +503,56 @@ func matchesEmpty(re *syntax.Regexp) bool {
 			}
 		}
 		return true
+	case syntax.OpAlternate:
+		for _, sub := range re.Sub {
+			if matchesEmpty(sub) {
+				return true
+			}
+		}
+		return false
 	}
 	return false
 }
 
 func checkEpsilonLoop(prog *syntax.Prog) error {
-	for i := range prog.Inst {
-		if hasEpsilonCycle(prog, uint32(i), make(map[uint32]bool), make(map[uint32]bool)) {
+	visited := make([]bool, len(prog.Inst))
+	onStack := make([]bool, len(prog.Inst))
+
+	var dfs func(int) error
+	dfs = func(id int) error {
+		if onStack[id] {
 			return &syntax.UnsupportedError{Op: "epsilon loop"}
+		}
+		if visited[id] {
+			return nil
+		}
+
+		visited[id] = true
+		onStack[id] = true
+		defer func() { onStack[id] = false }()
+
+		inst := prog.Inst[id]
+		if isEpsilon(inst.Op) {
+			if err := dfs(int(inst.Out)); err != nil {
+				return err
+			}
+			if inst.Op == syntax.InstAlt || inst.Op == syntax.InstAltMatch {
+				if err := dfs(int(inst.Arg)); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+
+	for i := range prog.Inst {
+		if !visited[i] {
+			if err := dfs(i); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
-}
-
-func hasEpsilonCycle(prog *syntax.Prog, id uint32, visited, onStack map[uint32]bool) bool {
-	if onStack[id] {
-		return true
-	}
-	if visited[id] {
-		return false
-	}
-	visited[id] = true
-	onStack[id] = true
-	defer func() { onStack[id] = false }()
-	inst := prog.Inst[id]
-	if !isEpsilon(inst.Op) {
-		return false
-	}
-	switch inst.Op {
-	case syntax.InstAlt, syntax.InstAltMatch:
-		return hasEpsilonCycle(prog, inst.Out, visited, onStack) || hasEpsilonCycle(prog, inst.Arg, visited, onStack)
-	case syntax.InstCapture, syntax.InstEmptyWidth, syntax.InstNop:
-		return hasEpsilonCycle(prog, inst.Out, visited, onStack)
-	}
-	return false
 }
 
 func isEpsilon(op syntax.InstOp) bool {
