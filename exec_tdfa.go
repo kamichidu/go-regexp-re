@@ -8,13 +8,23 @@ func (re *Regexp) sparseTDFA_PathSelection(mc *matchContext, b []byte, start, en
 	d := re.dfa
 	recap := d.RecapTables()[0]
 
-	// mc.history has entries for pos start, start+1, ..., end
-	lastSidx := mc.history[end-start] & ir.StateIDMask
+	// Defensive: last state is at the end of history.
+	hIdx := len(mc.history) - 1
+	if hIdx < 0 {
+		return
+	}
+
+	lastSidx := mc.history[hIdx] & ir.StateIDMask
 	currPrio := int32(d.MatchPriority(lastSidx))
 	mc.pathHistory[end] = currPrio
 
 	for curr := end - 1; curr >= start; curr-- {
-		h := mc.history[curr-start]
+		hIdx--
+		if hIdx < 0 {
+			break
+		}
+
+		h := mc.history[hIdx]
 		sidx := h & ir.StateIDMask
 		byteVal := byte(0)
 		if curr < len(b) {
@@ -22,37 +32,24 @@ func (re *Regexp) sparseTDFA_PathSelection(mc *matchContext, b []byte, start, en
 		}
 
 		off := (int(sidx) << 8) | int(byteVal)
-		found := false
-		bestInputPrio := int32(1 << 30)
-
 		isLast := curr == end-1
-		for _, entry := range recap.Transitions[off] {
-			if entry.NextPriority == currPrio && entry.IsMatch == isLast {
-				if entry.InputPriority < bestInputPrio {
-					bestInputPrio = entry.InputPriority
+
+		found := false
+		if off < len(recap.Transitions) {
+			for _, entry := range recap.Transitions[off] {
+				if entry.NextPriority == currPrio && entry.IsMatch == isLast {
+					currPrio = entry.InputPriority
+					mc.pathHistory[curr] = currPrio
 					found = true
+					break
 				}
 			}
 		}
 
 		if !found {
-			// Fallback: try without IsMatch constraint if trace is broken (should not happen)
-			for _, entry := range recap.Transitions[off] {
-				if entry.NextPriority == currPrio {
-					if entry.InputPriority < bestInputPrio {
-						bestInputPrio = entry.InputPriority
-						found = true
-					}
-				}
-			}
+			// Fallback: stay at current priority
+			mc.pathHistory[curr] = currPrio
 		}
-
-		if found {
-			currPrio = bestInputPrio
-		} else {
-			currPrio = 0
-		}
-		mc.pathHistory[curr] = currPrio
 	}
 }
 
@@ -60,10 +57,20 @@ func (re *Regexp) sparseTDFA_Recap(mc *matchContext, b []byte, start, end, prio 
 	d := re.dfa
 	recap := d.RecapTables()[0]
 
+	for i := range regs {
+		regs[i] = -1
+	}
+
 	re.applyEntryTags(regs, d.StartUpdates(), mc.pathHistory[start], start)
 
+	hIdx := 0
 	for curr := start; curr < end; curr++ {
-		h := mc.history[curr-start]
+		if hIdx >= len(mc.history) {
+			break
+		}
+		h := mc.history[hIdx]
+		hIdx++
+
 		sidx := h & ir.StateIDMask
 		byteVal := byte(0)
 		if curr < len(b) {

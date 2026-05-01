@@ -93,8 +93,10 @@ func NewDFAWithMemoryLimit(ctx context.Context, re *syntax.Regexp, prog *syntax.
 		for _, p := range paths {
 			h = (h ^ uint64(p.ID)) * 1099511628211
 			h = (h ^ uint64(p.NodeID)) * 1099511628211
-			h = (h ^ uint64(p.Priority-minP)) * 1099511628211
-			h = (h ^ uint64(p.Tags)) * 1099511628211
+			if !naked {
+				h = (h ^ uint64(p.Priority-minP)) * 1099511628211
+				h = (h ^ uint64(p.Tags)) * 1099511628211
+			}
 			h = (h ^ uint64(p.Anchors)) * 1099511628211
 		}
 		if res, ok := closureCache[h]; ok {
@@ -202,6 +204,7 @@ func NewDFAWithMemoryLimit(ctx context.Context, re *syntax.Regexp, prog *syntax.
 					}
 				}
 			}
+
 			if len(nextPaths) == 0 {
 				continue
 			}
@@ -252,7 +255,135 @@ func NewDFAWithMemoryLimit(ctx context.Context, re *syntax.Regexp, prog *syntax.
 		}
 	}
 
+	// CCWarp Detection
 	d.ccWarpTable = make([]CCWarpInfo, d.numStates)
+	for i := 0; i < d.numStates; i++ {
+		var selfLoops [256]bool
+		count := 0
+		for b := 0; b < 128; b++ {
+			idx := (i << 8) | b
+			if idx >= len(d.transitions) {
+				continue
+			}
+			next := d.transitions[idx]
+			if next == InvalidState {
+				continue
+			}
+			if (next & StateIDMask) != uint32(i) {
+				continue
+			}
+
+			// No tags or anchors on self-loop
+			hasRealTags := false
+			if (next & TaggedStateFlag) != 0 {
+				uIdx := d.tagUpdateIndices[idx]
+				if uIdx != 0xFFFFFFFF {
+					update := d.tagUpdates[uIdx]
+					if update.BasePriority != 0 {
+						hasRealTags = true
+					}
+					for _, u := range update.PreUpdates {
+						if u.PreTags|u.PostTags != 0 {
+							hasRealTags = true
+							break
+						}
+					}
+				}
+			}
+			if !hasRealTags && (next&AnchorVerifyFlag) == 0 {
+				selfLoops[b] = true
+				count++
+			}
+		}
+
+		if count == 0 {
+			continue
+		}
+		if count == 128 {
+			d.ccWarpTable[i] = CCWarpInfo{Kernel: CCWarpAnyChar}
+		} else {
+			low, high := -1, -1
+			isSingleRange := true
+			for b := 0; b < 128; b++ {
+				if selfLoops[b] {
+					if low == -1 {
+						low = b
+					}
+					high = b
+				} else if low != -1 {
+					for j := b + 1; j < 128; j++ {
+						if selfLoops[j] {
+							isSingleRange = false
+							break
+						}
+					}
+					break
+				}
+			}
+			if isSingleRange && low != -1 {
+				d.ccWarpTable[i] = CCWarpInfo{
+					Kernel: CCWarpSingleRange,
+					V0:     uint64(low),
+					V1:     uint64(high),
+				}
+			}
+		}
+
+		// Apply flag to self-loops
+		if d.ccWarpTable[i].Kernel != CCWarpNone {
+			for b := 0; b < 256; b++ {
+				idx := (i << 8) | b
+				if idx < len(d.transitions) && (d.transitions[idx]&StateIDMask) == uint32(i) {
+					d.transitions[idx] |= CCWarpFlag
+				}
+			}
+		}
+	}
+
+	// SearchWarp Pre-filter
+	searchIdx := int(d.searchState & StateIDMask)
+	var firstBytes [2]uint64
+	searchCount := 0
+	for b := 0; b < 128; b++ {
+		idx := (searchIdx << 8) | b
+		if idx < len(d.transitions) && d.transitions[idx] != InvalidState {
+			firstBytes[b>>6] |= 1 << (b & 63)
+			searchCount++
+		}
+	}
+	if searchCount > 0 && searchCount < 64 {
+		low, high := -1, -1
+		isSingleRange := true
+		for b := 0; b < 128; b++ {
+			if (firstBytes[b>>6] & (1 << (b & 63))) != 0 {
+				if low == -1 {
+					low = b
+				}
+				high = b
+			} else if low != -1 {
+				for j := b + 1; j < 128; j++ {
+					if (firstBytes[j>>6] & (1 << (j & 63))) != 0 {
+						isSingleRange = false
+						break
+					}
+				}
+				break
+			}
+		}
+		if isSingleRange && low != -1 {
+			var chars []byte
+			for b := low; b <= high; b++ {
+				chars = append(chars, byte(b))
+			}
+			d.searchWarp = CCWarpInfo{
+				Kernel:   CCWarpSingleRange,
+				V0:       uint64(low),
+				V1:       uint64(high),
+				IndexAny: string(chars),
+			}
+		}
+	}
+
 	return d, nil
 }
 
@@ -341,7 +472,6 @@ func epsilonClosureWithAnchorWall(prog *syntax.Prog, paths []NFAPath) ClosureRes
 			}
 			if m, ok := minPriority[ph.sourcePrio][nsk]; !ok || p.Priority <= m {
 				minPriority[ph.sourcePrio][nsk] = p.Priority
-				// ALWAYS record all tags hit in epsilon closure to support greedy updates.
 				nt := ph.newTags | tagBit
 				stack = append(stack, pathWithMeta{
 					p:          NFAPath{ID: inst.Out, Priority: p.Priority, Anchors: p.Anchors, Tags: p.Tags | tagBit},

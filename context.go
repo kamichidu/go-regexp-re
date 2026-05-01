@@ -24,7 +24,7 @@ type matchContext struct {
 
 func (mc *matchContext) prepare(n int, numSubexp int, absBase int) {
 	mc.absBase = absBase
-	required := n + 1
+	required := n + 2
 	if required > len(mc.historyBuf) {
 		if cap(mc.history) < required {
 			mc.history = make([]uint32, 0, required)

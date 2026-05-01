@@ -85,14 +85,14 @@ func (re *Regexp) findSubmatchIndexAt(b []byte, pos int, totalBytes int, origina
 	defer matchContextPool.Put(mc)
 	mc.prepare(len(b), re.numSubexp, pos)
 
-	start, end, prio := re.submatch(in, mc)
-	if start < 0 {
+	matchStart, matchEnd, prio := re.submatch(in, mc)
+	if matchStart < 0 {
 		return nil
 	}
 
 	regs := mc.regs
-	re.sparseTDFA_PathSelection(mc, b, start, end, prio)
-	re.sparseTDFA_Recap(mc, b, start, end, prio, regs)
+	re.sparseTDFA_PathSelection(mc, b, matchStart, matchEnd, prio)
+	re.sparseTDFA_Recap(mc, b, matchStart, matchEnd, prio, regs)
 
 	res := make([]int, len(mc.regs))
 	copy(res, mc.regs)

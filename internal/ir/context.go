@@ -15,7 +15,7 @@ type Input struct {
 }
 
 // VerifyBegin checks for ^ and \A anchors using absolute context.
-func VerifyBegin(in Input, i int, req syntax.EmptyOp) bool {
+func VerifyBegin(in *Input, i int, req syntax.EmptyOp) bool {
 	if (req & (syntax.EmptyBeginText | syntax.EmptyBeginLine)) == 0 {
 		return true
 	}
@@ -27,7 +27,7 @@ func VerifyBegin(in Input, i int, req syntax.EmptyOp) bool {
 }
 
 // VerifyEnd checks for $ and \z anchors using absolute context.
-func VerifyEnd(in Input, i int, req syntax.EmptyOp) bool {
+func VerifyEnd(in *Input, i int, req syntax.EmptyOp) bool {
 	if (req & (syntax.EmptyEndText | syntax.EmptyEndLine)) == 0 {
 		return true
 	}
@@ -39,7 +39,7 @@ func VerifyEnd(in Input, i int, req syntax.EmptyOp) bool {
 }
 
 // VerifyWord checks for \b and \B anchors using absolute context.
-func VerifyWord(in Input, i int, req syntax.EmptyOp) bool {
+func VerifyWord(in *Input, i int, req syntax.EmptyOp) bool {
 	if (req & (syntax.EmptyWordBoundary | syntax.EmptyNoWordBoundary)) == 0 {
 		return true
 	}

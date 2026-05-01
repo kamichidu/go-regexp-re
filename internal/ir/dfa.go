@@ -51,7 +51,7 @@ type CCWarpInfo struct {
 }
 
 const MaxDFAMemory = 64 * 1024 * 1024
-const SearchRestartPenalty = 1000
+const SearchRestartPenalty = 1024
 
 type NFAPath struct {
 	ID, NodeID uint32

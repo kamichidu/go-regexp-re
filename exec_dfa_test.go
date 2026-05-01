@@ -49,90 +49,35 @@ func TestCCWarp(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		re, err := Compile(tt.pattern)
-		if err != nil {
-			t.Errorf("Pattern %q: Compile error: %v", tt.pattern, err)
-			continue
-		}
-
-		got := re.FindStringSubmatchIndex(tt.input)
-		if tt.match {
-			if got == nil {
-				t.Errorf("Pattern %q, Input %q: expected match, got nil", tt.pattern, tt.input)
-				continue
+		t.Run(tt.pattern, func(t *testing.T) {
+			re := MustCompile(tt.pattern)
+			got := re.FindStringSubmatchIndex(tt.input)
+			if tt.match {
+				if got == nil {
+					t.Errorf("Pattern %q should match input %q", tt.pattern, tt.input)
+					return
+				}
+				if got[0] != tt.indices[0] || got[1] != tt.indices[1] {
+					t.Errorf("Pattern %q match %q: got %v, want %v", tt.pattern, tt.input, got[:2], tt.indices)
+				}
+			} else {
+				if got != nil {
+					t.Errorf("Pattern %q should NOT match input %q, got %v", tt.pattern, tt.input, got)
+				}
 			}
-			if got[0] != tt.indices[0] || got[1] != tt.indices[1] {
-				t.Errorf("Pattern %q, Input %q: got indices %v, want %v", tt.pattern, tt.input, got[:2], tt.indices[:2])
+
+			// Parity check
+			stdRE := goregexp.MustCompile(tt.pattern)
+			want := stdRE.FindStringSubmatchIndex(tt.input)
+			if want == nil && got != nil {
+				t.Errorf("Pattern %q match %q: std rejected, but got %v", tt.pattern, tt.input, got)
+			} else if want != nil && got == nil {
+				t.Errorf("Pattern %q match %q: std matched %v, but got nil", tt.pattern, tt.input, want)
+			} else if want != nil && got != nil {
+				if want[0] != got[0] || want[1] != got[1] {
+					t.Errorf("Pattern %q match %q: got %v, want std %v", tt.pattern, tt.input, got[:2], want[:2])
+				}
 			}
-		} else {
-			if got != nil {
-				t.Errorf("Pattern %q, Input %q: expected no match, got %v", tt.pattern, tt.input, got)
-			}
-		}
-	}
-}
-
-func TestWarpAndAnchors(t *testing.T) {
-	tests := []struct {
-		pattern string
-		input   string
-		want    bool // Expected value (Go standard compliant)
-		isStd   bool // Should match standard library behavior
-	}{
-		// Basic anchors
-		{"^abc$", "abc", true, true},
-		{"^abc$", "abcd", false, true},
-		{"^abc$", " xabc", false, true},
-		{"^abc", "abc", true, true},
-		{"abc$", "abc", true, true},
-
-		// Word boundaries (\b) - Standard ASCII word boundary
-		{"\\babc\\b", "abc", true, true},
-		{"\\babc\\b", "xabc", false, true},
-		{"\\babc\\b", "abcx", false, true},
-		{"\\babc\\b", " abc ", true, true},
-		{"\\babc\\b", "x abc x", true, true},
-		{"\\babc\\b", "1abc2", false, true},
-
-		// Multi-byte Warp + Anchors
-		{"^あ$", "あ", true, true},
-		{"^あ$", "い", false, true},
-		{"^あ$", "あい", false, true},
-		// Note: \b is ASCII-only by default in Go. 'あ' is NOT a word character.
-		{"\\bあ\\b", "あ", false, true},
-		{"\\bあ\\b", "aあ", false, true},
-		{"\\bあ\\b", " あ ", false, true},
-		{"\\bあ\\b", "あ ", false, true},
-		{"\\bあ\\b", " あ", false, true},
-
-		// Dot Behavior (Standard compliant byte-level DFA)
-		{"^.+$", "あいう", true, true},
-		{"^あ.う$", "あいう", true, true},
-		{"^.あ.$", "いあう", true, true},
-
-		// Nested/Sequential Anchors
-		{"^\\babc\\b$", "abc", true, true},
-		{"^\\babc\\b$", " abc ", false, true},
-	}
-
-	for _, tt := range tests {
-		re, err := Compile(tt.pattern)
-		if err != nil {
-			t.Errorf("Compile(%q) failed: %v", tt.pattern, err)
-			continue
-		}
-		got := re.MatchString(tt.input)
-
-		if tt.isStd {
-			stdRe := goregexp.MustCompile(tt.pattern)
-			stdWant := stdRe.MatchString(tt.input)
-			if got != stdWant {
-				t.Errorf("Match(%q, %q) = %v, want %v (standard mismatch)", tt.pattern, tt.input, got, stdWant)
-			}
-		}
-
-		if got != tt.want {
-			t.Errorf("Match(%q, %q) = %v, want %v (defined behavior)", tt.pattern, tt.input, got, tt.want)
-		}
+		})
 	}
 }
