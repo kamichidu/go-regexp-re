@@ -114,14 +114,21 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 					break
 				}
 
-				if re.lineBounded {
-					// Line-Anchored Jump: if there is a newline between current i and the anchor,
-					// any match using this anchor MUST start after that newline.
-					lastNL := bytes.LastIndexByte(b[i:i+pos], '\n')
-					if lastNL >= 0 {
-						restartBase = i + lastNL + 1
+				if re.lineBounded && anchor.Distance > 0 {
+					if b[i+pos] == '\n' {
+						restartBase = i + pos + 1
 						i = restartBase
 						continue
+					}
+
+					// For literals, Index doesn't check for \n, so we still need LastIndexByte.
+					if !anchor.HasClass {
+						lastNL := bytes.LastIndexByte(b[i:i+pos], '\n')
+						if lastNL >= 0 {
+							restartBase = i + lastNL + 1
+							i = restartBase
+							continue
+						}
 					}
 				}
 
@@ -137,16 +144,16 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 					}
 
 					// Pass 0: Pre-validation
-					if _, newStart, ok := anchor.Validate(b, i+pos, candidateStart); !ok {
-						if newStart > candidateStart {
-							// Backward constraint failed (e.g. newline found in .*abc)
-							// We can jump to the failure point.
-							restartBase = newStart - 1
-						} else {
-							i = i + pos + 1
-							restartBase = i - 1
+					if anchor.HasConstraints {
+						if _, newStart, ok := anchor.Validate(b, i+pos, candidateStart); !ok {
+							if newStart > candidateStart {
+								restartBase = newStart - 1
+							} else {
+								i = i + pos + 1
+								restartBase = i - 1
+							}
+							continue
 						}
-						continue
 					}
 
 					restartBase = candidateStart
@@ -168,9 +175,8 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 				}
 
 				if re.lineBounded {
-					lastNL := bytes.LastIndexByte(b[i:i+pos], '\n')
-					if lastNL >= 0 {
-						restartBase = i + lastNL + 1
+					if b[i+pos] == '\n' {
+						restartBase = i + pos + 1
 						i = restartBase
 						continue
 					}
@@ -184,6 +190,16 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 				if pos < 0 {
 					break
 				}
+
+				if re.lineBounded {
+					lastNL := bytes.LastIndexByte(b[i:i+pos], '\n')
+					if lastNL >= 0 {
+						restartBase = i + lastNL + 1
+						i = restartBase
+						continue
+					}
+				}
+
 				restartBase += pos
 				i = restartBase
 			} else if re.searchWarp.Kernel != ir.CCWarpNone {
@@ -339,14 +355,21 @@ func fastMatchExecLoop(re *Regexp, in *ir.Input) (int, int, int) {
 					break
 				}
 
-				if re.lineBounded {
-					// Line-Anchored Jump: if there is a newline between current i and the anchor,
-					// any match using this anchor MUST start after that newline.
-					lastNL := bytes.LastIndexByte(b[i:i+pos], '\n')
-					if lastNL >= 0 {
-						restartBase = i + lastNL + 1
+				if re.lineBounded && anchor.Distance > 0 {
+					if b[i+pos] == '\n' {
+						restartBase = i + pos + 1
 						i = restartBase
 						continue
+					}
+
+					// For literals, Index doesn't check for \n, so we still need LastIndexByte.
+					if !anchor.HasClass {
+						lastNL := bytes.LastIndexByte(b[i:i+pos], '\n')
+						if lastNL >= 0 {
+							restartBase = i + lastNL + 1
+							i = restartBase
+							continue
+						}
 					}
 				}
 
@@ -362,16 +385,16 @@ func fastMatchExecLoop(re *Regexp, in *ir.Input) (int, int, int) {
 					}
 
 					// Pass 0: Pre-validation
-					if _, newStart, ok := anchor.Validate(b, i+pos, candidateStart); !ok {
-						if newStart > candidateStart {
-							// Backward constraint failed (e.g. newline found in .*abc)
-							// We can jump to the failure point.
-							restartBase = newStart - 1
-						} else {
-							i = i + pos + 1
-							restartBase = i - 1
+					if anchor.HasConstraints {
+						if _, newStart, ok := anchor.Validate(b, i+pos, candidateStart); !ok {
+							if newStart > candidateStart {
+								restartBase = newStart - 1
+							} else {
+								i = i + pos + 1
+								restartBase = i - 1
+							}
+							continue
 						}
-						continue
 					}
 
 					restartBase = candidateStart
@@ -393,9 +416,8 @@ func fastMatchExecLoop(re *Regexp, in *ir.Input) (int, int, int) {
 				}
 
 				if re.lineBounded {
-					lastNL := bytes.LastIndexByte(b[i:i+pos], '\n')
-					if lastNL >= 0 {
-						restartBase = i + lastNL + 1
+					if b[i+pos] == '\n' {
+						restartBase = i + pos + 1
 						i = restartBase
 						continue
 					}
@@ -405,6 +427,16 @@ func fastMatchExecLoop(re *Regexp, in *ir.Input) (int, int, int) {
 				if pos < 0 {
 					break
 				}
+
+				if re.lineBounded {
+					lastNL := bytes.LastIndexByte(b[i:i+pos], '\n')
+					if lastNL >= 0 {
+						restartBase = i + lastNL + 1
+						i = restartBase
+						continue
+					}
+				}
+
 				restartBase += pos
 				i = restartBase
 			} else if re.searchWarp.Kernel != ir.CCWarpNone {

@@ -27,17 +27,18 @@ type Constraint struct {
 
 // AnchorInfo holds information about a potential anchor in the pattern.
 type AnchorInfo struct {
-	Anchor       []byte
-	Class        CCWarpInfo // If Anchor is empty, use this SWAR class anchor
-	HasClass     bool
-	Type         AnchorType
-	Distance     int  // Minimum distance from the start of the match
-	IsFixed      bool // True if Distance is the EXACT distance
-	Mandatory    bool // True if this anchor must be present in every match
-	Forward      []Constraint
-	Backward     []Constraint
-	HasBeginText bool // This anchor path is strictly anchored to ^
-	HasEndText   bool // This anchor path is strictly anchored to $
+	Anchor         []byte
+	Class          CCWarpInfo // If Anchor is empty, use this SWAR class anchor
+	HasClass       bool
+	Type           AnchorType
+	Distance       int  // Minimum distance from the start of the match
+	IsFixed        bool // True if Distance is the EXACT distance
+	Mandatory      bool // True if this anchor must be present in every match
+	Forward        []Constraint
+	Backward       []Constraint
+	HasConstraints bool // True if Forward or Backward is not empty
+	HasBeginText   bool // This anchor path is strictly anchored to ^
+	HasEndText     bool // This anchor path is strictly anchored to $
 }
 
 // ExtractAnchors traverses the AST and identifies all potential anchors.
@@ -370,6 +371,9 @@ func minLength(re *syntax.Regexp) int {
 func ExtractConstraints(re *syntax.Regexp, anchor *AnchorInfo) {
 	flatRE := stripCaptures(re)
 	extractConstraints(flatRE, anchor)
+	if len(anchor.Backward) > 0 || len(anchor.Forward) > 0 {
+		anchor.HasConstraints = true
+	}
 }
 
 func extractConstraints(re *syntax.Regexp, anchor *AnchorInfo) {
@@ -942,30 +946,50 @@ func IndexClass(info CCWarpInfo, b []byte) int {
 		}
 		return -1
 	case CCWarpEqual:
+		if info.IncludeNL {
+			target := byte(info.V0)
+			for i < len(b) {
+				if b[i] == target || b[i] == '\n' {
+					return i
+				}
+				i++
+			}
+			return -1
+		}
 		return bytes.IndexByte(b, byte(info.V0))
 	case CCWarpSingleRange:
 		low, high := byte(info.V0), byte(info.V1)
 		low64, high64 := splat(uint64(low)), splat(uint64(high))
+		var nl64 uint64
+		if info.IncludeNL {
+			nl64 = splat(uint64('\n'))
+		}
+
 		for i+8 <= len(b) {
 			v := binary.LittleEndian.Uint64(b[i:])
 			// Byte j is inside if !((v_j < low) OR (v_j > high))
-			// is_outside has bit 7 set if byte is outside.
 			outside := ((v - low64) & ^v) | ((high64 - v) & ^high64)
 			inside := ^outside & 0x8080808080808080
+			if info.IncludeNL {
+				// Also inside if byte is \n
+				diffNL := v ^ nl64
+				matchNL := ^((diffNL + 0x7f7f7f7f7f7f7f7f) | diffNL) & 0x8080808080808080
+				inside |= matchNL
+			}
 			if inside != 0 {
 				break
 			}
 			i += 8
 		}
 		for ; i < len(b); i++ {
-			if b[i] >= low && b[i] <= high {
+			if (b[i] >= low && b[i] <= high) || (info.IncludeNL && b[i] == '\n') {
 				return i
 			}
 		}
 	case CCWarpNotEqual:
 		target := byte(info.V0)
 		for i < len(b) {
-			if b[i] != target {
+			if b[i] != target || (info.IncludeNL && b[i] == '\n') {
 				return i
 			}
 			i++

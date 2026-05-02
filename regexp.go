@@ -130,6 +130,11 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 
 	if res.literalMatcher == nil && !ir.HasComplexAnchors(s) {
 		res.mapAnchors = ir.SelectBestAnchors(s)
+		for i := range res.mapAnchors {
+			if res.lineBounded && res.mapAnchors[i].Distance > 0 {
+				res.mapAnchors[i].Class.IncludeNL = true
+			}
+		}
 		if len(res.mapAnchors) == 1 {
 			res.primaryAnchor = &res.mapAnchors[0]
 		} else if len(res.mapAnchors) > 1 {
@@ -149,6 +154,12 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 				if b != 0 && !seen[b] {
 					buf = append(buf, b)
 					seen[b] = true
+				}
+			}
+			if res.lineBounded {
+				if !seen['\n'] {
+					buf = append(buf, '\n')
+					seen['\n'] = true
 				}
 			}
 			res.searchAny = string(buf)
