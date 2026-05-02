@@ -19,10 +19,12 @@ func (re *Regexp) bindMatchStrategy() {
 		return
 	}
 
-	if re.dfa != nil && re.dfa.HasAnchors() {
-		re.strategy = strategyExtended
-	} else {
+	// If the pattern has no capturing groups and no complex priority shifts,
+	// we can use the fastest match loop.
+	if re.numSubexp == 0 && (re.dfa == nil || !re.dfa.HasAnchors()) {
 		re.strategy = strategyFast
+	} else {
+		re.strategy = strategyExtended
 	}
 }
 
@@ -39,13 +41,10 @@ func (re *Regexp) findIndexAt(b []byte, pos int, totalBytes int, originalB []byt
 	var start, end, prio int
 	switch re.strategy {
 	case strategyLiteral:
-		res := re.literalMatcher.FindSubmatchIndex(in)
-		if res == nil {
-			return -1, -1, 0
-		}
-		start, end, prio = res[0], res[1], 0
+		start, end = re.literalMatcher.FindIndex(&in)
+		prio = 0
 	default:
-		start, end, prio = re.match(in)
+		start, end, prio = re.match(&in)
 	}
 
 	if start >= 0 {
@@ -65,31 +64,38 @@ func (re *Regexp) findSubmatchIndexAt(b []byte, pos int, totalBytes int, origina
 	}
 
 	if re.strategy == strategyLiteral {
-		regs := make([]int, (re.numSubexp+1)*2)
-		for i := range regs {
-			regs[i] = -1
-		}
-		if !re.literalMatcher.FindSubmatchIndexInto(in, regs) {
+		mc := matchContextPool.Get().(*matchContext)
+		defer matchContextPool.Put(mc)
+		mc.prepare(len(b), re.numSubexp, pos)
+
+		if !re.literalMatcher.FindSubmatchIndexInto(&in, mc.regs) {
 			return nil
 		}
 		// Adjust to absolute
-		for i := range regs {
-			if regs[i] >= 0 {
-				regs[i] += pos
+		for i := range mc.regs {
+			if mc.regs[i] >= 0 {
+				mc.regs[i] += pos
 			}
 		}
-		return regs
+		res := make([]int, len(mc.regs))
+		copy(res, mc.regs)
+		return res
 	}
 
 	mc := matchContextPool.Get().(*matchContext)
 	defer matchContextPool.Put(mc)
 	mc.prepare(len(b), re.numSubexp, pos)
 
-	matchStart, matchEnd, prio := re.submatch(in, mc)
+	// Pass 0 & 1: Discovery
+	matchStart, matchEnd, prio := fastDiscoveryLoop(re, &in)
 	if matchStart < 0 {
 		return nil
 	}
 
+	// Pass 2: Anchored Recording
+	prio = anchoredRecordingLoop(re, &in, mc, matchStart, matchEnd)
+
+	// Pass 3 & 4: Extraction
 	regs := mc.regs
 	re.sparseTDFA_PathSelection(mc, b, matchStart, matchEnd, prio)
 	re.sparseTDFA_Recap(mc, b, matchStart, matchEnd, prio, regs)
@@ -99,13 +105,8 @@ func (re *Regexp) findSubmatchIndexAt(b []byte, pos int, totalBytes int, origina
 	return res
 }
 
-func (re *Regexp) match(in ir.Input) (int, int, int) {
-	switch re.strategy {
-	case strategyExtended:
-		return extendedMatchExecLoop(re, in)
-	default:
-		return fastMatchExecLoop(re, in)
-	}
+func (re *Regexp) match(in *ir.Input) (int, int, int) {
+	return fastMatchExecLoop(re, in)
 }
 
 func (re *Regexp) submatch(in ir.Input, mc *matchContext) (int, int, int) {

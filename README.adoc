@@ -92,7 +92,7 @@ Like the standard library (RE2-based), this engine enforces constraints necessar
 
 === Engine-Specific Architectural Constraints
 
-1. **Strict Structural Validation**: Certain patterns are rejected at compile-time with `regexp.UnsupportedError` to **preserve DFA determinacy** and guarantee $O(n)$ performance. Refer to the **xref:docs/unsupported-patterns.adoc[Unsupported Patterns Guide]** for details and examples.
+1. **Strict Structural Validation**: Certain patterns are rejected at compile-time with `regexp.UnsupportedError` to **preserve DFA determinacy** and guarantee $O(n)$ performance. Refer to the **xref:docs/compatibility-policy.adoc[Compatibility Policy]** for details and examples.
    - **Epsilon Loops**: e.g., `(|a)*`, `(a?)*`.
    - **Ambiguous Captures**: e.g., `(a|)`, `(a*)?`.
 2. **Submatch Precision**: While overall match boundaries (indices 0 and 1) are 100% compliant, internal submatch boundaries for highly ambiguous patterns (e.g., `a*(a)`) may occasionally deviate.
@@ -103,7 +103,6 @@ Like the standard library (RE2-based), this engine enforces constraints necessar
 Refer to the internal documentation for details on the algorithms used:
 
 * **xref:docs/algorithm.adoc[Technical Documentation: Algorithms]**
-* **xref:docs/unsupported-patterns.adoc[Unsupported Patterns & Error Conditions]**
 * **xref:docs/compatibility-policy.adoc[Compatibility & Validation Policy]**
 * **xref:docs/benchmark-strategy.adoc[Benchmark Strategy]**
 

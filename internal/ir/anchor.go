@@ -27,15 +27,18 @@ type Constraint struct {
 
 // AnchorInfo holds information about a potential anchor in the pattern.
 type AnchorInfo struct {
-	Anchor       []byte
-	Class        CCWarpInfo // If Anchor is empty, use this SWAR class anchor
-	HasClass     bool
-	Type         AnchorType
-	Distance     int // Estimated distance from the start of the match
-	Forward      []Constraint
-	Backward     []Constraint
-	HasBeginText bool // This anchor path is strictly anchored to ^
-	HasEndText   bool // This anchor path is strictly anchored to $
+	Anchor         []byte
+	Class          CCWarpInfo // If Anchor is empty, use this SWAR class anchor
+	HasClass       bool
+	Type           AnchorType
+	Distance       int  // Minimum distance from the start of the match
+	IsFixed        bool // True if Distance is the EXACT distance
+	Mandatory      bool // True if this anchor must be present in every match
+	Forward        []Constraint
+	Backward       []Constraint
+	HasConstraints bool // True if Forward or Backward is not empty
+	HasBeginText   bool // This anchor path is strictly anchored to ^
+	HasEndText     bool // This anchor path is strictly anchored to $
 }
 
 // ExtractAnchors traverses the AST and identifies all potential anchors.
@@ -49,7 +52,8 @@ func ExtractAnchors(re *syntax.Regexp) []AnchorInfo {
 	if flatRE == nil {
 		return nil
 	}
-	anchors := extractAnchors(flatRE, 0, false, true, false)
+	anchors := extractAnchors(flatRE, 0, true, true, false)
+	// ...
 
 	// Suffix identification
 	totalMin := minLength(re)
@@ -136,8 +140,8 @@ func stripCaptures(re *syntax.Regexp) *syntax.Regexp {
 // extractAnchors identifies mandatory anchors.
 // atStart: the path is currently at the beginning of the regex.
 // hasBegin: the path has already encountered OpBeginText.
-func extractAnchors(re *syntax.Regexp, offset int, inOptional bool, atStart bool, hasBegin bool) []AnchorInfo {
-	if inOptional || re == nil {
+func extractAnchors(re *syntax.Regexp, offset int, mandatory bool, atStart bool, hasBegin bool) []AnchorInfo {
+	if re == nil {
 		return nil
 	}
 
@@ -145,7 +149,7 @@ func extractAnchors(re *syntax.Regexp, offset int, inOptional bool, atStart bool
 
 	switch re.Op {
 	case syntax.OpBeginText:
-		// Do nothing, but flags will be passed down if atStart is true.
+		// Do nothing
 	case syntax.OpLiteral:
 		if re.Flags&syntax.FoldCase == 0 {
 			var buf []byte
@@ -159,6 +163,8 @@ func extractAnchors(re *syntax.Regexp, offset int, inOptional bool, atStart bool
 					Anchor:       buf,
 					Type:         AnchorPivot,
 					Distance:     offset,
+					IsFixed:      true,
+					Mandatory:    mandatory,
 					HasBeginText: hasBegin,
 				})
 			}
@@ -172,6 +178,8 @@ func extractAnchors(re *syntax.Regexp, offset int, inOptional bool, atStart bool
 					Anchor:       b[:n],
 					Type:         AnchorPivot,
 					Distance:     offset,
+					IsFixed:      true,
+					Mandatory:    mandatory,
 					HasBeginText: hasBegin,
 				})
 			} else if info, ok := toCCWarp(re); ok {
@@ -180,32 +188,39 @@ func extractAnchors(re *syntax.Regexp, offset int, inOptional bool, atStart bool
 					HasClass:     true,
 					Type:         AnchorPivot,
 					Distance:     offset,
+					IsFixed:      true,
+					Mandatory:    mandatory,
 					HasBeginText: hasBegin,
 				})
 			}
 		}
 	case syntax.OpRepeat:
 		if re.Min > 0 {
-			anchors = append(anchors, extractAnchors(re.Sub[0], offset, false, atStart, hasBegin)...)
+			anchors = append(anchors, extractAnchors(re.Sub[0], offset, mandatory, atStart, hasBegin)...)
 		}
 	case syntax.OpQuest, syntax.OpStar:
-		// Optional
+		anchors = append(anchors, extractAnchors(re.Sub[0], offset, false, atStart, hasBegin)...)
 	case syntax.OpPlus:
-		anchors = append(anchors, extractAnchors(re.Sub[0], offset, false, atStart, hasBegin)...)
+		anchors = append(anchors, extractAnchors(re.Sub[0], offset, mandatory, atStart, hasBegin)...)
 	case syntax.OpCapture:
-		anchors = append(anchors, extractAnchors(re.Sub[0], offset, false, atStart, hasBegin)...)
+		anchors = append(anchors, extractAnchors(re.Sub[0], offset, mandatory, atStart, hasBegin)...)
 	case syntax.OpConcat:
 		currentOffset := offset
 		currentAtStart := atStart
 		currentHasBegin := hasBegin
+		currentIsFixed := true
 		for i, sub := range re.Sub {
-			subAnchors := extractAnchors(sub, currentOffset, false, currentAtStart, currentHasBegin)
+			subAnchors := extractAnchors(sub, currentOffset, mandatory, currentAtStart, currentHasBegin)
 			if i == 0 && offset == 0 {
 				for j := range subAnchors {
 					if subAnchors[j].Distance == 0 {
 						subAnchors[j].Type = AnchorPrefix
 					}
 				}
+			}
+			// Propagate currentIsFixed to subAnchors
+			for j := range subAnchors {
+				subAnchors[j].IsFixed = subAnchors[j].IsFixed && currentIsFixed
 			}
 			anchors = append(anchors, subAnchors...)
 
@@ -214,6 +229,11 @@ func extractAnchors(re *syntax.Regexp, offset int, inOptional bool, atStart bool
 			}
 
 			d := minLength(sub)
+			maxD := maxLength(sub)
+			if d != maxD {
+				currentIsFixed = false
+			}
+
 			if d > 0 {
 				currentAtStart = false
 			}
@@ -230,6 +250,64 @@ func extractAnchors(re *syntax.Regexp, offset int, inOptional bool, atStart bool
 	}
 
 	return anchors
+}
+
+func maxLength(re *syntax.Regexp) int {
+	if re == nil {
+		return 0
+	}
+	switch re.Op {
+	case syntax.OpEmptyMatch, syntax.OpBeginLine, syntax.OpEndLine, syntax.OpBeginText, syntax.OpEndText, syntax.OpWordBoundary, syntax.OpNoWordBoundary:
+		return 0
+	case syntax.OpLiteral:
+		n := 0
+		for _, r := range re.Rune {
+			n += utf8.RuneLen(r)
+		}
+		return n
+	case syntax.OpCharClass:
+		return 1
+	case syntax.OpAnyChar, syntax.OpAnyCharNotNL:
+		return 1
+	case syntax.OpCapture:
+		return maxLength(re.Sub[0])
+	case syntax.OpConcat:
+		total := 0
+		for _, sub := range re.Sub {
+			d := maxLength(sub)
+			if d < 0 {
+				return -1
+			}
+			total += d
+		}
+		return total
+	case syntax.OpQuest:
+		return maxLength(re.Sub[0])
+	case syntax.OpStar, syntax.OpPlus:
+		return -1 // Infinite
+	case syntax.OpRepeat:
+		if re.Max == -1 {
+			return -1
+		}
+		d := maxLength(re.Sub[0])
+		if d < 0 {
+			return -1
+		}
+		return d * re.Max
+	case syntax.OpAlternate:
+		max := 0
+		for _, sub := range re.Sub {
+			d := maxLength(sub)
+			if d < 0 {
+				return -1
+			}
+			if d > max {
+				max = d
+			}
+		}
+		return max
+	}
+	return -1
 }
 
 func minLength(re *syntax.Regexp) int {
@@ -293,6 +371,9 @@ func minLength(re *syntax.Regexp) int {
 func ExtractConstraints(re *syntax.Regexp, anchor *AnchorInfo) {
 	flatRE := stripCaptures(re)
 	extractConstraints(flatRE, anchor)
+	if len(anchor.Backward) > 0 || len(anchor.Forward) > 0 {
+		anchor.HasConstraints = true
+	}
 }
 
 func extractConstraints(re *syntax.Regexp, anchor *AnchorInfo) {
@@ -348,16 +429,26 @@ func extractConstraints(re *syntax.Regexp, anchor *AnchorInfo) {
 		if d < 0 {
 			break
 		}
-		backOffset -= d
+
+		isRepeat := false
+		if sub.Op == syntax.OpStar || sub.Op == syntax.OpPlus || (sub.Op == syntax.OpRepeat && sub.Max == -1) {
+			isRepeat = true
+		}
+
 		if info, ok := toCCWarp(sub); ok {
 			anchor.Backward = append(anchor.Backward, Constraint{
-				Offset: backOffset,
-				Length: d,
-				Info:   info,
+				Offset:   backOffset - d,
+				Length:   d,
+				IsRepeat: isRepeat,
+				Info:     info,
 			})
+			if isRepeat {
+				break
+			}
 		} else {
 			break
 		}
+		backOffset -= d
 	}
 
 	forwardOffset := 1
@@ -450,25 +541,218 @@ func toCCWarp(re *syntax.Regexp) (CCWarpInfo, bool) {
 	return CCWarpInfo{}, false
 }
 
-func SelectBestAnchors(anchors []AnchorInfo) []AnchorInfo {
-	if len(anchors) == 0 {
+func SelectBestAnchors(re *syntax.Regexp) []AnchorInfo {
+	if minLength(re) == 0 {
 		return nil
 	}
-	// Sort by score or filter duplicates.
-	// For now, return up to 4 good anchors.
-	// Duplicate anchors with different distances are fine.
+
+	flatRE := stripCaptures(re)
+	if flatRE == nil {
+		return nil
+	}
+
+	// Find anchors that cover all possible paths.
+	anchors := findCoveringAnchors(flatRE, 0, true, false)
+
+	// Filter and score to pick only one "best" representative per branch if many exist.
+	// For now, let's keep it simple: if it's an alternation, we take best from each.
+	// We'll limit to a small number of total anchors to keep SearchWarp fast.
+	if len(anchors) > 8 {
+		anchors = anchors[:8]
+	}
+
+	for i := range anchors {
+		ExtractConstraints(re, &anchors[i])
+	}
+
 	return anchors
 }
 
-func (a *AnchorInfo) Validate(b []byte, p int) (int, bool) {
-	// ... (no changes here as Input is not used in AnchorInfo.Validate? Wait.)
-	for _, c := range a.Backward {
-		start := p + c.Offset
-		if start < 0 {
-			return p, false
+func findCoveringAnchors(re *syntax.Regexp, offset int, atStart bool, hasBegin bool) []AnchorInfo {
+	if re == nil {
+		return nil
+	}
+
+	switch re.Op {
+	case syntax.OpLiteral:
+		if re.Flags&syntax.FoldCase == 0 {
+			var buf []byte
+			for _, r := range re.Rune {
+				var b [utf8.UTFMax]byte
+				n := utf8.EncodeRune(b[:], r)
+				buf = append(buf, b[:n]...)
+			}
+			if len(buf) > 0 {
+				return []AnchorInfo{{
+					Anchor:       buf,
+					Type:         AnchorPivot,
+					Distance:     offset,
+					IsFixed:      true,
+					Mandatory:    true,
+					HasBeginText: hasBegin,
+				}}
+			}
 		}
-		if !ValidateFixed(c.Info, b[start:start+c.Length]) {
-			return p, false
+	case syntax.OpCharClass:
+		if re.Flags&syntax.FoldCase == 0 {
+			if len(re.Rune) == 2 && re.Rune[0] == re.Rune[1] {
+				var b [utf8.UTFMax]byte
+				n := utf8.EncodeRune(b[:], re.Rune[0])
+				return []AnchorInfo{{
+					Anchor:       b[:n],
+					Type:         AnchorPivot,
+					Distance:     offset,
+					IsFixed:      true,
+					Mandatory:    true,
+					HasBeginText: hasBegin,
+				}}
+			} else if info, ok := toCCWarp(re); ok {
+				return []AnchorInfo{{
+					Class:        info,
+					HasClass:     true,
+					Type:         AnchorPivot,
+					Distance:     offset,
+					IsFixed:      true,
+					Mandatory:    true,
+					HasBeginText: hasBegin,
+				}}
+			}
+		}
+	case syntax.OpRepeat:
+		if re.Min > 0 {
+			return findCoveringAnchors(re.Sub[0], offset, atStart, hasBegin)
+		}
+	case syntax.OpPlus:
+		return findCoveringAnchors(re.Sub[0], offset, atStart, hasBegin)
+	case syntax.OpCapture:
+		return findCoveringAnchors(re.Sub[0], offset, atStart, hasBegin)
+	case syntax.OpConcat:
+		currentOffset := offset
+		currentAtStart := atStart
+		currentHasBegin := hasBegin
+		currentIsFixed := true
+
+		for _, sub := range re.Sub {
+			subAnchors := findCoveringAnchors(sub, currentOffset, currentAtStart, currentHasBegin)
+			if len(subAnchors) > 0 {
+				// We found a covering set in this prefix of the concat.
+				// For simplicity, once we find a covering set for a branch, we stop.
+				for j := range subAnchors {
+					subAnchors[j].IsFixed = subAnchors[j].IsFixed && currentIsFixed
+				}
+				return subAnchors
+			}
+
+			if sub.Op == syntax.OpBeginText && currentAtStart {
+				currentHasBegin = true
+			}
+			d := minLength(sub)
+			maxD := maxLength(sub)
+			if d != maxD {
+				currentIsFixed = false
+			}
+			if d > 0 {
+				currentAtStart = false
+			}
+			if d >= 0 {
+				currentOffset += d
+			} else {
+				currentOffset = 1000000
+			}
+		}
+	case syntax.OpAlternate:
+		var all []AnchorInfo
+		for _, sub := range re.Sub {
+			subAnchors := findCoveringAnchors(sub, offset, atStart, hasBegin)
+			if len(subAnchors) == 0 {
+				// One branch has no anchor? Then we can't cover all paths.
+				return nil
+			}
+			// In alternation, IsFixed is generally false unless it's fixed in all branches.
+			for i := range subAnchors {
+				subAnchors[i].IsFixed = false
+				subAnchors[i].Mandatory = false // Not globally mandatory
+			}
+			all = append(all, subAnchors...)
+		}
+		return all
+	}
+	return nil
+}
+
+func (a *AnchorInfo) Score() int {
+	// Mandatory and Fixed anchors are the only ones we can safely use for exclusive skip.
+	if !a.Mandatory || !a.IsFixed {
+		return 0
+	}
+
+	score := 0
+	if !a.HasClass {
+		// Literal anchor: length is key
+		score = len(a.Anchor) * 10
+	} else {
+		// Class anchor: specificity is key
+		switch a.Class.Kernel {
+		case CCWarpEqual:
+			score = 8
+		case CCWarpSingleRange:
+			score = 5
+		case CCWarpAnyChar, CCWarpAnyExceptNL:
+			score = 1
+		}
+	}
+
+	// Prefer anchors closer to the start of the match to reduce false starts
+	if a.Distance == 0 {
+		score += 5
+	}
+
+	// FIXED distance anchors are very strong
+	if a.IsFixed {
+		score += 50
+	}
+
+	// Anchors strictly tied to text boundaries are very strong
+	if a.HasBeginText || a.HasEndText {
+		score += 20
+	}
+
+	return score
+}
+
+func (a *AnchorInfo) Validate(b []byte, p int, matchStart int) (int, int, bool) {
+	newMatchStart := matchStart
+
+	for _, c := range a.Backward {
+		if c.IsRepeat {
+			end := p + c.Offset
+			if end < matchStart {
+				continue
+			}
+			switch c.Info.Kernel {
+			case CCWarpAnyExceptNL:
+				if idx := bytes.IndexByte(b[matchStart:end], '\n'); idx >= 0 {
+					return p, matchStart + idx + 1, false
+				}
+			case CCWarpAnyChar:
+				// Always valid for ASCII. For UTF-8, would need to check validity
+				// but dot-all matches everything.
+			case CCWarpEqual:
+				target := byte(c.Info.V0)
+				for i := matchStart; i < end; i++ {
+					if b[i] != target {
+						return p, i, false
+					}
+				}
+			}
+		} else {
+			start := p + c.Offset
+			if start < matchStart {
+				return p, matchStart, false
+			}
+			if !ValidateFixed(c.Info, b[start:start+c.Length]) {
+				return p, start, false
+			}
 		}
 	}
 
@@ -480,23 +764,23 @@ func (a *AnchorInfo) Validate(b []byte, p int) (int, bool) {
 	for _, c := range a.Forward {
 		start := p + c.Offset
 		if start > len(b) {
-			return p, false
+			return p, newMatchStart, false
 		}
 		if c.IsRepeat {
 			skipped := Warp(c.Info, b[start:])
 			endPos = start + skipped
 		} else {
 			if start+c.Length > len(b) {
-				return p, false
+				return p, newMatchStart, false
 			}
 			if !ValidateFixed(c.Info, b[start:start+c.Length]) {
-				return p, false
+				return p, newMatchStart, false
 			}
 			endPos = start + c.Length
 		}
 	}
 
-	return endPos, true
+	return endPos, newMatchStart, true
 }
 
 func ValidateFixed(info CCWarpInfo, b []byte) bool {
@@ -582,6 +866,14 @@ func ValidateFixed(info CCWarpInfo, b []byte) bool {
 func Warp(info CCWarpInfo, b []byte) int {
 	i := 0
 	switch info.Kernel {
+	case CCWarpAnyChar:
+		return len(b)
+	case CCWarpAnyExceptNL:
+		pos := bytes.IndexByte(b, '\n')
+		if pos < 0 {
+			return len(b)
+		}
+		return pos
 	case CCWarpEqual:
 		target := byte(info.V0)
 		target64 := splat(uint64(target))
@@ -618,20 +910,17 @@ func Warp(info CCWarpInfo, b []byte) int {
 			}
 			i++
 		}
-	case CCWarpAnyChar:
-		for i+8 <= len(b) {
-			v := binary.LittleEndian.Uint64(b[i:])
-			if (v & 0x8080808080808080) != 0 {
-				break
-			}
-			i += 8
-		}
-		for i < len(b) && b[i] < 0x80 {
-			i++
-		}
-	case CCWarpAnyExceptNL:
+	case CCWarpEqualSet:
 		for i < len(b) {
-			if b[i] == '\n' || b[i] >= 0x80 {
+			target := b[i]
+			found := false
+			for _, v := range info.Extra {
+				if byte(v) == target {
+					found = true
+					break
+				}
+			}
+			if !found {
 				break
 			}
 			i++
@@ -643,51 +932,64 @@ func Warp(info CCWarpInfo, b []byte) int {
 func IndexClass(info CCWarpInfo, b []byte) int {
 	i := 0
 	switch info.Kernel {
+	case CCWarpAnyChar:
+		if len(b) > 0 {
+			return 0
+		}
+		return -1
+	case CCWarpAnyExceptNL:
+		for i < len(b) {
+			if b[i] != '\n' {
+				return i
+			}
+			i++
+		}
+		return -1
 	case CCWarpEqual:
+		if info.IncludeNL {
+			target := byte(info.V0)
+			for i < len(b) {
+				if b[i] == target || b[i] == '\n' {
+					return i
+				}
+				i++
+			}
+			return -1
+		}
 		return bytes.IndexByte(b, byte(info.V0))
 	case CCWarpSingleRange:
 		low, high := byte(info.V0), byte(info.V1)
 		low64, high64 := splat(uint64(low)), splat(uint64(high))
+		var nl64 uint64
+		if info.IncludeNL {
+			nl64 = splat(uint64('\n'))
+		}
+
 		for i+8 <= len(b) {
 			v := binary.LittleEndian.Uint64(b[i:])
 			// Byte j is inside if !((v_j < low) OR (v_j > high))
-			// is_outside has bit 7 set if byte is outside.
 			outside := ((v - low64) & ^v) | ((high64 - v) & ^high64)
 			inside := ^outside & 0x8080808080808080
+			if info.IncludeNL {
+				// Also inside if byte is \n
+				diffNL := v ^ nl64
+				matchNL := ^((diffNL + 0x7f7f7f7f7f7f7f7f) | diffNL) & 0x8080808080808080
+				inside |= matchNL
+			}
 			if inside != 0 {
 				break
 			}
 			i += 8
 		}
 		for ; i < len(b); i++ {
-			if b[i] >= low && b[i] <= high {
+			if (b[i] >= low && b[i] <= high) || (info.IncludeNL && b[i] == '\n') {
 				return i
 			}
-		}
-	case CCWarpAnyChar:
-		for i+8 <= len(b) {
-			v := binary.LittleEndian.Uint64(b[i:])
-			if (^v & 0x8080808080808080) != 0 {
-				break
-			}
-			i += 8
-		}
-		for ; i < len(b); i++ {
-			if b[i] < 0x80 {
-				return i
-			}
-		}
-	case CCWarpAnyExceptNL:
-		for i < len(b) {
-			if b[i] < 0x80 && b[i] != '\n' {
-				return i
-			}
-			i++
 		}
 	case CCWarpNotEqual:
 		target := byte(info.V0)
 		for i < len(b) {
-			if b[i] != target {
+			if b[i] != target || (info.IncludeNL && b[i] == '\n') {
 				return i
 			}
 			i++
@@ -698,6 +1000,46 @@ func IndexClass(info CCWarpInfo, b []byte) int {
 
 func splat(v uint64) uint64 {
 	return v * 0x0101010101010101
+}
+
+func IsLineBounded(re *syntax.Regexp) bool {
+	if re == nil {
+		return true
+	}
+	switch re.Op {
+	case syntax.OpLiteral:
+		for _, r := range re.Rune {
+			if r == '\n' {
+				return false
+			}
+		}
+		return true
+	case syntax.OpCharClass:
+		for i := 0; i+1 < len(re.Rune); i += 2 {
+			if re.Rune[i] <= '\n' && '\n' <= re.Rune[i+1] {
+				return false
+			}
+		}
+		return true
+	case syntax.OpAnyCharNotNL:
+		return true
+	case syntax.OpAnyChar:
+		return false
+	case syntax.OpBeginLine, syntax.OpEndLine:
+		return true
+	case syntax.OpBeginText, syntax.OpEndText:
+		return true
+	case syntax.OpCapture, syntax.OpRepeat, syntax.OpQuest, syntax.OpPlus, syntax.OpStar:
+		return IsLineBounded(re.Sub[0])
+	case syntax.OpConcat, syntax.OpAlternate:
+		for _, sub := range re.Sub {
+			if !IsLineBounded(sub) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }
 
 func HasComplexAnchors(re *syntax.Regexp) bool {

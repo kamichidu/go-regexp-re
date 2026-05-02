@@ -20,10 +20,19 @@ type matchContext struct {
 	regsBuf        [32]int
 	regs           []int
 	absBase        int // Absolute position of the start of the current scan
+
+	// Discovery results (Pass 1)
+	matchStart int
+	matchEnd   int
+	matchPrio  int32
 }
 
 func (mc *matchContext) prepare(n int, numSubexp int, absBase int) {
 	mc.absBase = absBase
+	mc.matchStart = -1
+	mc.matchEnd = -1
+	mc.matchPrio = -1
+
 	required := n + 2
 	if required > len(mc.historyBuf) {
 		if cap(mc.history) < required {
@@ -39,10 +48,6 @@ func (mc *matchContext) prepare(n int, numSubexp int, absBase int) {
 	} else {
 		mc.history = mc.historyBuf[:0]
 		mc.pathHistory = mc.pathHistoryBuf[:required]
-	}
-
-	for i := range mc.pathHistory {
-		mc.pathHistory[i] = -1
 	}
 
 	requiredRegs := (numSubexp + 1) * 2
@@ -62,6 +67,20 @@ func (mc *matchContext) prepare(n int, numSubexp int, absBase int) {
 
 func (mc *matchContext) clearHistory() {
 	mc.history = mc.history[:0]
+}
+
+func (mc *matchContext) resetForRecording(start, end int) {
+	mc.history = mc.history[:0]
+	// pathHistory needs to cover [0, match_length] where match_length = end - start.
+	// But current implementation uses absolute indices for pathHistory.
+	// Let's clear only the necessary portion.
+	needed := end + 1
+	if needed > len(mc.pathHistory) {
+		mc.pathHistory = make([]int32, needed)
+	}
+	for i := start; i <= end; i++ {
+		mc.pathHistory[i] = -1
+	}
 }
 
 func (mc *matchContext) appendRaw(sidx uint32) {

@@ -44,10 +44,11 @@ const (
 )
 
 type CCWarpInfo struct {
-	Kernel   CCWarpKernel
-	V0, V1   uint64   // Fast access for common kernels (Equal, Range, etc.)
-	Extra    []uint64 // Fallback for large sets (EqualSet, Bitmask)
-	IndexAny string   // Fast path for SearchWarp
+	Kernel    CCWarpKernel
+	V0, V1    uint64   // Fast access for common kernels (Equal, Range, etc.)
+	Extra     []uint64 // Fallback for large sets (EqualSet, Bitmask)
+	IndexAny  string   // Fast path for SearchWarp
+	IncludeNL bool     // If true, also search for \n
 }
 
 const MaxDFAMemory = 64 * 1024 * 1024

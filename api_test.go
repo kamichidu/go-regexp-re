@@ -353,8 +353,8 @@ func TestSpecializationPath(t *testing.T) {
 		{"a|b|c", "dfa"},
 		{"[a-z]", "dfa"},
 		{"a*", "dfa"},
-		{"(a|b)*", "dfa"},
-		{patternDFA, "dfa"},
+		{"(a|b)*", "dfa-anchor"},
+		{patternDFA, "dfa-anchor"},
 		{"^a|b$", "dfa-anchor"},
 		{"\\bword\\b", "dfa-anchor"},
 	}

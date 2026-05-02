@@ -70,7 +70,7 @@ To handle anchor verification and multi-pass submatch extraction correctly regar
 
 *   **Semantic Correctness**: Anchors like `^` and `$` must identify the "True Start/End of Text." By propagating `AbsPos` (the offset of the current virtual slice from the original input), verification functions like `VerifyBegin` can determine truth using simple arithmetic: `(AbsPos + i) == 0`.
 *   **Virtual Slicing (Allocation Exclusion)**: Instead of repeated slice truncations (`b = b[advance:]`), `ir.Input` holds the `OriginalB` and manages the current scanning window via `AbsPos`. This eliminates the need for repeated slice header updates and ensures that the full context is always available for junction verification (`\b`, etc.).
-*   **Performance via Relative Coordinates**: While context is absolute, the core scanning logic (Pass 1-3) is strictly **Relative-Coordinate Based**. Loop variables (`i`), match priorities (`prio`), and internal history buffers use 0-based indices relative to the start of the current virtual slice. This removes coordinate addition from the $O(1)$ hot loop.
+*   **Performance via Relative Coordinates**: While context is absolute, the core scanning logic (Pass 1-4) is strictly **Relative-Coordinate Based**. Loop variables (`i`), match priorities (`prio`), and internal history buffers use 0-based indices relative to the start of the current virtual slice. This removes coordinate addition from the $O(1)$ hot loop.
 *   **Exit-Only Conversion**: Submatch results are converted from relative to absolute coordinates (e.g., `regs[i] += in.AbsPos`) **exactly once** at the public API boundary before returning to the caller.
 
 === 7. Bitmask-First Short-Circuiting
@@ -79,7 +79,7 @@ Anchor verification functions (`VerifyBegin`, `VerifyEnd`, `VerifyWord`) are cri
 * **Technique**: Every verification function MUST employ a single-instruction bitmask check at the very beginning to detect if any relevant flags are present in the request (`req`).
 [source,go]
 ----
-func VerifyBegin(in Input, i int, req syntax.EmptyOp) bool {
+func VerifyBegin(in *ir.Input, i int, req syntax.EmptyOp) bool {
     // Single-instruction bitmask check
     if (req & (syntax.EmptyBeginText | syntax.EmptyBeginLine)) == 0 {
         return true

@@ -21,8 +21,8 @@ A previously explored execution path for small patterns. While conceptually fast
 === 3. xref:algorithm/guarded-simd-warp.adoc[Anchor-Aware Guarded SIMD Warp]
 A speculative SIMD skipping logic designed to maintain high-speed scanning even in the presence of anchors.
 
-=== 4. xref:algorithm/3-pass-sparse-tdfa.adoc[3-Pass Sparse TDFA (Next-Gen Strategy)]
-A deterministic 3-pass strategy that physically separates DFA scanning from submatch extraction to eliminate state explosion while maintaining Go-compatible precision.
+=== 4. xref:algorithm/multi-pass-sparse-tdfa.adoc[Multi-Pass Sparse TDFA (Execution Pipeline)]
+A deterministic multi-pass execution strategy that decouples heuristic skipping, deterministic discovery, and precise submatch extraction to eliminate state explosion and history pollution.
 
 === 5. xref:algorithm/memory-efficient-construction.adoc[Memory-Efficient DFA Construction]
 An allocation-free and pointer-free construction algorithm designed to scale to massive pattern sets within strict memory constraints.
@@ -43,7 +43,7 @@ The engine's primary performance layer. It combines **SearchWarp** (SIMD-acceler
 A proposal to use `bytes.IndexAny` as a noise-skipping pre-filter. It was rejected because the engine's optimized DFA execution loops proved to be faster than the standard library's `IndexAny` for most common character sets.
 
 === 11. xref:algorithm/hybrid-rle-history.adoc[Hybrid RLE History (Submatch Memory Optimization)]
-An advanced 32-bit bit-packing strategy that applies Run-Length Encoding (RLE) during SWAR skips. It reduces history buffer consumption by up to 99.9% for repetitive patterns and enables ultra-fast "Warp Jumps" during backward path selection.
+An advanced 32-bit bit-packing strategy that applies Run-Length Encoding (RLE) during SWAR skips. It reduces history buffer consumption by up to 99.9% for repetitive patterns and enables ultra-fast "Warp Jumps" during backward path selection in the Multi-Pass pipeline.
 
 == Design Philosophy
 

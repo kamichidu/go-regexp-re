@@ -46,8 +46,8 @@ When the SWAR kernel skips $N$ bytes (e.g., 8 bytes):
 3. Otherwise:
    - Append a new Warp Entry: `1 | (N << 20) | sidx`.
 
-=== Pass 2: Backward Path Selection (The Warp Jump)
-Pass 2 traverses the history in reverse. With RLE, it can "jump" over large repetitions:
+=== Pass 3: Backward Path Selection (The Warp Jump)
+Pass 3 traverses the history in reverse. With RLE, it can "jump" over large repetitions:
 [source,go]
 ----
 // currentPos is a relative coordinate (0-based from the start of the virtual slice)
@@ -65,8 +65,8 @@ for i := len(mc.history) - 1; i >= 0; i-- {
 }
 ----
 
-=== Pass 3: Forward Recap (Licking)
-Since SWAR only triggers on states **without tag updates**, Pass 3 can safely skip the entire warp duration:
+=== Pass 4: Forward Recap (Licking)
+Since SWAR only triggers on states **without tag updates**, Pass 4 can safely skip the entire warp duration:
 - Update `regs` only at the start and end boundaries of the warp.
 - Increment `currentPos` (relative) by `length` in a single step.
 
