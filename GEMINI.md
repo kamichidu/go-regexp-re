@@ -96,13 +96,15 @@ To minimize compilation overhead, the engine MUST use an **Architectural Shortcu
 
 ### 2.10 Multi-Point Anchor & Constraint Optimization (Pass 0 - MAP)
 The engine MUST extract the most selective anchors from mandatory AST paths to minimize DFA activations.
-- **Multi-Entry Point Discovery**: The engine MUST traverse **`OpAlternate`** to identify all possible entry points and categorize anchors into **Prefix** (start-anchored), **Pivot** (middle-anchored), or **Suffix** (end-anchored) candidates for each mandatory path.
-- **Anchor Selection Heuristic**: Anchors MUST be selected based on a heuristic score that prioritizes length and specificity (e.g., `Literal > Class > Any`) and penalizes distance from the search start.
+- **Multi-Entry Point Discovery**: The engine MUST traverse **`OpAlternate`** to identify all possible entry points and categorize anchors into **Prefix** (start-anchored), **Pivot** (middle-anchored), or **Suffix** (end-anchored) candidates for EACH mandatory path (**Covering Set**).
+- **Anchor Selection Heuristic**: Anchors MUST be selected based on a heuristic score that prioritizes length, specificity, and fixed-distance status.
+- **Line-Anchored Jump Mandate**: For non-multiline patterns, the engine MUST use **Line-Anchored Jump** to warp the search starting point directly to the beginning of the line where an anchor is found, bypassing redundant DFA transitions.
+- **Merged Newline Discovery**: To maximize throughput, the engine MUST utilize **Merged Newline Detection** within SWAR kernels to identify line boundaries and pattern anchors in a single pass.
+- **Mandatory & Fixed-Distance Safety**: Exclusive skipping (jumping `restartBase`) MUST be restricted to anchors that are both **Mandatory** for the whole pattern and have a **Fixed Distance** from the match start to guarantee leftmost-longest correctness.
 - **Capture Transparency**: Anchor extraction MUST be **Capture-Stripped**—ignoring `OpCapture` boundaries to merge adjacent literals into longer anchors.
-- **SIMD/SWAR Discovery**: Use SIMD (`bytes.Index`) for literals and SWAR (`IndexClass`) for character classes.
+- **SIMD/SWAR Discovery**: Use SIMD (`bytes.Index`, `bytes.IndexAny`) for literals and SWAR (`IndexClass`) for character classes.
 - **Separation of Concerns (Search vs. Match)**: MAP is responsible for **Searching** (finding match start candidates). DFA is responsible for **Validation** (Anchored matching from the candidate position).
 - **Forward/Backward Constraint Guard**: Once an anchor candidate is found, validate surrounding character constraints (fixed-length or dynamic warps) using path-specific SWAR kernels before starting the DFA.
-- **Dynamic Warp Integration**: If a repetitive class follows an anchor, the MAP phase MUST use **SWAR Warp** to skip the segment before initiating Pass 1.
 
 ### 2.11 Pure Go (No CGO)
 - **Zero Overhead**: Native Go only. CGO is strictly prohibited.

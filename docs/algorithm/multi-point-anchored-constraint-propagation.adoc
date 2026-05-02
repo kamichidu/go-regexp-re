@@ -18,18 +18,32 @@ The engine analyzes the optimized AST to identify the most "selective" literal o
 | *Suffix* | Pattern End | `bytes.LastIndex` | Backward only.
 |===
 
-=== A. Support for Alternation (`OpAlternate`)
-MAP traverses all branches of an alternation to identify mandatory anchors for every path. This allows the engine to handle patterns like `(^|[abc])feb` by tracking two separate entry points:
-- Path 1: `^` (Start of text) + `feb`.
-- Path 2: `[abc]` (Pivot class) + `feb`.
+=== A. Support for Alternation (Covering Set)
+MAP identifies a **Covering Set** of anchors that represent all possible execution paths. If a pattern has alternations (e.g., `apple|banana`), the engine ensures that at least one selective anchor is tracked for every branch.
+- **Multi-Index Discovery**: Uses `bytes.IndexAny` to find the first byte of any anchor in the covering set.
+- **Exhaustive Coverage**: If a branch has no selective anchor, MAP may be partially disabled or fall back to a less selective common anchor to maintain 100% safety.
 
 === B. Anchor Selection Criteria (Heuristic Score)
-Not all anchors are equal. The engine selects up to 4 anchors based on a heuristic score:
-`Score = (BaseWeight * Length) / DistanceFromStart`
+Not all anchors are equal. The engine selects anchors based on a heuristic score:
+- **Literal Anchor (Weight: 10/char)**: Triggers SIMD `bytes.Index`.
+- **Class Anchor (Weight: 8 for Equal, 5 for Range)**: Triggers SWAR `IndexClass`.
+- **Fixed-Distance Bonus (+50)**: Anchors with a constant distance from match start are highly preferred as they allow precise `restartBase` jumps.
+- **Mandatory Requirement**: Only anchors proven to be **Mandatory** for a specific path are used to trigger skips.
+...
+== 8. Advanced Geographical Optimizations
 
-- **Literal Anchor (Weight: 10)**: Triggers SIMD `bytes.Index`. Longer literals are highly preferred.
-- **Class Anchor (Weight: 2)**: Triggers SWAR `IndexClass`.
-- **Distance Bonus**: Prefix anchors (`distance == 0`) get a fixed bonus as they are the most direct path.
+To further reduce DFA activations, MAP employs "Geographical" awareness based on the pattern's line-bounded nature.
+
+=== A. Line-Anchored Jump (Warp to Line Start)
+For **Line-Bounded** patterns (non-multiline `.`), any match must exist entirely within a single line. 
+- When an anchor is discovered, the engine uses `bytes.LastIndexByte` (or merged scan) to find the beginning of the current line.
+- The search starting point (`restartBase`) is warped directly to this line start, bypassing all DFA transitions for the line's prefix.
+
+=== B. Merged Newline Detection (1-Pass Optimization)
+To eliminate the overhead of a second scan, the `IndexClass` SWAR kernels are **Newline-Aware**.
+- Newline characters (`\n`) are added to the search set during the primary SIMD/SWAR scan.
+- If a newline is encountered before a pattern anchor, the engine immediately updates the line boundary context without restarting the scan.
+- This allows `.*target` patterns to reach speeds exceeding **10 GB/s** by skipping line-by-line using pure SIMD.
 
 == 2. Correctness & Safety Mandates
 
