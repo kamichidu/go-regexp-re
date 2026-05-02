@@ -6,7 +6,7 @@ set -e -u -o pipefail
 REPO_ROOT=$(git rev-parse --show-toplevel)
 cd "$REPO_ROOT/internal/benchmark"
 
-TAGS="goregexp goregexpre re2cgo hyperscan pcre2cgo"
+TAGS="goregexp goregexpre coregex re2cgo hyperscan pcre2cgo"
 OUTPUT_DIR="$REPO_ROOT/_benchmark_results"
 mkdir -p "$OUTPUT_DIR"
 

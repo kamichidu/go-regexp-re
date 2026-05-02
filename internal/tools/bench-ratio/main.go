@@ -20,7 +20,7 @@ type Metric struct {
 }
 
 // Full regex to capture all 4 metrics
-var benchRe = regexp.MustCompile(`^Benchmark([^\s/]+)/(GoRegexp|GoRegexpRe)/([^\s-]+)(?:-\d+)?\s+\d+\s+([\d\.]+)\s+ns/op(?:\s+([\d\.]+)\s+MB/s)?(?:\s+([\d\.]+)\s+B/op)?(?:\s+([\d\.]+)\s+allocs/op)?`)
+var benchRe = regexp.MustCompile(`^Benchmark([^\s/]+)/(GoRegexp|GoRegexpRe|Coregex)/([^\s-]+)(?:-\d+)?\s+\d+\s+([\d\.]+)\s+ns/op(?:\s+([\d\.]+)\s+MB/s)?(?:\s+([\d\.]+)\s+B/op)?(?:\s+([\d\.]+)\s+allocs/op)?`)
 
 func main() {
 	if err := run(os.Stdin, os.Stdout); err != nil {

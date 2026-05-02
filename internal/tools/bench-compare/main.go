@@ -42,6 +42,7 @@ var benchLineRe = regexp.MustCompile(`^Benchmark([^\s]+)\s+\d+\s+([\d\.]+)\s+ns/
 var engines = []string{
 	"GoRegexp",
 	"GoRegexpRe",
+	"Coregex",
 	"Hyperscan-CGO",
 	"PCRE2-CGO",
 	"RE2-CGO",
