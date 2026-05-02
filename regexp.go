@@ -140,29 +140,56 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 		} else if len(res.mapAnchors) > 1 {
 			var buf []byte
 			seen := make(map[byte]bool)
+			allCovered := true
 			for _, a := range res.mapAnchors {
-				var b byte
 				if !a.HasClass {
 					if len(a.Anchor) > 0 {
-						b = a.Anchor[0]
+						b := a.Anchor[0]
+						if !seen[b] {
+							buf = append(buf, b)
+							seen[b] = true
+						}
+					} else {
+						allCovered = false
+						break
 					}
 				} else {
-					if a.Class.Kernel == ir.CCWarpEqual {
-						b = byte(a.Class.V0)
+					switch a.Class.Kernel {
+					case ir.CCWarpEqual:
+						b := byte(a.Class.V0)
+						if !seen[b] {
+							buf = append(buf, b)
+							seen[b] = true
+						}
+					case ir.CCWarpSingleRange:
+						low, high := byte(a.Class.V0), byte(a.Class.V1)
+						if high-low < 8 {
+							for b := low; b <= high; b++ {
+								if !seen[b] {
+									buf = append(buf, b)
+									seen[b] = true
+								}
+							}
+						} else {
+							allCovered = false
+						}
+					default:
+						allCovered = false
+					}
+					if !allCovered {
+						break
 					}
 				}
-				if b != 0 && !seen[b] {
-					buf = append(buf, b)
-					seen[b] = true
-				}
 			}
-			if res.lineBounded {
-				if !seen['\n'] {
-					buf = append(buf, '\n')
-					seen['\n'] = true
+			if allCovered && len(buf) > 0 {
+				if res.lineBounded {
+					if !seen['\n'] {
+						buf = append(buf, '\n')
+						seen['\n'] = true
+					}
 				}
+				res.searchAny = string(buf)
 			}
-			res.searchAny = string(buf)
 		}
 	}
 
