@@ -31,6 +31,7 @@ type Regexp struct {
 	searchWarp     ir.CCWarpInfo
 	mapAnchors     []ir.AnchorInfo
 	primaryAnchor  *ir.AnchorInfo
+	searchAny      string
 }
 
 type CompileOptions struct {
@@ -126,17 +127,29 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 	}
 
 	if res.literalMatcher == nil && !ir.HasComplexAnchors(s) {
-		anchors := ir.ExtractAnchors(s)
-		for i := range anchors {
-			if (anchors[i].HasBeginText || anchors[i].HasEndText) && (s.Flags&syntax.OneLine == 0) {
-				continue
-			}
-			ir.ExtractConstraints(s, &anchors[i])
-			res.mapAnchors = append(res.mapAnchors, anchors[i])
-		}
-		res.mapAnchors = ir.SelectBestAnchors(res.mapAnchors)
-		if len(res.mapAnchors) > 0 {
+		res.mapAnchors = ir.SelectBestAnchors(s)
+		if len(res.mapAnchors) == 1 {
 			res.primaryAnchor = &res.mapAnchors[0]
+		} else if len(res.mapAnchors) > 1 {
+			var buf []byte
+			seen := make(map[byte]bool)
+			for _, a := range res.mapAnchors {
+				var b byte
+				if !a.HasClass {
+					if len(a.Anchor) > 0 {
+						b = a.Anchor[0]
+					}
+				} else {
+					if a.Class.Kernel == ir.CCWarpEqual {
+						b = byte(a.Class.V0)
+					}
+				}
+				if b != 0 && !seen[b] {
+					buf = append(buf, b)
+					seen[b] = true
+				}
+			}
+			res.searchAny = string(buf)
 		}
 	}
 

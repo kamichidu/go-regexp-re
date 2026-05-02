@@ -138,6 +138,17 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 					// Variable distance anchor: we must start from restartBase.
 					// We can't safely use Validate because Distance is only a minimum.
 				}
+			} else if re.searchAny != "" {
+				pos := bytes.IndexAny(b[i:], re.searchAny)
+				if pos < 0 {
+					break
+				}
+				// Any match MUST contain one of these anchors at or after i+pos.
+				// However, since we don't know WHICH branch will match, we can't
+				// safely jump restartBase unless we check all possible matches.
+				// For now, we only use it to skip Noise.
+				restartBase += pos
+				i = restartBase
 			} else if len(re.prefix) > 0 {
 				pos := bytes.Index(b[i:], re.prefix)
 				if pos < 0 {
@@ -322,6 +333,13 @@ func fastMatchExecLoop(re *Regexp, in *ir.Input) (int, int, int) {
 					// Variable distance anchor: we must start from restartBase.
 					// We can't safely use Validate because Distance is only a minimum.
 				}
+			} else if re.searchAny != "" {
+				pos := bytes.IndexAny(b[i:], re.searchAny)
+				if pos < 0 {
+					break
+				}
+				restartBase += pos
+				i = restartBase
 			} else if len(re.prefix) > 0 {
 				pos := bytes.Index(b[i:], re.prefix)
 				if pos < 0 {

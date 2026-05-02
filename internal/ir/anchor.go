@@ -527,32 +527,143 @@ func toCCWarp(re *syntax.Regexp) (CCWarpInfo, bool) {
 	return CCWarpInfo{}, false
 }
 
-func SelectBestAnchors(anchors []AnchorInfo) []AnchorInfo {
-	if len(anchors) == 0 {
+func SelectBestAnchors(re *syntax.Regexp) []AnchorInfo {
+	if minLength(re) == 0 {
 		return nil
 	}
 
-	// Score each anchor and pick the best one.
-	// We MUST only pick Mandatory AND IsFixed anchors for exclusive search.
-	// Non-fixed anchors can't safely jump restartBase because we don't know the exact start.
-	var best AnchorInfo
-	maxScore := -1
-
-	for _, a := range anchors {
-		if !a.Mandatory || !a.IsFixed {
-			continue
-		}
-		s := a.Score()
-		if s > maxScore {
-			maxScore = s
-			best = a
-		}
-	}
-
-	if maxScore <= 0 {
+	flatRE := stripCaptures(re)
+	if flatRE == nil {
 		return nil
 	}
-	return []AnchorInfo{best}
+
+	// Find anchors that cover all possible paths.
+	anchors := findCoveringAnchors(flatRE, 0, true, false)
+
+	// Filter and score to pick only one "best" representative per branch if many exist.
+	// For now, let's keep it simple: if it's an alternation, we take best from each.
+	// We'll limit to a small number of total anchors to keep SearchWarp fast.
+	if len(anchors) > 8 {
+		anchors = anchors[:8]
+	}
+
+	for i := range anchors {
+		ExtractConstraints(re, &anchors[i])
+	}
+
+	return anchors
+}
+
+func findCoveringAnchors(re *syntax.Regexp, offset int, atStart bool, hasBegin bool) []AnchorInfo {
+	if re == nil {
+		return nil
+	}
+
+	switch re.Op {
+	case syntax.OpLiteral:
+		if re.Flags&syntax.FoldCase == 0 {
+			var buf []byte
+			for _, r := range re.Rune {
+				var b [utf8.UTFMax]byte
+				n := utf8.EncodeRune(b[:], r)
+				buf = append(buf, b[:n]...)
+			}
+			if len(buf) > 0 {
+				return []AnchorInfo{{
+					Anchor:       buf,
+					Type:         AnchorPivot,
+					Distance:     offset,
+					IsFixed:      true,
+					Mandatory:    true,
+					HasBeginText: hasBegin,
+				}}
+			}
+		}
+	case syntax.OpCharClass:
+		if re.Flags&syntax.FoldCase == 0 {
+			if len(re.Rune) == 2 && re.Rune[0] == re.Rune[1] {
+				var b [utf8.UTFMax]byte
+				n := utf8.EncodeRune(b[:], re.Rune[0])
+				return []AnchorInfo{{
+					Anchor:       b[:n],
+					Type:         AnchorPivot,
+					Distance:     offset,
+					IsFixed:      true,
+					Mandatory:    true,
+					HasBeginText: hasBegin,
+				}}
+			} else if info, ok := toCCWarp(re); ok {
+				return []AnchorInfo{{
+					Class:        info,
+					HasClass:     true,
+					Type:         AnchorPivot,
+					Distance:     offset,
+					IsFixed:      true,
+					Mandatory:    true,
+					HasBeginText: hasBegin,
+				}}
+			}
+		}
+	case syntax.OpRepeat:
+		if re.Min > 0 {
+			return findCoveringAnchors(re.Sub[0], offset, atStart, hasBegin)
+		}
+	case syntax.OpPlus:
+		return findCoveringAnchors(re.Sub[0], offset, atStart, hasBegin)
+	case syntax.OpCapture:
+		return findCoveringAnchors(re.Sub[0], offset, atStart, hasBegin)
+	case syntax.OpConcat:
+		currentOffset := offset
+		currentAtStart := atStart
+		currentHasBegin := hasBegin
+		currentIsFixed := true
+
+		for _, sub := range re.Sub {
+			subAnchors := findCoveringAnchors(sub, currentOffset, currentAtStart, currentHasBegin)
+			if len(subAnchors) > 0 {
+				// We found a covering set in this prefix of the concat.
+				// For simplicity, once we find a covering set for a branch, we stop.
+				for j := range subAnchors {
+					subAnchors[j].IsFixed = subAnchors[j].IsFixed && currentIsFixed
+				}
+				return subAnchors
+			}
+
+			if sub.Op == syntax.OpBeginText && currentAtStart {
+				currentHasBegin = true
+			}
+			d := minLength(sub)
+			maxD := maxLength(sub)
+			if d != maxD {
+				currentIsFixed = false
+			}
+			if d > 0 {
+				currentAtStart = false
+			}
+			if d >= 0 {
+				currentOffset += d
+			} else {
+				currentOffset = 1000000
+			}
+		}
+	case syntax.OpAlternate:
+		var all []AnchorInfo
+		for _, sub := range re.Sub {
+			subAnchors := findCoveringAnchors(sub, offset, atStart, hasBegin)
+			if len(subAnchors) == 0 {
+				// One branch has no anchor? Then we can't cover all paths.
+				return nil
+			}
+			// In alternation, IsFixed is generally false unless it's fixed in all branches.
+			for i := range subAnchors {
+				subAnchors[i].IsFixed = false
+				subAnchors[i].Mandatory = false // Not globally mandatory
+			}
+			all = append(all, subAnchors...)
+		}
+		return all
+	}
+	return nil
 }
 
 func (a *AnchorInfo) Score() int {

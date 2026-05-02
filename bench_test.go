@@ -175,6 +175,8 @@ func BenchmarkCCWarp(b *testing.B) {
 		// 11. MAP Pivot/Suffix
 		{"MAP_Suffix", `.{100}target`, strings.Repeat("a", 1000) + "target" + strings.Repeat("a", 1000)},
 		{"MAP_Class", `.{100}[0-9]`, strings.Repeat("a", 1000) + "5" + strings.Repeat("a", 1000)},
+		// 12. MAP Multi-Anchor (Alternation)
+		{"MAP_Alt", `.{100}apple|.{100}banana`, strings.Repeat("z", 1000) + "banana" + strings.Repeat("z", 1000)},
 	}
 
 	for _, c := range cases {
