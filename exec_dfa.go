@@ -126,9 +126,15 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 					}
 
 					// Pass 0: Pre-validation
-					if _, ok := anchor.Validate(b, i+pos); !ok {
-						i = i + pos + 1
-						restartBase = i - 1
+					if _, newStart, ok := anchor.Validate(b, i+pos, candidateStart); !ok {
+						if newStart > candidateStart {
+							// Backward constraint failed (e.g. newline found in .*abc)
+							// We can jump to the failure point.
+							restartBase = newStart - 1
+						} else {
+							i = i + pos + 1
+							restartBase = i - 1
+						}
 						continue
 					}
 
@@ -136,7 +142,13 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 					i = restartBase
 				} else {
 					// Variable distance anchor: we must start from restartBase.
-					// We can't safely use Validate because Distance is only a minimum.
+					// Use Validate to prune invalid restartBase positions.
+					if _, newStart, ok := anchor.Validate(b, i+pos, restartBase); !ok {
+						if newStart > restartBase {
+							restartBase = newStart - 1
+						}
+						continue
+					}
 				}
 			} else if re.searchAny != "" {
 				pos := bytes.IndexAny(b[i:], re.searchAny)
@@ -321,9 +333,15 @@ func fastMatchExecLoop(re *Regexp, in *ir.Input) (int, int, int) {
 					}
 
 					// Pass 0: Pre-validation
-					if _, ok := anchor.Validate(b, i+pos); !ok {
-						i = i + pos + 1
-						restartBase = i - 1
+					if _, newStart, ok := anchor.Validate(b, i+pos, candidateStart); !ok {
+						if newStart > candidateStart {
+							// Backward constraint failed (e.g. newline found in .*abc)
+							// We can jump to the failure point.
+							restartBase = newStart - 1
+						} else {
+							i = i + pos + 1
+							restartBase = i - 1
+						}
 						continue
 					}
 
@@ -331,7 +349,13 @@ func fastMatchExecLoop(re *Regexp, in *ir.Input) (int, int, int) {
 					i = restartBase
 				} else {
 					// Variable distance anchor: we must start from restartBase.
-					// We can't safely use Validate because Distance is only a minimum.
+					// Use Validate to prune invalid restartBase positions.
+					if _, newStart, ok := anchor.Validate(b, i+pos, restartBase); !ok {
+						if newStart > restartBase {
+							restartBase = newStart - 1
+						}
+						continue
+					}
 				}
 			} else if re.searchAny != "" {
 				pos := bytes.IndexAny(b[i:], re.searchAny)

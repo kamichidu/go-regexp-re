@@ -425,16 +425,26 @@ func extractConstraints(re *syntax.Regexp, anchor *AnchorInfo) {
 		if d < 0 {
 			break
 		}
-		backOffset -= d
+
+		isRepeat := false
+		if sub.Op == syntax.OpStar || sub.Op == syntax.OpPlus || (sub.Op == syntax.OpRepeat && sub.Max == -1) {
+			isRepeat = true
+		}
+
 		if info, ok := toCCWarp(sub); ok {
 			anchor.Backward = append(anchor.Backward, Constraint{
-				Offset: backOffset,
-				Length: d,
-				Info:   info,
+				Offset:   backOffset - d,
+				Length:   d,
+				IsRepeat: isRepeat,
+				Info:     info,
 			})
+			if isRepeat {
+				break
+			}
 		} else {
 			break
 		}
+		backOffset -= d
 	}
 
 	forwardOffset := 1
@@ -706,15 +716,39 @@ func (a *AnchorInfo) Score() int {
 	return score
 }
 
-func (a *AnchorInfo) Validate(b []byte, p int) (int, bool) {
-	// ... (no changes here as Input is not used in AnchorInfo.Validate? Wait.)
+func (a *AnchorInfo) Validate(b []byte, p int, matchStart int) (int, int, bool) {
+	newMatchStart := matchStart
+
 	for _, c := range a.Backward {
-		start := p + c.Offset
-		if start < 0 {
-			return p, false
-		}
-		if !ValidateFixed(c.Info, b[start:start+c.Length]) {
-			return p, false
+		if c.IsRepeat {
+			end := p + c.Offset
+			if end < matchStart {
+				continue
+			}
+			switch c.Info.Kernel {
+			case CCWarpAnyExceptNL:
+				if idx := bytes.IndexByte(b[matchStart:end], '\n'); idx >= 0 {
+					return p, matchStart + idx + 1, false
+				}
+			case CCWarpAnyChar:
+				// Always valid for ASCII. For UTF-8, would need to check validity
+				// but dot-all matches everything.
+			case CCWarpEqual:
+				target := byte(c.Info.V0)
+				for i := matchStart; i < end; i++ {
+					if b[i] != target {
+						return p, i, false
+					}
+				}
+			}
+		} else {
+			start := p + c.Offset
+			if start < matchStart {
+				return p, matchStart, false
+			}
+			if !ValidateFixed(c.Info, b[start:start+c.Length]) {
+				return p, start, false
+			}
 		}
 	}
 
@@ -726,23 +760,23 @@ func (a *AnchorInfo) Validate(b []byte, p int) (int, bool) {
 	for _, c := range a.Forward {
 		start := p + c.Offset
 		if start > len(b) {
-			return p, false
+			return p, newMatchStart, false
 		}
 		if c.IsRepeat {
 			skipped := Warp(c.Info, b[start:])
 			endPos = start + skipped
 		} else {
 			if start+c.Length > len(b) {
-				return p, false
+				return p, newMatchStart, false
 			}
 			if !ValidateFixed(c.Info, b[start:start+c.Length]) {
-				return p, false
+				return p, newMatchStart, false
 			}
 			endPos = start + c.Length
 		}
 	}
 
-	return endPos, true
+	return endPos, newMatchStart, true
 }
 
 func ValidateFixed(info CCWarpInfo, b []byte) bool {

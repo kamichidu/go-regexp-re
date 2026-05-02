@@ -177,6 +177,8 @@ func BenchmarkCCWarp(b *testing.B) {
 		{"MAP_Class", `.{100}[0-9]`, strings.Repeat("a", 1000) + "5" + strings.Repeat("a", 1000)},
 		// 12. MAP Multi-Anchor (Alternation)
 		{"MAP_Alt", `.{100}apple|.{100}banana`, strings.Repeat("z", 1000) + "banana" + strings.Repeat("z", 1000)},
+		// 13. MAP Backward Line Pruning (Dot-All)
+		{"MAP_Dot", `.*target`, strings.Repeat("a\n", 500) + "target" + strings.Repeat("a", 1000)},
 	}
 
 	for _, c := range cases {
