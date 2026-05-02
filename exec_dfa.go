@@ -135,8 +135,8 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 					restartBase = candidateStart
 					i = restartBase
 				} else {
-					// Variable distance anchor: we must start from restartBase
-					// but we know a match is only possible if this anchor exists.
+					// Variable distance anchor: we must start from restartBase.
+					// We can't safely use Validate because Distance is only a minimum.
 				}
 			} else if len(re.prefix) > 0 {
 				pos := bytes.Index(b[i:], re.prefix)
@@ -319,8 +319,8 @@ func fastMatchExecLoop(re *Regexp, in *ir.Input) (int, int, int) {
 					restartBase = candidateStart
 					i = restartBase
 				} else {
-					// Variable distance anchor: we must start from restartBase
-					// but we know a match is only possible if this anchor exists.
+					// Variable distance anchor: we must start from restartBase.
+					// We can't safely use Validate because Distance is only a minimum.
 				}
 			} else if len(re.prefix) > 0 {
 				pos := bytes.Index(b[i:], re.prefix)

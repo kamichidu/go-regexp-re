@@ -533,12 +533,13 @@ func SelectBestAnchors(anchors []AnchorInfo) []AnchorInfo {
 	}
 
 	// Score each anchor and pick the best one.
-	// We MUST only pick Mandatory anchors for exclusive search.
+	// We MUST only pick Mandatory AND IsFixed anchors for exclusive search.
+	// Non-fixed anchors can't safely jump restartBase because we don't know the exact start.
 	var best AnchorInfo
 	maxScore := -1
 
 	for _, a := range anchors {
-		if !a.Mandatory {
+		if !a.Mandatory || !a.IsFixed {
 			continue
 		}
 		s := a.Score()
@@ -555,8 +556,8 @@ func SelectBestAnchors(anchors []AnchorInfo) []AnchorInfo {
 }
 
 func (a *AnchorInfo) Score() int {
-	// Mandatory anchors are the only ones we can safely use for exclusive skip.
-	if !a.Mandatory {
+	// Mandatory and Fixed anchors are the only ones we can safely use for exclusive skip.
+	if !a.Mandatory || !a.IsFixed {
 		return 0
 	}
 
@@ -581,7 +582,7 @@ func (a *AnchorInfo) Score() int {
 		score += 5
 	}
 
-	// FIXED distance anchors are much more valuable as they allow exact restartBase skipping
+	// FIXED distance anchors are very strong
 	if a.IsFixed {
 		score += 50
 	}
