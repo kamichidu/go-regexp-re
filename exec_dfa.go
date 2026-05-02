@@ -114,6 +114,17 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 					break
 				}
 
+				if re.lineBounded {
+					// Line-Anchored Jump: if there is a newline between current i and the anchor,
+					// any match using this anchor MUST start after that newline.
+					lastNL := bytes.LastIndexByte(b[i:i+pos], '\n')
+					if lastNL >= 0 {
+						restartBase = i + lastNL + 1
+						i = restartBase
+						continue
+					}
+				}
+
 				if anchor.IsFixed {
 					candidateStart := i + pos - anchor.Distance
 					if candidateStart < i {
@@ -155,12 +166,19 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 				if pos < 0 {
 					break
 				}
+
+				if re.lineBounded {
+					lastNL := bytes.LastIndexByte(b[i:i+pos], '\n')
+					if lastNL >= 0 {
+						restartBase = i + lastNL + 1
+						i = restartBase
+						continue
+					}
+				}
+
 				// Any match MUST contain one of these anchors at or after i+pos.
-				// However, since we don't know WHICH branch will match, we can't
-				// safely jump restartBase unless we check all possible matches.
-				// For now, we only use it to skip Noise.
-				restartBase += pos
-				i = restartBase
+				// But we don't know the distance, so we can't jump restartBase to pos.
+				// Just proceed to DFA.
 			} else if len(re.prefix) > 0 {
 				pos := bytes.Index(b[i:], re.prefix)
 				if pos < 0 {
@@ -321,6 +339,17 @@ func fastMatchExecLoop(re *Regexp, in *ir.Input) (int, int, int) {
 					break
 				}
 
+				if re.lineBounded {
+					// Line-Anchored Jump: if there is a newline between current i and the anchor,
+					// any match using this anchor MUST start after that newline.
+					lastNL := bytes.LastIndexByte(b[i:i+pos], '\n')
+					if lastNL >= 0 {
+						restartBase = i + lastNL + 1
+						i = restartBase
+						continue
+					}
+				}
+
 				if anchor.IsFixed {
 					candidateStart := i + pos - anchor.Distance
 					if candidateStart < i {
@@ -362,8 +391,15 @@ func fastMatchExecLoop(re *Regexp, in *ir.Input) (int, int, int) {
 				if pos < 0 {
 					break
 				}
-				restartBase += pos
-				i = restartBase
+
+				if re.lineBounded {
+					lastNL := bytes.LastIndexByte(b[i:i+pos], '\n')
+					if lastNL >= 0 {
+						restartBase = i + lastNL + 1
+						i = restartBase
+						continue
+					}
+				}
 			} else if len(re.prefix) > 0 {
 				pos := bytes.Index(b[i:], re.prefix)
 				if pos < 0 {

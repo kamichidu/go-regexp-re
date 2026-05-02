@@ -32,6 +32,7 @@ type Regexp struct {
 	mapAnchors     []ir.AnchorInfo
 	primaryAnchor  *ir.AnchorInfo
 	searchAny      string
+	lineBounded    bool
 }
 
 type CompileOptions struct {
@@ -124,6 +125,7 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 		uIndices:       uIndices,
 		uPrioDeltas:    uPrioDeltas,
 		searchWarp:     searchWarp,
+		lineBounded:    ir.IsLineBounded(s),
 	}
 
 	if res.literalMatcher == nil && !ir.HasComplexAnchors(s) {

@@ -978,6 +978,46 @@ func splat(v uint64) uint64 {
 	return v * 0x0101010101010101
 }
 
+func IsLineBounded(re *syntax.Regexp) bool {
+	if re == nil {
+		return true
+	}
+	switch re.Op {
+	case syntax.OpLiteral:
+		for _, r := range re.Rune {
+			if r == '\n' {
+				return false
+			}
+		}
+		return true
+	case syntax.OpCharClass:
+		for i := 0; i+1 < len(re.Rune); i += 2 {
+			if re.Rune[i] <= '\n' && '\n' <= re.Rune[i+1] {
+				return false
+			}
+		}
+		return true
+	case syntax.OpAnyCharNotNL:
+		return true
+	case syntax.OpAnyChar:
+		return false
+	case syntax.OpBeginLine, syntax.OpEndLine:
+		return true
+	case syntax.OpBeginText, syntax.OpEndText:
+		return true
+	case syntax.OpCapture, syntax.OpRepeat, syntax.OpQuest, syntax.OpPlus, syntax.OpStar:
+		return IsLineBounded(re.Sub[0])
+	case syntax.OpConcat, syntax.OpAlternate:
+		for _, sub := range re.Sub {
+			if !IsLineBounded(sub) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
 func HasComplexAnchors(re *syntax.Regexp) bool {
 	if re == nil {
 		return false
