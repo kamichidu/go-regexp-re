@@ -116,10 +116,67 @@ async function renderTrends() {
     }
 }
 
-function renderRegression(results) {
-    // Logic for regression heatmap (Current vs Baseline)
-    // This requires two data sets. Placeholder for now.
-    document.getElementById('regression-chart').innerHTML = '<p style="padding: 100px; text-align: center; color: #999;">Regression analysis requires a baseline.json to compare against.</p>';
+async function renderRegression(currentResults) {
+    try {
+        const hResponse = await fetch('data/history.json');
+        if (!hResponse.ok) throw new Error('data/history.json not found');
+        const history = await hResponse.json();
+
+        if (history.length < 2) {
+            document.getElementById('regression-chart').innerHTML = '<p style="padding: 100px; text-align: center; color: #999;">Need at least two data points for regression analysis.</p>';
+            return;
+        }
+
+        const prevEntry = history[history.length - 2];
+        const pResponse = await fetch(`benchmarks/history/${prevEntry.file}`);
+        if (!pResponse.ok) throw new Error(`Failed to load ${prevEntry.file}`);
+        const prevResults = await pResponse.json();
+
+        const lSlice = parseFloat(document.getElementById('l-slice').value) || 0.1;
+        
+        // Use our engine results for comparison
+        const curOur = currentResults.filter(r => r.engine === 'GoRegexpRe' && Math.abs(r.l - lSlice) < 0.01);
+        const prevOur = prevResults.filter(r => r.engine === 'GoRegexpRe' && Math.abs(r.l - lSlice) < 0.01);
+
+        const sValues = [...new Set(currentResults.map(r => r.s))].sort((a, b) => b - a);
+        const bValues = [...new Set(currentResults.map(r => r.b))].sort((a, b) => a - b);
+        
+        let regressionCount = 0;
+
+        const zData = bValues.map(b => sValues.map(s => {
+            const cur = curOur.find(r => r.s === s && r.b === b);
+            const prev = prevOur.find(r => r.s === s && r.b === b);
+            if (cur && prev && prev.throughput > 0) {
+                const diff = (cur.throughput - prev.throughput) / prev.throughput * 100;
+                if (diff < -5.0) regressionCount++; // Count > 5% drop as regression
+                return diff;
+            }
+            return null;
+        }));
+
+        const data = [{
+            z: zData,
+            x: sValues,
+            y: bValues,
+            type: 'heatmap',
+            colorscale: 'RdBu',
+            reversescale: true,
+            zmid: 0,
+            colorbar: { title: 'Diff (%)' }
+        }];
+
+        const layout = {
+            title: `Regression Heatmap (Current vs ${prevEntry.sha}, L=${lSlice})`,
+            xaxis: { title: 'Selectivity (S)', autorange: 'reversed' },
+            yaxis: { title: 'Complexity (B)', type: 'log' }
+        };
+
+        Plotly.newPlot('regression-chart', data, layout);
+        document.getElementById('regression-count').textContent = regressionCount;
+    } catch (err) {
+        console.warn('Regression Chart Error:', err);
+        document.getElementById('regression-chart').innerHTML = `<p style="padding: 100px; text-align: center; color: #999;">Error loading regression: ${err.message}</p>`;
+    }
 }
 
 function renderDeepDive(results) {
