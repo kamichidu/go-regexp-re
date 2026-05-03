@@ -4,9 +4,12 @@ document.addEventListener('DOMContentLoaded', async function() {
         if (!response.ok) throw new Error('data/landscape.json not found. Run benchmark on main branch to generate data.');
         const results = await response.json();
         
+        // Setup L-slice selector based on actual data
+        populateLSelector(results);
+
         // Render all charts with the loaded data
         renderLandscape(results);
-        renderTrends(results);
+        renderTrends();
         renderRegression(results);
         renderDeepDive(results);
 
@@ -22,6 +25,16 @@ document.addEventListener('DOMContentLoaded', async function() {
     }
 });
 
+function populateLSelector(results) {
+    const lValues = [...new Set(results.map(r => parseFloat(r.l.toFixed(2))))].sort((a, b) => a - b);
+    const selector = document.getElementById('l-slice');
+    selector.innerHTML = lValues.map(l => `<option value="${l}">L = ${l}</option>`).join('');
+    // Select a middle-ish value by default
+    if (lValues.length > 0) {
+        selector.selectedIndex = Math.floor(lValues.length / 2);
+    }
+}
+
 function updateSummary(results) {
     const ourResults = results.filter(r => r.engine === 'GoRegexpRe');
     const stdResults = results.filter(r => r.engine === 'GoRegexp');
@@ -31,7 +44,7 @@ function updateSummary(results) {
     let count = 0;
 
     ourResults.forEach(re => {
-        const std = stdResults.find(s => s.s === re.s && s.b === re.b && s.l === re.l);
+        const std = stdResults.find(s => Math.abs(s.s - re.s) < 0.01 && Math.abs(s.b - re.b) < 0.01 && Math.abs(s.l - re.l) < 0.01);
         if (std && std.throughput > 0) {
             const speedup = re.throughput / std.throughput;
             totalSpeedup += speedup;
@@ -44,21 +57,22 @@ function updateSummary(results) {
         document.getElementById('avg-speedup').textContent = (totalSpeedup / count).toFixed(1) + 'x';
         document.getElementById('max-speedup').textContent = maxSpeedup.toFixed(1) + 'x';
     }
-    document.getElementById('regression-count').textContent = 'N/A';
+    document.getElementById('regression-count').textContent = 'Calculating...';
 }
 
 function renderLandscape(results) {
-    const lSlice = parseFloat(document.getElementById('l-slice').value) || 0.1;
+    const selector = document.getElementById('l-slice');
+    const lSlice = parseFloat(selector.value);
     
-    const ourResults = results.filter(r => r.engine === 'GoRegexpRe' && Math.abs(r.l - lSlice) < 0.01);
-    const stdResults = results.filter(r => r.engine === 'GoRegexp' && Math.abs(r.l - lSlice) < 0.01);
+    const ourResults = results.filter(r => r.engine === 'GoRegexpRe' && Math.abs(r.l - lSlice) < 0.05);
+    const stdResults = results.filter(r => r.engine === 'GoRegexp' && Math.abs(r.l - lSlice) < 0.05);
 
     const sValues = [...new Set(results.map(r => r.s))].sort((a, b) => b - a);
     const bValues = [...new Set(results.map(r => r.b))].sort((a, b) => a - b);
     
     const zData = bValues.map(b => sValues.map(s => {
-        const re = ourResults.find(r => r.s === s && r.b === b);
-        const std = stdResults.find(r => r.s === s && r.b === b);
+        const re = ourResults.find(r => Math.abs(r.s - s) < 0.01 && Math.abs(r.b - b) < 0.01);
+        const std = stdResults.find(r => Math.abs(r.s - s) < 0.01 && Math.abs(r.b - b) < 0.01);
         return (re && std && std.throughput > 0) ? re.throughput / std.throughput : null;
     }));
 
@@ -68,17 +82,18 @@ function renderLandscape(results) {
         y: bValues,
         type: 'heatmap',
         colorscale: 'Portland',
-        colorbar: { title: 'Speedup (x)' }
+        colorbar: { title: 'Speedup (x)' },
+        hoverongaps: false
     }];
 
     const layout = {
         title: `S x B Performance Landscape (L=${lSlice})`,
         xaxis: { title: 'Selectivity (S)', autorange: 'reversed' },
-        yaxis: { title: 'Complexity (B)', type: 'log' }
+        yaxis: { title: 'Complexity (B)' }
     };
 
     Plotly.newPlot('landscape-chart', data, layout);
-    document.getElementById('l-slice').onchange = () => renderLandscape(results);
+    selector.onchange = () => renderLandscape(results);
 }
 
 async function renderTrends() {
@@ -132,11 +147,12 @@ async function renderRegression(currentResults) {
         if (!pResponse.ok) throw new Error(`Failed to load ${prevEntry.file}`);
         const prevResults = await pResponse.json();
 
-        const lSlice = parseFloat(document.getElementById('l-slice').value) || 0.1;
+        const selector = document.getElementById('l-slice');
+        const lSlice = parseFloat(selector.value);
         
         // Use our engine results for comparison
-        const curOur = currentResults.filter(r => r.engine === 'GoRegexpRe' && Math.abs(r.l - lSlice) < 0.01);
-        const prevOur = prevResults.filter(r => r.engine === 'GoRegexpRe' && Math.abs(r.l - lSlice) < 0.01);
+        const curOur = currentResults.filter(r => r.engine === 'GoRegexpRe' && Math.abs(r.l - lSlice) < 0.05);
+        const prevOur = prevResults.filter(r => r.engine === 'GoRegexpRe' && Math.abs(r.l - lSlice) < 0.05);
 
         const sValues = [...new Set(currentResults.map(r => r.s))].sort((a, b) => b - a);
         const bValues = [...new Set(currentResults.map(r => r.b))].sort((a, b) => a - b);
@@ -144,8 +160,8 @@ async function renderRegression(currentResults) {
         let regressionCount = 0;
 
         const zData = bValues.map(b => sValues.map(s => {
-            const cur = curOur.find(r => r.s === s && r.b === b);
-            const prev = prevOur.find(r => r.s === s && r.b === b);
+            const cur = curOur.find(r => Math.abs(r.s - s) < 0.01 && Math.abs(r.b - b) < 0.01);
+            const prev = prevOur.find(r => Math.abs(r.s - s) < 0.01 && Math.abs(r.b - b) < 0.01);
             if (cur && prev && prev.throughput > 0) {
                 const diff = (cur.throughput - prev.throughput) / prev.throughput * 100;
                 if (diff < -5.0) regressionCount++; // Count > 5% drop as regression
@@ -162,13 +178,14 @@ async function renderRegression(currentResults) {
             colorscale: 'RdBu',
             reversescale: true,
             zmid: 0,
-            colorbar: { title: 'Diff (%)' }
+            colorbar: { title: 'Diff (%)' },
+            hoverongaps: false
         }];
 
         const layout = {
             title: `Regression Heatmap (Current vs ${prevEntry.sha}, L=${lSlice})`,
             xaxis: { title: 'Selectivity (S)', autorange: 'reversed' },
-            yaxis: { title: 'Complexity (B)', type: 'log' }
+            yaxis: { title: 'Complexity (B)' }
         };
 
         Plotly.newPlot('regression-chart', data, layout);
@@ -180,11 +197,12 @@ async function renderRegression(currentResults) {
 }
 
 function renderDeepDive(results) {
-    const lSlice = parseFloat(document.getElementById('l-slice').value) || 0.1;
+    const selector = document.getElementById('l-slice');
+    const lSlice = parseFloat(selector.value);
     const bTarget = Math.max(...results.map(r => r.b)); // Use highest complexity for deep dive
 
-    const ourData = results.filter(r => r.engine === 'GoRegexpRe' && r.b === bTarget && Math.abs(r.l - lSlice) < 0.01);
-    const stdData = results.filter(r => r.engine === 'GoRegexp' && r.b === bTarget && Math.abs(r.l - lSlice) < 0.01);
+    const ourData = results.filter(r => r.engine === 'GoRegexpRe' && Math.abs(r.b - bTarget) < 0.01 && Math.abs(r.l - lSlice) < 0.05);
+    const stdData = results.filter(r => r.engine === 'GoRegexp' && Math.abs(r.b - bTarget) < 0.01 && Math.abs(r.l - lSlice) < 0.05);
 
     ourData.sort((a, b) => b.s - a.s);
     stdData.sort((a, b) => b.s - a.s);
@@ -207,7 +225,7 @@ function renderDeepDive(results) {
     ];
 
     const layout = {
-        title: `Throughput Profile (B=${bTarget}, L=${lSlice})`,
+        title: `Throughput Profile (B=${bTarget.toFixed(2)}, L=${lSlice})`,
         xaxis: { title: 'Selectivity (S)', autorange: 'reversed' },
         yaxis: { title: 'Throughput (MB/s)', type: 'log' }
     };
