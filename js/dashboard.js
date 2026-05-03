@@ -1,27 +1,28 @@
 document.addEventListener('DOMContentLoaded', async function() {
     try {
         const response = await fetch('data/landscape.json');
-        if (!response.ok) throw new Error('Failed to load data/landscape.json');
+        if (!response.ok) throw new Error('data/landscape.json not found. Run benchmark on main branch to generate data.');
         const results = await response.json();
         
+        // Render all charts with the loaded data
         renderLandscape(results);
-        renderTrends(results); // Placeholder for future time-series data
+        renderTrends(results);
         renderRegression(results);
         renderDeepDive(results);
 
-        // Update summary stats based on real data
+        // Update summary stats
         updateSummary(results);
     } catch (err) {
-        console.error('Error loading dashboard data:', err);
-        // Show error message on UI
-        document.querySelector('main').insertAdjacentHTML('afterbegin', `<div class="error-msg">Error: ${err.message}. Ensure data/landscape.json exists.</div>`);
+        console.error('Viewer Error:', err);
+        document.querySelector('main').insertAdjacentHTML('afterbegin', `
+            <div style="background: #fff3f3; color: #721c24; padding: 20px; border-radius: 8px; margin-bottom: 30px; border: 1px solid #f5c6cb;">
+                <strong>Viewer Status:</strong> ${err.message}
+            </div>
+        `);
     }
 });
 
 function updateSummary(results) {
-    if (!results || results.length === 0) return;
-    
-    // Simple speedup calculation relative to GoRegexp
     const ourResults = results.filter(r => r.engine === 'GoRegexpRe');
     const stdResults = results.filter(r => r.engine === 'GoRegexp');
     
@@ -43,11 +44,10 @@ function updateSummary(results) {
         document.getElementById('avg-speedup').textContent = (totalSpeedup / count).toFixed(1) + 'x';
         document.getElementById('max-speedup').textContent = maxSpeedup.toFixed(1) + 'x';
     }
-    document.getElementById('regression-count').textContent = '0'; // Logic for this would require historical data
+    document.getElementById('regression-count').textContent = 'N/A';
 }
 
 function renderLandscape(results) {
-    // Group by S, B for a specific L
     const lSlice = parseFloat(document.getElementById('l-slice').value) || 0.1;
     
     const ourResults = results.filter(r => r.engine === 'GoRegexpRe' && Math.abs(r.l - lSlice) < 0.01);
@@ -78,72 +78,50 @@ function renderLandscape(results) {
     };
 
     Plotly.newPlot('landscape-chart', data, layout);
-
-    // Re-render when L selector changes
     document.getElementById('l-slice').onchange = () => renderLandscape(results);
 }
 
-function renderTrends() {
-    const dates = ['2026-04-20', '2026-04-21', '2026-04-22', '2026-04-23', '2026-04-24'];
-    const emailData = [10.5, 11.2, 11.0, 15.4, 15.6];
-    const ipData = [25.0, 24.8, 26.2, 25.8, 27.1];
+function renderTrends(results) {
+    // Note: Trends will eventually need a separate history.json
+    // For now, we just show a "Single Snapshot" message or clear the div
+    document.getElementById('trends-chart').innerHTML = '<p style="padding: 100px; text-align: center; color: #999;">Historical tracking requires multiple data snapshots. Current view: Single Snapshot.</p>';
+}
+
+function renderRegression(results) {
+    // Logic for regression heatmap (Current vs Baseline)
+    // This requires two data sets. Placeholder for now.
+    document.getElementById('regression-chart').innerHTML = '<p style="padding: 100px; text-align: center; color: #999;">Regression analysis requires a baseline.json to compare against.</p>';
+}
+
+function renderDeepDive(results) {
+    const lSlice = parseFloat(document.getElementById('l-slice').value) || 0.1;
+    const bTarget = Math.max(...results.map(r => r.b)); // Use highest complexity for deep dive
+
+    const ourData = results.filter(r => r.engine === 'GoRegexpRe' && r.b === bTarget && Math.abs(r.l - lSlice) < 0.01);
+    const stdData = results.filter(r => r.engine === 'GoRegexp' && r.b === bTarget && Math.abs(r.l - lSlice) < 0.01);
+
+    ourData.sort((a, b) => b.s - a.s);
+    stdData.sort((a, b) => b.s - a.s);
 
     const data = [
-        { x: dates, y: emailData, name: 'email', type: 'scatter', mode: 'lines+markers' },
-        { x: dates, y: ipData, name: 'ip', type: 'scatter', mode: 'lines+markers' }
+        {
+            x: ourData.map(d => d.s),
+            y: ourData.map(d => d.throughput),
+            name: 'go-regexp-re',
+            type: 'scatter',
+            mode: 'lines+markers'
+        },
+        {
+            x: stdData.map(d => d.s),
+            y: stdData.map(d => d.throughput),
+            name: 'Go standard',
+            type: 'scatter',
+            mode: 'lines+markers'
+        }
     ];
 
     const layout = {
-        title: 'Historical Performance Tracking',
-        xaxis: { title: 'Commit Date' },
-        yaxis: { title: 'Speedup (x)' }
-    };
-
-    Plotly.newPlot('trends-chart', data, layout);
-}
-
-function renderRegression() {
-    const sValues = [0.99, 0.9, 0.7, 0.5, 0.3, 0.1, 0.05, 0.01];
-    const bValues = [1, 2, 5, 10, 20, 50, 100];
-    
-    // Mock regression data (diff vs previous)
-    const zData = bValues.map(b => sValues.map(s => {
-        return (Math.random() - 0.5) * 10; // -5% to +5%
-    }));
-
-    const data = [{
-        z: zData,
-        x: sValues,
-        y: bValues,
-        type: 'heatmap',
-        colorscale: 'RdBu', // Red for improvement, Blue for regression (or vice versa, let's use RdBu)
-        reversescale: true,
-        zmid: 0,
-        colorbar: { title: 'Diff (%)' }
-    }];
-
-    const layout = {
-        title: 'Regression Heatmap (Current vs Previous)',
-        xaxis: { title: 'Selectivity (S)', autorange: 'reversed' },
-        yaxis: { title: 'Complexity (B)', type: 'log' }
-    };
-
-    Plotly.newPlot('regression-chart', data, layout);
-}
-
-function renderDeepDive() {
-    // S-sweep at fixed B
-    const sValues = Array.from({length: 20}, (_, i) => 1.0 - i * 0.05);
-    const reData = sValues.map(s => 100 / (s + 0.1));
-    const standardData = sValues.map(s => 10);
-
-    const data = [
-        { x: sValues, y: reData, name: 'go-regexp-re', type: 'scatter' },
-        { x: sValues, y: standardData, name: 'standard regexp', type: 'scatter' }
-    ];
-
-    const layout = {
-        title: 'S-Sweep Profile (B=10, L=0.5)',
+        title: `Throughput Profile (B=${bTarget}, L=${lSlice})`,
         xaxis: { title: 'Selectivity (S)', autorange: 'reversed' },
         yaxis: { title: 'Throughput (MB/s)', type: 'log' }
     };
