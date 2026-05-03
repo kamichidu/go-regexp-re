@@ -44,8 +44,8 @@ The core metrics and benchmarking logic are implemented in `internal/testsuite`.
 - **S Calculation**: Measured at runtime based on the match count relative to total input size.
 
 === Data Persistence
-- **Metadata Registry**: During benchmark execution, SBL metrics are recorded in a centralized registry and exported to `internal/benchmark/sbl_registry.json`.
-- **Data Processor**: The `_scripts/generate-landscape.sh` wrapper uses `internal/tools/landscape-gen` to join raw benchmark text results with the SBL metadata, producing the final JSON for visualization.
+- **Metadata Registry**: During benchmark execution, SBL metrics are recorded in a centralized registry and exported to `sbl_definitions.json`.
+- **Data Processor**: The `_scripts/generate-landscape.sh` wrapper uses `internal/tools/landscape-gen` to join raw benchmark text results with the stable metadata in `internal/testsuite/sbl_definitions.json`, producing the final JSON for visualization.
 
 == Usage: Standard Benchmarks
 

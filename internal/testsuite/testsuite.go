@@ -341,7 +341,7 @@ func Main(m *testing.M) {
 
 	// Export SBL registry if any benchmarks were recorded
 	if len(sblRegistry) > 0 {
-		if err := ExportSBLRegistry("sbl_registry.json"); err != nil {
+		if err := ExportSBLRegistry("sbl_definitions.json"); err != nil {
 			log.Printf("warning: failed to export SBL registry: %v", err)
 		}
 	}
