@@ -1,25 +1,65 @@
-document.addEventListener('DOMContentLoaded', function() {
-    renderLandscape();
-    renderTrends();
-    renderRegression();
-    renderDeepDive();
+document.addEventListener('DOMContentLoaded', async function() {
+    try {
+        const response = await fetch('data/landscape.json');
+        if (!response.ok) throw new Error('Failed to load data/landscape.json');
+        const results = await response.json();
+        
+        renderLandscape(results);
+        renderTrends(results); // Placeholder for future time-series data
+        renderRegression(results);
+        renderDeepDive(results);
 
-    // Mock summary stats
-    document.getElementById('avg-speedup').textContent = '12.5x';
-    document.getElementById('max-speedup').textContent = '84.2x';
-    document.getElementById('regression-count').textContent = '2';
+        // Update summary stats based on real data
+        updateSummary(results);
+    } catch (err) {
+        console.error('Error loading dashboard data:', err);
+        // Show error message on UI
+        document.querySelector('main').insertAdjacentHTML('afterbegin', `<div class="error-msg">Error: ${err.message}. Ensure data/landscape.json exists.</div>`);
+    }
 });
 
-function renderLandscape() {
-    const sValues = [0.99, 0.9, 0.7, 0.5, 0.3, 0.1, 0.05, 0.01];
-    const bValues = [1, 2, 5, 10, 20, 50, 100];
+function updateSummary(results) {
+    if (!results || results.length === 0) return;
     
-    // Mock speedup data
+    // Simple speedup calculation relative to GoRegexp
+    const ourResults = results.filter(r => r.engine === 'GoRegexpRe');
+    const stdResults = results.filter(r => r.engine === 'GoRegexp');
+    
+    let totalSpeedup = 0;
+    let maxSpeedup = 0;
+    let count = 0;
+
+    ourResults.forEach(re => {
+        const std = stdResults.find(s => s.s === re.s && s.b === re.b && s.l === re.l);
+        if (std && std.throughput > 0) {
+            const speedup = re.throughput / std.throughput;
+            totalSpeedup += speedup;
+            if (speedup > maxSpeedup) maxSpeedup = speedup;
+            count++;
+        }
+    });
+
+    if (count > 0) {
+        document.getElementById('avg-speedup').textContent = (totalSpeedup / count).toFixed(1) + 'x';
+        document.getElementById('max-speedup').textContent = maxSpeedup.toFixed(1) + 'x';
+    }
+    document.getElementById('regression-count').textContent = '0'; // Logic for this would require historical data
+}
+
+function renderLandscape(results) {
+    // Group by S, B for a specific L
+    const lSlice = parseFloat(document.getElementById('l-slice').value) || 0.1;
+    
+    const ourResults = results.filter(r => r.engine === 'GoRegexpRe' && Math.abs(r.l - lSlice) < 0.01);
+    const stdResults = results.filter(r => r.engine === 'GoRegexp' && Math.abs(r.l - lSlice) < 0.01);
+
+    const sValues = [...new Set(results.map(r => r.s))].sort((a, b) => b - a);
+    const bValues = [...new Set(results.map(r => r.b))].sort((a, b) => a - b);
+    
     const zData = bValues.map(b => sValues.map(s => {
-        // Simple heuristic: 
-        // high S (sparse) -> high speedup (MAP/SIMD)
-        // high B (complex) -> slightly lower speedup (DFA)
-        return (s * 100) / (Math.log10(b) + 1);
+        const re = ourResults.find(r => r.s === s && r.b === b);
+        const std = stdResults.find(r => r.s === s && r.b === b);
+        return (re && std && std.throughput > 0) ? re.throughput / std.throughput : null;
     }));
 
     const data = [{
@@ -32,12 +72,15 @@ function renderLandscape() {
     }];
 
     const layout = {
-        title: 'S x B Performance Landscape (L=0.2)',
+        title: `S x B Performance Landscape (L=${lSlice})`,
         xaxis: { title: 'Selectivity (S)', autorange: 'reversed' },
         yaxis: { title: 'Complexity (B)', type: 'log' }
     };
 
     Plotly.newPlot('landscape-chart', data, layout);
+
+    // Re-render when L selector changes
+    document.getElementById('l-slice').onchange = () => renderLandscape(results);
 }
 
 function renderTrends() {
