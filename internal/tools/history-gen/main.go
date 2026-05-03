@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -12,13 +13,18 @@ import (
 type HistoryEntry struct {
 	Date       string  `json:"date"`
 	SHA        string  `json:"sha"`
-	AvgSpeedup float64 `json:"avg_speedup"`
+	AvgSpeedup float64 `json:"avg_speedup"` // Geometric Mean
+	MinSpeedup float64 `json:"min_speedup"`
+	MaxSpeedup float64 `json:"max_speedup"`
 	File       string  `json:"file"`
 }
 
 type BenchResult struct {
 	Engine     string  `json:"engine"`
 	Throughput float64 `json:"throughput"`
+	S          float64 `json:"s"`
+	B          float64 `json:"b"`
+	L          float64 `json:"l"`
 }
 
 func main() {
@@ -50,9 +56,10 @@ func main() {
 			continue
 		}
 
-		// Calculate avg speedup for this snapshot
-		// Re vs Go
-		var totalSpeedup float64
+		// Calculate metrics for this snapshot
+		var logSum float64
+		var minSpeedup float64 = 1e18
+		var maxSpeedup float64 = 0
 		var count int
 		
 		reResults := make(map[string]float64)
@@ -69,17 +76,30 @@ func main() {
 
 		for k, reTp := range reResults {
 			if goTp, ok := goResults[k]; ok && goTp > 0 {
-				totalSpeedup += reTp / goTp
+				speedup := reTp / goTp
+				
+				logSum += math.Log(speedup)
+				if speedup < minSpeedup {
+					minSpeedup = speedup
+				}
+				if speedup > maxSpeedup {
+					maxSpeedup = speedup
+				}
 				count++
 			}
 		}
 
 		avg := 0.0
 		if count > 0 {
-			avg = totalSpeedup / float64(count)
+			avg = math.Exp(logSum / float64(count))
+		} else {
+			minSpeedup = 0
 		}
 
-		// Extract date and SHA from filename: benchmark-20260424-000000-7ea0637.json
+		// Cap extreme outliers for history index stability
+		if maxSpeedup > 100000.0 { maxSpeedup = 100000.0 }
+
+		// Extract date and SHA from filename
 		base := filepath.Base(file)
 		parts := strings.Split(strings.TrimSuffix(base, ".json"), "-")
 		dateStr := ""
@@ -100,6 +120,8 @@ func main() {
 			Date:       dateStr,
 			SHA:        sha,
 			AvgSpeedup: avg,
+			MinSpeedup: minSpeedup,
+			MaxSpeedup: maxSpeedup,
 			File:       base,
 		})
 	}
