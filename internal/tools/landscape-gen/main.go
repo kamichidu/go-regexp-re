@@ -29,7 +29,7 @@ type Key struct {
 
 func main() {
 	if len(os.Args) < 3 {
-		fmt.Println("Usage: go run main.go <benchmark_output.txt> <sbl_registry.json>")
+		fmt.Println("Usage: go run main.go <benchmark_output.txt> <output.json>")
 		os.Exit(1)
 	}
 
@@ -40,9 +40,12 @@ func main() {
 	}
 	defer benchFile.Close()
 
-	registryFile, err := os.ReadFile(os.Args[2])
+	outputFilePath := os.Args[2]
+
+	// Use the stable definitions file in the repo
+	registryFile, err := os.ReadFile("internal/testsuite/sbl_definitions.json")
 	if err != nil {
-		fmt.Printf("Error opening SBL registry: %v\n", err)
+		fmt.Printf("Error opening SBL definitions: %v\n", err)
 		os.Exit(1)
 	}
 	var registry map[string]struct {
@@ -51,13 +54,11 @@ func main() {
 		L float64 `json:"l"`
 	}
 	if err := json.Unmarshal(registryFile, &registry); err != nil {
-		fmt.Printf("Error parsing SBL registry: %v\n", err)
+		fmt.Printf("Error parsing SBL definitions: %v\n", err)
 		os.Exit(1)
 	}
 
 	// Regex for standard benchmarks (Suite/Engine/SubName)
-	// Example: BenchmarkStandardSuite/GoRegexpRe/Literal/a-4
-	// m[1] = StandardSuite, m[2] = GoRegexpRe, m[3] = Literal/a
 	reBench := regexp.MustCompile(`Benchmark(\w+)/(\w+)/(.+)-\d+\s+\d+\s+[\d.]+ ns/op\s+([\d.]+) MB/s`)
 
 	sums := make(map[Key]float64)
@@ -73,7 +74,6 @@ func main() {
 			subName := m[3]
 			tp, _ := strconv.ParseFloat(m[4], 64)
 
-			// Registry key is TopLevel/SubName (e.g., StandardSuite/Literal/a)
 			registryKey := suite + "/" + subName
 			sbl, ok := registry[registryKey]
 			if !ok {
@@ -110,5 +110,8 @@ func main() {
 	})
 
 	output, _ := json.MarshalIndent(results, "", "  ")
-	fmt.Println(string(output))
+	if err := os.WriteFile(outputFilePath, output, 0644); err != nil {
+		fmt.Printf("Error writing output JSON: %v\n", err)
+		os.Exit(1)
+	}
 }
