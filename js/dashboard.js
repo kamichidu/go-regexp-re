@@ -14,12 +14,11 @@ document.addEventListener('DOMContentLoaded', async function() {
         // Render all layers of the landscape
         renderLayeredLandscape(results);
         
-        renderTrends();
+        // Load history and update summary stats
+        await renderTrends();
+        
         renderRegression(results);
         renderDeepDive(results);
-
-        // Update summary stats
-        updateSummary(results);
     } catch (err) {
         console.error('Viewer Error:', err);
         document.querySelector('main').insertAdjacentHTML('afterbegin', `
@@ -29,35 +28,6 @@ document.addEventListener('DOMContentLoaded', async function() {
         `);
     }
 });
-
-function updateSummary(results) {
-    const ourResults = results.filter(r => r.engine === 'GoRegexpRe');
-    const stdResults = results.filter(r => r.engine === 'GoRegexp');
-    
-    let logSum = 0;
-    let minSpeedup = Infinity;
-    let maxSpeedup = 0;
-    let count = 0;
-
-    ourResults.forEach(re => {
-        const std = stdResults.find(s => Math.abs(s.s - re.s) < 0.01 && Math.abs(s.b - re.b) < 0.01 && Math.abs(s.l - re.l) < 0.01);
-        if (std && std.throughput > 0) {
-            const speedup = re.throughput / std.throughput;
-            logSum += Math.log(speedup);
-            if (speedup < minSpeedup) minSpeedup = speedup;
-            if (speedup > maxSpeedup) maxSpeedup = speedup;
-            count++;
-        }
-    });
-
-    if (count > 0) {
-        const geoMean = Math.exp(logSum / count);
-        document.getElementById('min-speedup').textContent = minSpeedup.toFixed(1) + 'x';
-        document.getElementById('avg-speedup').textContent = geoMean.toFixed(1) + 'x';
-        document.getElementById('max-speedup').textContent = maxSpeedup.toFixed(1) + 'x';
-    }
-    document.getElementById('regression-count').textContent = 'Calculating...';
-}
 
 function renderLayeredLandscape(results) {
     L_BINS.forEach(bin => {
@@ -75,7 +45,6 @@ function renderLandscapeBin(results, bin) {
     const bValues = [...new Set(results.map(r => r.b))].sort((a, b) => a - b);
     
     const zData = bValues.map(b => sValues.map(s => {
-        // Aggregate all points within this S,B in the current bin (Mean)
         const reMatches = ourResults.filter(r => Math.abs(r.s - s) < 0.01 && Math.abs(r.b - b) < 0.01);
         const stdMatches = stdResults.filter(r => Math.abs(r.s - s) < 0.01 && Math.abs(r.b - b) < 0.01);
         
@@ -120,13 +89,13 @@ function renderLandscapeBin(results, bin) {
         margin: { t: 10, b: 25, l: 30, r: bin.id === 'literal' ? 50 : 5 },
         xaxis: { 
             title: 'S', 
-            range: [1, 0], // Normalized domain, reversed
+            range: [1, 0], 
             tickvals: [0, 0.5, 1],
             fixedrange: true 
         },
         yaxis: { 
             title: bin.id === 'random' ? 'B' : '', 
-            range: [0, 1], // Normalized domain
+            range: [0, 1], 
             tickvals: [0, 0.5, 1],
             fixedrange: true 
         },
@@ -143,38 +112,35 @@ async function renderTrends() {
         if (!response.ok) throw new Error('data/history.json not found');
         const history = await response.json();
 
+        // Update summary from the LATEST history entry (ground truth)
+        if (history.length > 0) {
+            const latest = history[history.length - 1];
+            document.getElementById('min-speedup').textContent = latest.min_speedup.toFixed(1) + 'x';
+            document.getElementById('avg-speedup').textContent = latest.avg_speedup.toFixed(1) + 'x';
+            document.getElementById('max-speedup').textContent = latest.max_speedup.toFixed(1) + 'x';
+        }
+
         const dates = history.map(h => h.date);
         const avgs = history.map(h => h.avg_speedup);
-        const mins = history.map(h => h.min_speedup || h.avg_speedup * 0.5);
-        const maxs = history.map(h => h.max_speedup || h.avg_speedup * 2.0);
+        const mins = history.map(h => h.min_speedup);
+        const maxs = history.map(h => h.max_speedup);
 
         const data = [
             {
-                x: dates,
-                y: maxs,
-                type: 'scatter',
-                mode: 'lines',
-                line: { width: 0 },
-                showlegend: false,
-                hoverinfo: 'skip'
+                x: dates, y: maxs,
+                type: 'scatter', mode: 'lines', line: { width: 0 },
+                showlegend: false, hoverinfo: 'skip'
             },
             {
-                x: dates,
-                y: mins,
-                type: 'scatter',
-                mode: 'lines',
-                line: { width: 0 },
-                fill: 'tonexty',
-                fillcolor: 'rgba(0, 123, 255, 0.1)',
-                name: 'Min-Max Range',
-                hoverinfo: 'skip'
+                x: dates, y: mins,
+                type: 'scatter', mode: 'lines', line: { width: 0 },
+                fill: 'tonexty', fillcolor: 'rgba(0, 123, 255, 0.1)',
+                name: 'Min-Max Range', hoverinfo: 'skip'
             },
             { 
-                x: dates, 
-                y: avgs, 
+                x: dates, y: avgs, 
                 name: 'Geo Mean Speedup', 
-                type: 'scatter', 
-                mode: 'lines+markers',
+                type: 'scatter', mode: 'lines+markers',
                 line: { shape: 'spline', color: '#007bff', width: 3 },
                 marker: { size: 8 }
             }
@@ -226,7 +192,6 @@ async function renderRegression(currentResults) {
             if (curMatches.length > 0 && prevMatches.length > 0) {
                 const avgCur = curMatches.reduce((acc, r) => acc + r.throughput, 0) / curMatches.length;
                 const avgPrev = prevMatches.reduce((acc, r) => acc + r.throughput, 0) / prevMatches.length;
-                
                 const diff = (avgCur - avgPrev) / avgPrev * 100;
                 if (diff < -10.0) regressionCount++; 
                 return diff;
