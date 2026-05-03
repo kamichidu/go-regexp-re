@@ -267,5 +267,8 @@ To maintain a high-signal testing environment, tests MUST be categorized by the 
 - **`compat_test.go`**: Systematic parity verification against Go's standard `regexp` package.
 - **`internal/ir/dfa_builder_test.go`**: Validation of subset construction, epsilon closure logic, and memory-limit protection.
 
+## 8. Safety & Workflow Mandates
+- **STRICT PROHIBITION: NO UNAUTHORIZED PUSH**: You MUST NOT perform a `git push` operation under any circumstances without explicit, turn-by-turn confirmation from the user. Even during CI/CD setup or deployment tasks, you must stop at the commit stage and ask for permission before pushing to remote.
+
 ---
 **Note**: Any modification to the compilation shortcut or rescan dispatch must be validated against the **"Efficiency First, Precision Mandatory"** principle.
