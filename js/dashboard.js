@@ -81,10 +81,39 @@ function renderLandscape(results) {
     document.getElementById('l-slice').onchange = () => renderLandscape(results);
 }
 
-function renderTrends(results) {
-    // Note: Trends will eventually need a separate history.json
-    // For now, we just show a "Single Snapshot" message or clear the div
-    document.getElementById('trends-chart').innerHTML = '<p style="padding: 100px; text-align: center; color: #999;">Historical tracking requires multiple data snapshots. Current view: Single Snapshot.</p>';
+async function renderTrends() {
+    try {
+        const response = await fetch('data/history.json');
+        if (!response.ok) throw new Error('data/history.json not found');
+        const history = await response.json();
+
+        const dates = history.map(h => h.date);
+        const speedups = history.map(h => h.avg_speedup);
+
+        const data = [
+            { 
+                x: dates, 
+                y: speedups, 
+                name: 'Avg Speedup', 
+                type: 'scatter', 
+                mode: 'lines+markers',
+                line: { shape: 'spline', color: '#007bff' },
+                marker: { size: 8 }
+            }
+        ];
+
+        const layout = {
+            title: 'Historical Performance Tracking (Re / Go)',
+            xaxis: { title: 'Commit Date', tickangle: -45 },
+            yaxis: { title: 'Avg Speedup (x)', rangemode: 'tozero' },
+            margin: { b: 100 }
+        };
+
+        Plotly.newPlot('trends-chart', data, layout);
+    } catch (err) {
+        console.warn('Trends Chart Error:', err);
+        document.getElementById('trends-chart').innerHTML = `<p style="padding: 100px; text-align: center; color: #999;">Error loading trends: ${err.message}</p>`;
+    }
 }
 
 function renderRegression(results) {
