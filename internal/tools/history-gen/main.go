@@ -82,15 +82,22 @@ func main() {
 		// Extract date and SHA from filename: benchmark-20260424-000000-7ea0637.json
 		base := filepath.Base(file)
 		parts := strings.Split(strings.TrimSuffix(base, ".json"), "-")
-		date := ""
+		dateStr := ""
 		sha := ""
 		if len(parts) >= 4 {
-			date = parts[1] + "-" + parts[2]
+			// parts[1] is 20260424, parts[2] is 170513
+			d := parts[1]
+			t := parts[2]
+			if len(d) == 8 && len(t) == 6 {
+				dateStr = fmt.Sprintf("%s-%s-%s %s:%s:%s", d[:4], d[4:6], d[6:8], t[:2], t[2:4], t[4:6])
+			} else {
+				dateStr = parts[1] + " " + parts[2]
+			}
 			sha = parts[3]
 		}
 
 		history = append(history, HistoryEntry{
-			Date:       date,
+			Date:       dateStr,
 			SHA:        sha,
 			AvgSpeedup: avg,
 			File:       base,
