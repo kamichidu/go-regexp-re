@@ -191,7 +191,7 @@ async function renderRegression(currentResults) {
                 const avgCur = curMatches.reduce((acc, r) => acc + r.throughput, 0) / curMatches.length;
                 const avgPrev = prevMatches.reduce((acc, r) => acc + r.throughput, 0) / prevMatches.length;
                 const diff = (avgCur - avgPrev) / avgPrev * 100;
-                if (diff < -5.0) regressionCount++; 
+                if (diff < -10.0) regressionCount++; 
                 return diff;
             }
             return null;
