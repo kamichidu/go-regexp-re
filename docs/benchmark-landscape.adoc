@@ -36,39 +36,28 @@ Locality measures how well the workload fits modern CPU execution models (SIMD, 
 
 == Implementation Details
 
-The implementation is located in `internal/benchmark/landscape`.
+The core metrics and benchmarking logic are implemented in `internal/testsuite`.
 
 === Metric Calculation
-- **B Calculation**: Extracted from the AST via `landscape.ComputeB`. It uses a weighted sum of alternations, quantifiers, and nesting depth, normalized via a sigmoid function.
+- **B Calculation**: Extracted from the AST via `testsuite.ComputeB`. It uses a weighted sum of alternations, quantifiers, and nesting depth, normalized via a sigmoid function to a 0.0-1.0 range.
 - **L Calculation**: A hybrid of **Pattern Locality** (contiguity ratio) and **Input Locality** (byte-level entropy).
-- **S Calculation**: Measured at runtime as `1.0 - (matchCount / totalBytes)`.
+- **S Calculation**: Measured at runtime based on the match count relative to total input size.
 
-=== Data Export Format
-Results are exported as a JSON array of `Result` objects, which can be aggregated into a 3D grid for visualization.
+=== Data Persistence
+- **Metadata Registry**: During benchmark execution, SBL metrics are recorded in a centralized registry and exported to `internal/benchmark/sbl_registry.json`.
+- **Data Processor**: The `_scripts/generate-landscape.sh` wrapper uses `internal/tools/landscape-gen` to join raw benchmark text results with the SBL metadata, producing the final JSON for visualization.
 
-[source,json]
-----
-{
-  "engine_id": "regexp-re",
-  "pattern_id": "([a-z]+)@([a-z]+).com",
-  "sbl": { "s": 0.99, "b": 0.45, "l": 0.85 },
-  "speedup": 12.5,
-  "throughput_mb_s": 4500.2
-}
-----
+== Usage: Standard Benchmarks
 
-== Usage: `bench-landscape`
-
-The `bench-landscape` tool is used to generate landscape data.
+Landscape data is generated as a byproduct of standard Go benchmarks.
 
 [source,bash]
 ----
-# Build the tool with all available engines
-cd internal/benchmark
-go build -tags coregex,goregexp,goregexpre ./tools/bench-landscape/main.go
+# Run benchmarks and generate results
+go test -bench . -tags goregexp,goregexpre > results.txt
 
-# Run the benchmark
-./main -o results.json
+# Process results into visualization JSON
+_scripts/generate-landscape.sh results.txt landscape.json
 ----
 
 == Visualization Models
