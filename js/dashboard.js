@@ -129,6 +129,7 @@ function renderLandscapeBin(results, bin) {
             tickvals: [0, 0.5, 1],
             fixedrange: true 
         },
+        hovermode: 'closest',
         font: { size: 9 }
     };
 
@@ -215,13 +216,25 @@ async function renderRegression(currentResults) {
             reversescale: true,
             zmid: 0,
             colorbar: { title: 'Diff (%)' },
-            hoverongaps: false
+            hoverongaps: false,
+            hovertemplate: 'S: %{x}<br>B: %{y}<br>Diff: %{customdata}%<extra></extra>',
+            customdata: bValues.map(b => sValues.map(s => {
+                const curMatches = curOur.filter(r => Math.abs(r.s - s) < 0.01 && Math.abs(r.b - b) < 0.01);
+                const prevMatches = prevOur.filter(r => Math.abs(r.s - s) < 0.01 && Math.abs(r.b - b) < 0.01);
+                if (curMatches.length > 0 && prevMatches.length > 0) {
+                    const avgCur = curMatches.reduce((acc, r) => acc + r.throughput, 0) / curMatches.length;
+                    const avgPrev = prevMatches.reduce((acc, r) => acc + r.throughput, 0) / prevMatches.length;
+                    return ((avgCur - avgPrev) / avgPrev * 100).toFixed(2);
+                }
+                return 'N/A';
+            }))
         }];
 
         const layout = {
             title: `Regression Heatmap (All L Averaged, Current vs ${prevEntry.sha})`,
             xaxis: { title: 'Selectivity (S)', autorange: 'reversed' },
-            yaxis: { title: 'Complexity (B)' }
+            yaxis: { title: 'Complexity (B)' },
+            hovermode: 'closest'
         };
 
         Plotly.newPlot('regression-chart', data, layout);
