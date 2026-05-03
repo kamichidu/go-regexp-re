@@ -26,16 +26,34 @@ jobs:
           # Run both engines in one go for precise comparison
           go test -bench . -benchmem -tags goregexp,goregexpre -count 5 | tee ../../benchmark-main.txt
 
-      - name: Compare results
+      - name: Compare and Detect Regressions
         run: |
-          # Use -col to show Standard vs Ours in the summary
+          # 1. Download Latest Main Baseline from gh-pages
+          curl --fail -sL https://raw.githubusercontent.com/${{ github.repository }}/gh-pages/benchmarks/baseline/benchmark-main.txt -o benchmark-baseline.txt || touch benchmark-baseline.txt
+          
+          # 2. Convert raw benchmarks to relative ratios (Noise-resistant)
+          ./_scripts/bench-ratio.sh < benchmark-baseline.txt > baseline-ratio.txt
+          ./_scripts/bench-ratio.sh < benchmark-main.txt > current-ratio.txt
+          
+          # 3. Use -col to show Standard vs Ours in the summary
           go tool benchstat -col /GoRegexp/GoRegexpRe benchmark-main.txt | tee comparison.txt
 
-          echo "### 📊 Official Benchmark Audit: Go Standard vs go-regexp-re" >> $GITHUB_STEP_SUMMARY
-          echo "This report shows the official performance metrics of the \`main\` branch." >> $GITHUB_STEP_SUMMARY
+          echo "### 📊 Benchmark Analysis" >> $GITHUB_STEP_SUMMARY
+          echo "#### Current Speedup (Ours vs Standard)" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
           cat comparison.txt >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
+          
+          if [ -s baseline-ratio.txt ]; then
+            echo "#### Speedup Factor Delta (Previous Main vs Current)" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            go tool benchstat baseline-ratio.txt current-ratio.txt | tee delta.txt >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+
+          # 4. Run strict regression check
+          chmod +x _scripts/check-regression.sh
+          ./_scripts/check-regression.sh current-ratio.txt baseline-ratio.txt
 
       - name: Deploy Baseline, History and Visualization to gh-pages
         run: |

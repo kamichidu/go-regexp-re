@@ -36,43 +36,43 @@ jobs:
       - name: Run Candidate Benchmarks (PR)
         run: |
           cd internal/benchmark
-          go test -bench BenchmarkSynthetic -benchmem -tags goregexp,goregexpre -count 5 | tee ../../benchmark-pr.txt
+          # Run all benchmarks to ensure broad coverage of regex features
+          go test -bench . -benchmem -tags goregexp,goregexpre -count 5 | tee ../../benchmark-pr.txt
 
       - name: Relative Performance Analysis
         run: |
-          echo "### 📊 Relative Speedup Analysis" > pr_comment.md
-          echo "This report compares the **Speedup Factor** (Re vs Std) between \`main\` and this \`PR\`. By normalizing against the standard library in each run, we eliminate VM noise." >> pr_comment.md
+          echo "### 📊 Performance Regression Analysis" > pr_comment.md
+          echo "This report evaluates performance changes relative to the standard library and the current \`main\` branch baseline." >> pr_comment.md
 
           # Convert raw benchmarks to relative ratios (Re/Std)
-          if [ -s benchmark-main.txt ]; then
-            ./_scripts/bench-ratio.sh < benchmark-main.txt > main-ratio.txt
-          fi
+          ./_scripts/bench-ratio.sh < benchmark-main.txt > main-ratio.txt
           ./_scripts/bench-ratio.sh < benchmark-pr.txt > pr-ratio.txt
 
+          # 1. Delta Analysis (Previous vs Current)
           if [ -s main-ratio.txt ]; then
-            echo "#### 1. Speedup Factor Delta (Main vs PR)" >> pr_comment.md
+            echo "#### Speedup Factor Delta (Main vs PR)" >> pr_comment.md
             echo "Lower percentage means the PR is **faster relative to standard library** than main was." >> pr_comment.md
             echo '```' >> pr_comment.md
-            # Comparison of ratios. benchstat will show the % change in the ratio.
             go tool benchstat main-ratio.txt pr-ratio.txt | tee delta.txt >> pr_comment.md
             echo '```' >> pr_comment.md
-
-            # Regression Detection
-            # In ratio-mode, a positive delta (e.g. +10%) means the RelativeTime increased, which is a regression.
-            if grep "BenchmarkSynthetic" delta.txt | grep -E "\+([1-9][0-9]|[1-9][0-9][0-9]+)\.[0-9]+%" | grep -v "~" | grep -q "p="; then
-              echo "REGRESSION_DETECTED=true" >> $GITHUB_ENV
-            fi
           fi
 
-          echo "#### 2. PR Current Ratios (Standard vs Re)" >> pr_comment.md
+          # 2. Absolute Analysis (Standard vs Re)
+          echo "#### Current Speedup (Standard vs Ours)" >> pr_comment.md
           echo '<details><summary>Click to view current speedup details</summary>' >> pr_comment.md
           echo '' >> pr_comment.md
           echo '```' >> pr_comment.md
-          # Show the actual X-times faster table for the current PR
-          # We use the original names here for the column view
           go tool benchstat -col /GoRegexp/GoRegexpRe benchmark-pr.txt >> pr_comment.md
           echo '```' >> pr_comment.md
           echo '</details>' >> pr_comment.md
+
+          # 3. Regression Detection
+          chmod +x _scripts/check-regression.sh
+          if ./_scripts/check-regression.sh pr-ratio.txt main-ratio.txt; then
+            echo "REGRESSION_DETECTED=false" >> $GITHUB_ENV
+          else
+            echo "REGRESSION_DETECTED=true" >> $GITHUB_ENV
+          fi
 
       - name: Add Warning to Comment
         if: env.REGRESSION_DETECTED == 'true'
