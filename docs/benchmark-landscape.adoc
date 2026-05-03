@@ -43,33 +43,26 @@ The core metrics and benchmarking logic are implemented in `internal/testsuite`.
 - **L Calculation**: A hybrid of **Pattern Locality** (contiguity ratio) and **Input Locality** (byte-level entropy).
 - **S Calculation**: Measured at runtime based on the match count relative to total input size.
 
-=== Data Persistence
-- **Metadata Registry**: During benchmark execution, SBL metrics are recorded in a centralized registry and exported to `sbl_definitions.json`.
-- **Data Processor**: The `_scripts/generate-landscape.sh` wrapper uses `internal/tools/landscape-gen` to join raw benchmark text results with the stable metadata in `internal/testsuite/sbl_definitions.json`, producing the final JSON for visualization.
+=== SBL Metadata Registry
+To decouple benchmark names from multi-dimensional metrics, the engine employs an **SBL Metadata Registry**:
+1.  **Recording**: During benchmark execution, `testsuite.RecordSBL` captures the S, B, and L traits of each pattern/input pair.
+2.  **Exporting**: At the end of a test run, the registry is serialized to `sbl_definitions.json`.
+3.  **Stability**: This file is tracked in the repository to ensure consistent coordinate mapping across historical audits.
 
-== Usage: Standard Benchmarks
+== Visualization Architecture: The Layered Dashboard
 
-Landscape data is generated as a byproduct of standard Go benchmarks.
+The performance data is visualized on GitHub Pages using a **Layered Landscape** approach.
 
-[source,bash]
-----
-# Run benchmarks and generate results
-go test -bench . -tags goregexp,goregexpre > results.txt
+=== 1. Semantic Locality Binning
+Locality (L) is categorized into four semantic layers to visualize the "Acceleration Gradient":
+- **Random (L < 0.2)**: High-entropy data where DFA performance dominates.
+- **Natural (0.2 - 0.6)**: Standard text processing scenarios.
+- **Structured (0.6 - 0.8)**: Log files and structured data (JSON/CSV) where CCWarp excels.
+- **Literal (L > 0.8)**: Literal-heavy data where SIMD/MAP "explosions" occur.
 
-# Process results into visualization JSON
-_scripts/generate-landscape.sh results.txt landscape.json
-----
+=== 2. Logarithmic Performance Peaks
+To accurately represent the "explosion" of MAP + SIMD optimizations (which can reach 1,000,000x speedup), all speedup heatmaps use a **Logarithmic Scale**. This prevents measurement noise from flattening the engine's true peaks into plateaus.
 
-== Visualization Models
-
-=== 1. Performance Surface (3D)
-Plots `Speedup` as a Z-axis over `S` and `B` axes. This reveals the "Shape" of the engine.
-- **Plateau**: Stable performance across all complexities (e.g., RE2).
-- **Peak**: Massive speedups in specific SIMD-friendly zones (e.g., Hyperscan).
-- **Valley**: Performance collapses in complex branching scenarios.
-
-=== 2. Gradient Maps
-Reveals sensitivity to specific axes. A high gradient along the `B` axis indicates that the engine's performance is bottlenecked by DFA state management.
-
-=== 3. Ridge Profiles
-Cross-sections of the landscape used for direct engine-to-engine comparison at specific structural points.
+=== 3. Statistical Ground Truth
+- **Geometric Mean**: The `Avg Speedup` reported in the dashboard is calculated as a **Geometric Mean**. This is the standard for averaging ratios, ensuring that astronomical outliers do not disproportionately bias the overall evaluation.
+- **Performance Bands**: Historical trends are visualized as a band (Min-Avg-Max) to illustrate the engine's stability and consistent growth across all terrains.
