@@ -39,27 +39,25 @@ function updateSummary(results) {
     const ourResults = results.filter(r => r.engine === 'GoRegexpRe');
     const stdResults = results.filter(r => r.engine === 'GoRegexp');
     
-    let totalSpeedup = 0;
+    let logSum = 0;
     let maxSpeedup = 0;
     let count = 0;
 
     ourResults.forEach(re => {
         const std = stdResults.find(s => Math.abs(s.s - re.s) < 0.01 && Math.abs(s.b - re.b) < 0.01 && Math.abs(s.l - re.l) < 0.01);
         if (std && std.throughput > 0) {
-            let speedup = re.throughput / std.throughput;
+            const speedup = re.throughput / std.throughput;
             
-            // Normalize: cap at 100x and ignore values that seem like measurement noise
-            // (e.g. if one engine is millions of MB/s and the other is slightly more millions)
-            if (speedup > 100.0) speedup = 100.0;
-            
-            totalSpeedup += speedup;
+            logSum += Math.log(speedup);
             if (speedup > maxSpeedup) maxSpeedup = speedup;
             count++;
         }
     });
 
     if (count > 0) {
-        document.getElementById('avg-speedup').textContent = (totalSpeedup / count).toFixed(1) + 'x';
+        // Geometric Mean is more appropriate for ratios
+        const geoMean = Math.exp(logSum / count);
+        document.getElementById('avg-speedup').textContent = geoMean.toFixed(1) + 'x';
         document.getElementById('max-speedup').textContent = maxSpeedup.toFixed(1) + 'x';
     }
     document.getElementById('regression-count').textContent = 'Calculating...';
@@ -79,8 +77,9 @@ function renderLandscape(results) {
         const re = ourResults.find(r => Math.abs(r.s - s) < 0.01 && Math.abs(r.b - b) < 0.01);
         const std = stdResults.find(r => Math.abs(r.s - s) < 0.01 && Math.abs(r.b - b) < 0.01);
         if (re && std && std.throughput > 0) {
-            let speedup = re.throughput / std.throughput;
-            return speedup > 100.0 ? 100.0 : speedup;
+            const speedup = re.throughput / std.throughput;
+            // Return log10 for logarithmic color mapping
+            return Math.log10(Math.max(speedup, 0.1));
         }
         return null;
     }));
@@ -91,11 +90,30 @@ function renderLandscape(results) {
         y: bValues,
         type: 'heatmap',
         colorscale: 'Portland',
-        zmin: 0,
-        zmax: 100,
-        colorbar: { title: 'Speedup (x)' },
-        hoverongaps: false
+        colorbar: { 
+            title: 'Speedup',
+            tickmode: 'array',
+            tickvals: [0, 1, 2, 3, 4, 5],
+            ticktext: ['1x', '10x', '100x', '1kx', '10kx', '100kx']
+        },
+        hoverongaps: false,
+        hovertemplate: 'S: %{x}<br>B: %{y}<br>Speedup: %{customdata}x<extra></customdata></extra>',
+        customdata: bValues.map(b => sValues.map(s => {
+            const re = ourResults.find(r => Math.abs(r.s - s) < 0.01 && Math.abs(r.b - b) < 0.01);
+            const std = stdResults.find(r => Math.abs(r.s - s) < 0.01 && Math.abs(r.b - b) < 0.01);
+            return (re && std && std.throughput > 0) ? (re.throughput / std.throughput).toFixed(1) : 'N/A';
+        }))
     }];
+
+    const layout = {
+        title: `S x B Performance Landscape (Log Scale, L=${lSlice})`,
+        xaxis: { title: 'Selectivity (S)', autorange: 'reversed' },
+        yaxis: { title: 'Complexity (B)' }
+    };
+
+    Plotly.newPlot('landscape-chart', data, layout);
+    selector.onchange = () => renderLandscape(results);
+}
 
     const layout = {
         title: `S x B Performance Landscape (L=${lSlice})`,
