@@ -37,7 +37,7 @@ jobs:
           cat comparison.txt >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
 
-      - name: Deploy Baseline and History to gh-pages
+      - name: Deploy Baseline, History and Visualization to gh-pages
         run: |
           # Checkout gh-pages in a separate directory
           git clone --depth 1 --branch gh-pages https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git gh-pages
@@ -53,15 +53,21 @@ jobs:
           HISTORY_FILE="benchmark-${TIMESTAMP}-${SHORT_SHA}.txt"
           cp benchmark-main.txt gh-pages/benchmarks/history/${HISTORY_FILE}
 
+          # 3. Process Visualizations (Backfill + Indexing)
+          mkdir -p gh-pages/data
+          _scripts/update-visualization.sh "gh-pages/benchmarks/history" "gh-pages/data"
+
           cd gh-pages
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add benchmarks/baseline/benchmark-main.txt
-          git add benchmarks/history/${HISTORY_FILE}
+          git add benchmarks/history/*.txt
+          git add benchmarks/history/*.json
+          git add data/*.json
 
           # Only commit and push if there are changes
           if ! git diff --cached --quiet; then
-            git commit -m "Update benchmark baseline and history: ${SHORT_SHA}"
+            git commit -m "Update benchmark results and visualization: ${SHORT_SHA}"
             git push origin gh-pages
           else
             echo "No changes in benchmark results."
