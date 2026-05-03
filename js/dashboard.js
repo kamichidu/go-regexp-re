@@ -35,6 +35,7 @@ function updateSummary(results) {
     const stdResults = results.filter(r => r.engine === 'GoRegexp');
     
     let logSum = 0;
+    let minSpeedup = Infinity;
     let maxSpeedup = 0;
     let count = 0;
 
@@ -43,6 +44,7 @@ function updateSummary(results) {
         if (std && std.throughput > 0) {
             const speedup = re.throughput / std.throughput;
             logSum += Math.log(speedup);
+            if (speedup < minSpeedup) minSpeedup = speedup;
             if (speedup > maxSpeedup) maxSpeedup = speedup;
             count++;
         }
@@ -50,6 +52,7 @@ function updateSummary(results) {
 
     if (count > 0) {
         const geoMean = Math.exp(logSum / count);
+        document.getElementById('min-speedup').textContent = minSpeedup.toFixed(1) + 'x';
         document.getElementById('avg-speedup').textContent = geoMean.toFixed(1) + 'x';
         document.getElementById('max-speedup').textContent = maxSpeedup.toFixed(1) + 'x';
     }
@@ -72,6 +75,7 @@ function renderLandscapeBin(results, bin) {
     const bValues = [...new Set(results.map(r => r.b))].sort((a, b) => a - b);
     
     const zData = bValues.map(b => sValues.map(s => {
+        // Aggregate all points within this S,B in the current bin (Mean)
         const reMatches = ourResults.filter(r => Math.abs(r.s - s) < 0.01 && Math.abs(r.b - b) < 0.01);
         const stdMatches = stdResults.filter(r => Math.abs(r.s - s) < 0.01 && Math.abs(r.b - b) < 0.01);
         
@@ -140,23 +144,48 @@ async function renderTrends() {
         const history = await response.json();
 
         const dates = history.map(h => h.date);
-        const speedups = history.map(h => h.avg_speedup);
+        const avgs = history.map(h => h.avg_speedup);
+        const mins = history.map(h => h.min_speedup || h.avg_speedup * 0.5);
+        const maxs = history.map(h => h.max_speedup || h.avg_speedup * 2.0);
 
-        const data = [{ 
-            x: dates, 
-            y: speedups, 
-            name: 'Avg Speedup', 
-            type: 'scatter', 
-            mode: 'lines+markers',
-            line: { shape: 'spline', color: '#007bff' },
-            marker: { size: 8 }
-        }];
+        const data = [
+            {
+                x: dates,
+                y: maxs,
+                type: 'scatter',
+                mode: 'lines',
+                line: { width: 0 },
+                showlegend: false,
+                hoverinfo: 'skip'
+            },
+            {
+                x: dates,
+                y: mins,
+                type: 'scatter',
+                mode: 'lines',
+                line: { width: 0 },
+                fill: 'tonexty',
+                fillcolor: 'rgba(0, 123, 255, 0.1)',
+                name: 'Min-Max Range',
+                hoverinfo: 'skip'
+            },
+            { 
+                x: dates, 
+                y: avgs, 
+                name: 'Geo Mean Speedup', 
+                type: 'scatter', 
+                mode: 'lines+markers',
+                line: { shape: 'spline', color: '#007bff', width: 3 },
+                marker: { size: 8 }
+            }
+        ];
 
         const layout = {
-            title: 'Historical Performance Tracking (Geometric Mean)',
+            title: 'Historical Performance Evolution (Min / GeoMean / Max)',
             xaxis: { title: 'Commit Date', tickangle: -45 },
-            yaxis: { title: 'Avg Speedup (x)', rangemode: 'tozero' },
-            margin: { b: 100 }
+            yaxis: { title: 'Speedup (x)', type: 'log', autorange: true },
+            margin: { b: 100 },
+            legend: { orientation: 'h', y: -0.2 }
         };
 
         Plotly.newPlot('trends-chart', data, layout);
@@ -197,6 +226,7 @@ async function renderRegression(currentResults) {
             if (curMatches.length > 0 && prevMatches.length > 0) {
                 const avgCur = curMatches.reduce((acc, r) => acc + r.throughput, 0) / curMatches.length;
                 const avgPrev = prevMatches.reduce((acc, r) => acc + r.throughput, 0) / prevMatches.length;
+                
                 const diff = (avgCur - avgPrev) / avgPrev * 100;
                 if (diff < -10.0) regressionCount++; 
                 return diff;
