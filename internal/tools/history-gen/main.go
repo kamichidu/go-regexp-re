@@ -61,23 +61,38 @@ func main() {
 		var minSpeedup float64 = 1e18
 		var maxSpeedup float64 = 0
 		var count int
-		
-		reResults := make(map[string]float64)
-		goResults := make(map[string]float64)
 
+		// Group results by engine to facilitate pairing
+		engineMap := make(map[string][]struct {
+			Engine     string  `json:"engine"`
+			Throughput float64 `json:"throughput"`
+			S          float64 `json:"s"`
+			B          float64 `json:"b"`
+			L          float64 `json:"l"`
+		})
 		for _, r := range results {
-			key := fmt.Sprintf("%.2f/%.2f/%.2f", r.S, r.B, r.L)
-			if r.Engine == "GoRegexpRe" {
-				reResults[key] = r.Throughput
-			} else if r.Engine == "GoRegexp" {
-				goResults[key] = r.Throughput
-			}
+			engineMap[r.Engine] = append(engineMap[r.Engine], r)
 		}
 
-		for k, reTp := range reResults {
-			if goTp, ok := goResults[k]; ok && goTp > 0 {
-				speedup := reTp / goTp
-				
+		ourResults := engineMap["GoRegexpRe"]
+		stdResults := engineMap["GoRegexp"]
+
+		for _, re := range ourResults {
+			// Find matching standard result by closest SBL
+			var stdTp float64 = -1
+			for _, std := range stdResults {
+				if math.Abs(std.S-re.S) < 0.01 && math.Abs(std.B-re.B) < 0.01 && math.Abs(std.L-re.L) < 0.01 {
+					stdTp = std.Throughput
+					break
+				}
+			}
+
+			if stdTp > 0 {
+				speedup := re.Throughput / stdTp
+
+				// Cap individual outliers to suppress measurement noise
+				if speedup > 100000.0 { speedup = 100000.0 }
+
 				logSum += math.Log(speedup)
 				if speedup < minSpeedup {
 					minSpeedup = speedup
@@ -95,10 +110,6 @@ func main() {
 		} else {
 			minSpeedup = 0
 		}
-
-		// Cap extreme outliers for history index stability
-		if maxSpeedup > 100000.0 { maxSpeedup = 100000.0 }
-
 		// Extract date and SHA from filename
 		base := filepath.Base(file)
 		parts := strings.Split(strings.TrimSuffix(base, ".json"), "-")
