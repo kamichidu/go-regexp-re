@@ -91,13 +91,10 @@ function renderLandscapeBin(results, bin) {
         colorscale: 'Portland',
         zmin: 0,
         zmax: 5,
-        showscale: true,
+        showscale: bin.id === 'literal',
         colorbar: { 
             title: 'Speedup',
-            orientation: 'h',
             thickness: 15,
-            len: 0.8,
-            y: -0.3,
             tickvals: [0, 1, 2, 3, 4, 5],
             ticktext: ['1x', '10x', '100x', '1kx', '10kx', '100kx']
         },
@@ -116,7 +113,7 @@ function renderLandscapeBin(results, bin) {
     }];
 
     const layout = {
-        margin: { t: 10, b: 60, l: 30, r: 10 },
+        margin: { t: 10, b: 25, l: 30, r: bin.id === 'literal' ? 50 : 5 },
         xaxis: { 
             title: 'S', 
             range: [1, 0], // Normalized domain, reversed
