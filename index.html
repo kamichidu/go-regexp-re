@@ -42,15 +42,26 @@
         </section>
 
         <section id="landscape">
-            <h2>🌍 Landscape (S x B Heatmap)</h2>
-            <div class="controls">
-                <label for="l-slice">L (Locality):</label>
-                <select id="l-slice">
-                    <option value="0.2">L = 0.2 (Random)</option>
-                    <option value="0.8">L = 0.8 (Continuous)</option>
-                </select>
+            <h2>🌍 Performance Landscape</h2>
+            <p>Visualizing engine dominance across four "Locality Layers".</p>
+            <div class="landscape-grid">
+                <div class="landscape-container">
+                    <h3>🎲 Random</h3>
+                    <div id="landscape-random"></div>
+                </div>
+                <div class="landscape-container">
+                    <h3>📄 Natural</h3>
+                    <div id="landscape-natural"></div>
+                </div>
+                <div class="landscape-container">
+                    <h3>📊 Structured</h3>
+                    <div id="landscape-structured"></div>
+                </div>
+                <div class="landscape-container">
+                    <h3>🚀 Literal</h3>
+                    <div id="landscape-literal"></div>
+                </div>
             </div>
-            <div id="landscape-chart"></div>
         </section>
 
         <section id="trends">
