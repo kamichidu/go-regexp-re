@@ -97,17 +97,21 @@ h2 {
 }
 
 .landscape-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-    gap: 15px;
+    display: flex;
+    flex-wrap: nowrap;
+    gap: 10px;
     margin-top: 20px;
+    overflow-x: auto;
+    padding-bottom: 10px;
 }
 
 .landscape-container {
+    flex: 1;
+    min-width: 240px;
     background: #fff;
     border: 1px solid #eee;
     border-radius: 8px;
-    padding: 10px;
+    padding: 5px;
 }
 
 .landscape-container h3 {

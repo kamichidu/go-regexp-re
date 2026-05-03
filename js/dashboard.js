@@ -107,10 +107,20 @@ function renderLandscapeBin(results, bin) {
     }];
 
     const layout = {
-        margin: { t: 30, b: 40, l: 40, r: 10 },
-        xaxis: { title: 'S', autorange: 'reversed' },
-        yaxis: { title: 'B' },
-        font: { size: 10 }
+        margin: { t: 10, b: 25, l: 30, r: 5 },
+        xaxis: { 
+            title: 'S', 
+            range: [1, 0], // Normalized domain, reversed
+            tickvals: [0, 0.5, 1],
+            fixedrange: true 
+        },
+        yaxis: { 
+            title: bin.id === 'random' ? 'B' : '', 
+            range: [0, 1], // Normalized domain
+            tickvals: [0, 0.5, 1],
+            fixedrange: true 
+        },
+        font: { size: 9 }
     };
 
     Plotly.newPlot(`landscape-${bin.id}`, data, layout, {displayModeBar: false});
