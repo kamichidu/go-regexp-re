@@ -46,7 +46,12 @@ function updateSummary(results) {
     ourResults.forEach(re => {
         const std = stdResults.find(s => Math.abs(s.s - re.s) < 0.01 && Math.abs(s.b - re.b) < 0.01 && Math.abs(s.l - re.l) < 0.01);
         if (std && std.throughput > 0) {
-            const speedup = re.throughput / std.throughput;
+            let speedup = re.throughput / std.throughput;
+            
+            // Normalize: cap at 100x and ignore values that seem like measurement noise
+            // (e.g. if one engine is millions of MB/s and the other is slightly more millions)
+            if (speedup > 100.0) speedup = 100.0;
+            
             totalSpeedup += speedup;
             if (speedup > maxSpeedup) maxSpeedup = speedup;
             count++;
@@ -73,7 +78,11 @@ function renderLandscape(results) {
     const zData = bValues.map(b => sValues.map(s => {
         const re = ourResults.find(r => Math.abs(r.s - s) < 0.01 && Math.abs(r.b - b) < 0.01);
         const std = stdResults.find(r => Math.abs(r.s - s) < 0.01 && Math.abs(r.b - b) < 0.01);
-        return (re && std && std.throughput > 0) ? re.throughput / std.throughput : null;
+        if (re && std && std.throughput > 0) {
+            let speedup = re.throughput / std.throughput;
+            return speedup > 100.0 ? 100.0 : speedup;
+        }
+        return null;
     }));
 
     const data = [{
@@ -82,6 +91,8 @@ function renderLandscape(results) {
         y: bValues,
         type: 'heatmap',
         colorscale: 'Portland',
+        zmin: 0,
+        zmax: 100,
         colorbar: { title: 'Speedup (x)' },
         hoverongaps: false
     }];
