@@ -32,3 +32,7 @@ func BenchmarkSynthetic(b *testing.B) {
 func BenchmarkNFAWorstCase(b *testing.B) {
 	testsuite.BenchmarkNFAWorstCase(b)
 }
+
+func BenchmarkLandscape(b *testing.B) {
+	testsuite.BenchmarkLandscape(b)
+}

@@ -6,6 +6,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"github.com/kamichidu/go-regexp-re/syntax"
 	"log"
 	"os"
 	"os/exec"
@@ -259,6 +260,11 @@ func Register(engine Engine) {
 	engines = append(engines, engine)
 }
 
+// GetEngines returns all registered engines.
+func GetEngines() []Engine {
+	return engines
+}
+
 func loadCorpus(name, url string, targetInZip ...string) string {
 	cacheDir := filepath.Join(os.TempDir(), "go-regexp-re", "testdata")
 	path := filepath.Join(cacheDir, name)
@@ -332,6 +338,14 @@ func Main(m *testing.M) {
 	if EnableCompatibilityReport {
 		registry.Report()
 	}
+
+	// Export SBL registry if any benchmarks were recorded
+	if len(sblRegistry) > 0 {
+		if err := ExportSBLRegistry("sbl_registry.json"); err != nil {
+			log.Printf("warning: failed to export SBL registry: %v", err)
+		}
+	}
+
 	os.Exit(code)
 }
 
@@ -615,7 +629,8 @@ func categorize(pattern string) string {
 	return "Other"
 }
 
-func scaleWithNoise(base string, targetSize int) string {
+// ScaleWithNoise generates ~1KB of noise to interleave.
+func ScaleWithNoise(base string, targetSize int) string {
 	if len(base) == 0 {
 		base = " "
 	}
@@ -666,21 +681,32 @@ func BenchmarkStandardSuite(b *testing.B) {
 				continue
 			}
 
+			// Pre-calculate SBL metrics
+			ast, _ := syntax.Parse(group.Regexp, syntax.Perl)
+			b_val := ComputeB(ast)
+			l_val := ComputeL(ast)
+
 			// Construct diverse payload: concat all test texts
 			var baseBuf strings.Builder
 			for _, tc := range group.Tests {
 				baseBuf.WriteString(tc.Text)
 				baseBuf.WriteString(" ")
 			}
-			input := scaleWithNoise(baseBuf.String(), 1*1024*1024)
+			input := ScaleWithNoise(baseBuf.String(), 1*1024*1024)
+			
+			// Compute S from scaling ratio (intended)
+			s_val := float64(baseBuf.Len()) / (float64(baseBuf.Len()) + 1024.0)
 
 			// Use a shorter name for the sub-benchmark
 			displayName := group.Regexp
 			if len(displayName) > 30 {
 				displayName = displayName[:27] + "..."
 			}
+			
+			benchName := fmt.Sprintf("%s/%s", cat, displayName)
+			RecordSBL("StandardSuite/"+benchName, s_val, b_val, l_val)
 
-			b.Run(fmt.Sprintf("%s/%s", cat, displayName), func(b *testing.B) {
+			b.Run(benchName, func(b *testing.B) {
 				b.SetBytes(int64(len(input)))
 				b.ResetTimer()
 				for i := 0; i < b.N; i++ {
@@ -719,10 +745,20 @@ func BenchmarkLargeAlternation(b *testing.B) {
 
 			re, compileErr = engine.getMatcher(pattern)
 
-			b.Run(fmt.Sprintf("Count=%d", count), func(b *testing.B) {
+			// Pre-calculate SBL metrics
+			ast, _ := syntax.Parse(pattern, syntax.Perl)
+			b_val := ComputeB(ast)
+			l_val := ComputeL(ast)
+			// Selectivity for this specific benchmark structure
+			s_val := float64(len(target)) / float64(len(payload))
+
+			benchName := fmt.Sprintf("Count=%d", count)
+			RecordSBL("LargeAlternation/"+benchName, s_val, b_val, l_val)
+
+			b.Run(benchName, func(b *testing.B) {
 				if compileErr != nil {
 					b.Logf("Compile failed: %v", compileErr)
-					b.SkipNow()
+					b.Skip()
 				}
 				b.SetBytes(int64(len(payload)))
 				b.ResetTimer()
@@ -730,6 +766,7 @@ func BenchmarkLargeAlternation(b *testing.B) {
 					re.MatchString(payload)
 				}
 			})
+
 
 			// Clear reference and reclaim memory before the next count
 			re = nil
@@ -762,7 +799,18 @@ func BenchmarkLiteralScan(b *testing.B) {
 			if err != nil {
 				continue
 			}
-			b.Run(fmt.Sprintf("pat=%s", pattern), func(b *testing.B) {
+
+			// Pre-calculate SBL metrics
+			ast, _ := syntax.Parse(pattern, syntax.Perl)
+			b_val := ComputeB(ast)
+			l_val := ComputeL(ast)
+			// Selectivity for long scanning
+			s_val := float64(len(pattern)) / float64(len(input))
+
+			benchName := fmt.Sprintf("pat=%s", pattern)
+			RecordSBL("LiteralScan/"+benchName, s_val, b_val, l_val)
+
+			b.Run(benchName, func(b *testing.B) {
 				b.SetBytes(int64(len(input)))
 				b.ResetTimer()
 				for i := 0; i < b.N; i++ {
@@ -824,7 +872,26 @@ func BenchmarkSynthetic(b *testing.B) {
 				continue
 			}
 			input := sc.gen(1 * 1024 * 1024)
-			b.Run(sc.name, func(b *testing.B) {
+
+			// Pre-calculate SBL metrics
+			ast, _ := syntax.Parse(sc.pattern, syntax.Perl)
+			b_val := ComputeB(ast)
+			l_val := ComputeL(ast)
+			// Synthetic S calculation based on expected match
+			// SearchWarp: 10 chars per 1MB
+			// CCWarp: 1MB per 1MB (S=1.0)
+			// SIMDWarp: 13 chars per 1MB
+			s_val := 0.0
+			if sc.name == "CCWarp" || sc.name == "PureDFA" {
+				s_val = 1.0
+			} else {
+				s_val = 0.01 // Very sparse
+			}
+
+			benchName := sc.name
+			RecordSBL("Synthetic/"+benchName, s_val, b_val, l_val)
+
+			b.Run(benchName, func(b *testing.B) {
 				b.SetBytes(int64(len(input)))
 				b.ResetTimer()
 				for i := 0; i < b.N; i++ {
@@ -855,7 +922,18 @@ func BenchmarkAnchors(b *testing.B) {
 			if err != nil {
 				continue
 			}
-			b.Run(fmt.Sprintf("pat=%s", pattern), func(b *testing.B) {
+
+			// Pre-calculate SBL metrics
+			ast, _ := syntax.Parse(pattern, syntax.Perl)
+			b_val := ComputeB(ast)
+			l_val := ComputeL(ast)
+			// Selectivity (heuristic for anchors)
+			s_val := 0.05 
+
+			benchName := fmt.Sprintf("pat=%s", pattern)
+			RecordSBL("Anchors/"+benchName, s_val, b_val, l_val)
+
+			b.Run(benchName, func(b *testing.B) {
 				b.SetBytes(int64(len(httpLogs)))
 				b.ResetTimer()
 				for i := 0; i < b.N; i++ {
@@ -887,7 +965,18 @@ func BenchmarkCapturing(b *testing.B) {
 			if err != nil {
 				continue
 			}
-			b.Run(tc.name, func(b *testing.B) {
+
+			// Pre-calculate SBL metrics
+			ast, _ := syntax.Parse(tc.pat, syntax.Perl)
+			b_val := ComputeB(ast)
+			l_val := ComputeL(ast)
+			// Selectivity
+			s_val := float64(len(input)) / float64(len(scaledInput))
+
+			benchName := tc.name
+			RecordSBL("Capturing/"+benchName, s_val, b_val, l_val)
+
+			b.Run(benchName, func(b *testing.B) {
 				b.SetBytes(int64(len(scaledInput)))
 				b.ResetTimer()
 				for i := 0; i < b.N; i++ {
@@ -910,11 +999,24 @@ func BenchmarkNFAWorstCase(b *testing.B) {
 		if err != nil {
 			b.Skip()
 		}
-		b.SetBytes(int64(len(scaledInput)))
-		b.ResetTimer()
-		for i := 0; i < b.N; i++ {
-			re.MatchString(scaledInput)
-		}
+
+		// Pre-calculate SBL metrics
+		ast, _ := syntax.Parse(pattern, syntax.Perl)
+		b_val := ComputeB(ast)
+		l_val := ComputeL(ast)
+		// Selectivity (very high for NFA worst case as it only matches at the end or not at all)
+		s_val := 0.01
+
+		benchName := "Run"
+		RecordSBL("NFAWorstCase/"+benchName, s_val, b_val, l_val)
+
+		b.Run(benchName, func(b *testing.B) {
+			b.SetBytes(int64(len(scaledInput)))
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				re.MatchString(scaledInput)
+			}
+		})
 	})
 }
 

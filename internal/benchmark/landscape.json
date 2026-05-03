@@ -1,0 +1,100 @@
+{
+  "results": [
+    {
+      "engine_id": "Coregex",
+      "pattern_id": "abc",
+      "input_id": "",
+      "sbl": {
+        "S": 0.9999990463256836,
+        "B": 0.5,
+        "L": 0.6713118354879446
+      },
+      "speedup": 1,
+      "throughput_mb_s": 10054853.062151387
+    },
+    {
+      "engine_id": "Coregex",
+      "pattern_id": "a|b|c",
+      "input_id": "",
+      "sbl": {
+        "S": 0.9999990463256836,
+        "B": 0.5,
+        "L": 0.17069493215977094
+      },
+      "speedup": 1,
+      "throughput_mb_s": 10300296.394896261
+    },
+    {
+      "engine_id": "Coregex",
+      "pattern_id": "a*b+",
+      "input_id": "",
+      "sbl": {
+        "S": 0.9999990463256836,
+        "B": 0.5986876601124521,
+        "L": 0.4209441265042678
+      },
+      "speedup": 1,
+      "throughput_mb_s": 8170702.237832874
+    },
+    {
+      "engine_id": "Coregex",
+      "pattern_id": "[a-z]+",
+      "input_id": "",
+      "sbl": {
+        "S": 0.9999990463256836,
+        "B": 0.549833997312478,
+        "L": 0.16988773937184565
+      },
+      "speedup": 1,
+      "throughput_mb_s": 26706055.192910068
+    },
+    {
+      "engine_id": "Coregex",
+      "pattern_id": "(a|b)*c",
+      "input_id": "",
+      "sbl": {
+        "S": 0.9999990463256836,
+        "B": 0.5793242521487495,
+        "L": 0.4208128358642704
+      },
+      "speedup": 1,
+      "throughput_mb_s": 5240190.777264232
+    },
+    {
+      "engine_id": "Coregex",
+      "pattern_id": "Sherlock",
+      "input_id": "",
+      "sbl": {
+        "S": 0.9999990463256836,
+        "B": 0.5,
+        "L": 0.6710908765376453
+      },
+      "speedup": 1,
+      "throughput_mb_s": 7624951.078807238
+    },
+    {
+      "engine_id": "Coregex",
+      "pattern_id": "^127.0.0.1",
+      "input_id": "",
+      "sbl": {
+        "S": 1,
+        "B": 0.51499550161941,
+        "L": 0.3376950267801899
+      },
+      "speedup": 1,
+      "throughput_mb_s": 31935627.764506057
+    },
+    {
+      "engine_id": "Coregex",
+      "pattern_id": "([a-z]+)@([a-z]+).com",
+      "input_id": "",
+      "sbl": {
+        "S": 1,
+        "B": 0.6130141761393355,
+        "L": 0.3828564806027376
+      },
+      "speedup": 1,
+      "throughput_mb_s": 9816.268934340747
+    }
+  ]
+}

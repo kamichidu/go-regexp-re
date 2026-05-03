@@ -56,7 +56,7 @@ The engine follows a **Multi-Pass Sparse TDFA** strategy (implemented in **`exec
 - **Pass 2: Anchored Recording**: A precise forward scan re-runs an **Anchored DFA** strictly over the identified match range `[start, end]` to generate a noise-free execution history.
     - **On-Demand History Initialization Mandate**: To eliminate the $O(n)$ memory bottleneck, memory for `pathHistory` MUST be cleared and prepared **exactly once**, only when a match is confirmed and Pass 2 is about to begin. This ensures that `matchContext.prepare` is $O(1)$ relative to total input.
     - **Hybrid RLE History Mandate**: The engine MUST employ a **32-bit bit-packed RLE** strategy during SWAR skips. Consecutive bytes in the same state MUST be collapsed into a single "Warp Entry" with a length field (capped at 2047 bytes).
-- **Pass 3: Path Identity Selection**: Identifies the unique "winning NFA path" by **performing a backward trace** from the match end point. 
+- **Pass 3: Path Identity Selection**: Identifies the unique "winning NFA path" by **performing a backward trace** from the match end point.
     - **Defensive History Indexing Mandate**: To prevent `index out of range` panics, Pass 3 and Pass 4 MUST access `mc.history` using defensive indexing: the match-end state MUST be anchored at `len(mc.history)-1`, and backward steps MUST be relative to this tail index. This ensures robustness regardless of the search start position.
     - **Path Reconstruction**: This leverages the `MatchPriority` determined in Pass 1 to reconstruct the priority identity sequence without lookahead or ambiguity. **To maintain submatch precision for multi-byte runes, Pass 3 MUST trace every byte transition in the history.**
 - **Pass 4: Group-Specific Recap (Licking)**: Iterates forward along the confirmed winning path and applies delta tags from the `RecapTable`. This pass MUST be a pure, sequential update loop ("licking") where later tags on the path define the final boundaries.
@@ -197,8 +197,9 @@ To minimize environmental noise and provide a flat evaluation of engine performa
 - **Feature-Categorized Scan**: Benchmarks derived from external corpora (like `re2-search.txt`) MUST be categorized by feature (Literal, CharClass, Alternation, Anchored, Complex) to ensure a balanced evaluation across the engine's entire capability matrix.
 - **Noise-Interleaved Scaling**: To prevent unrealistic branch prediction saturation and cache-hit bias, scaled payloads MUST interleave target test cases with a representative noise block (typically ~1KB).
 - **Full-Scan Mandate**: To measure the engine's "cruising speed," benchmarks SHOULD use anchored patterns (e.g., `^...$`) or place matches at the end of the input to force a full scan of the payload.
-- **Layered Evaluation**: Utilize `BenchmarkSynthetic` to isolate and evaluate specific optimization layers:
-    - `SearchWarp`: Match start position searching (Pre-filter).
+- **Layered Evaluation**: Utilize `BenchmarkSynthetic` to isolate and evaluate specific optimization layers.
+- **Performance Landscape Auditing**: To understand the structural response of the engine, use the 3D Landscape Model (S, B, L). Performance must be evaluated as a function of **Selectivity**, **Branching Complexity**, and **Locality** to ensure optimizations are effective across the entire pattern space.
+- `SearchWarp`: Match start position searching (Pre-filter).
     - `CCWarp`: Character class scanning (SWAR).
     - `PureDFA`: Table-based transition logic (NFA-free).
     - `SIMDWarp`: Prefix skipping (`bytes.Index`).
@@ -212,10 +213,20 @@ To enable long-term performance auditing, the project maintains a historical rec
 ### 4.3 Continuous Integration & Quality Audit
 The project maintains a multi-layered automated verification suite to ensure that performance optimizations do not compromise correctness or Go compatibility.
 - **Unit Test Mandate**: All packages MUST pass `go test ./...` on every PR. This ensures the structural and behavioral integrity of individual components.
-- **Compatibility Audit**: Every change MUST be evaluated against the standard library using the `Compatibility Audit`. 
+- **Compatibility Audit**: Every change MUST be evaluated against the standard library using the `Compatibility Audit`.
     - **Zero Unexpected Regression**: Any "Unexpected Incompatibility" (mismatched match results or unexpected errors) is treated as a critical regression and MUST be fixed.
     - **Visibility**: Compatibility rates (Passed %) MUST be reported in the CI summary to provide transparency on the engine's maturity.
 - **Hierarchy of Verification**: Correctness (Unit Tests) > Parity (Compatibility Audit) > Efficiency (Benchmarks). A faster engine that fails correctness or loses parity is considered a failure.
+
+### 4.4 Performance Landscape Visualization
+To prove the engine's superiority across diverse workloads, the project maintains a multi-dimensional visualization dashboard on GitHub Pages.
+- **Multi-Dimensional Sweep (S-B-L)**: The engine MUST be evaluated across three axes:
+    - **Selectivity (S)**: 0.01 (Sparse) to 0.99 (Dense). Identifies MAP/SIMD pre-filter efficiency.
+    - **Complexity (B)**: 1 (Simple) to 100 (Complex). Identifies DFA state explosion resistance.
+    - **Locality (L)**: 0.1 (Random) to 0.9 (Continuous). Identifies CCWarp (SWAR) acceleration zones.
+- **Generator-Viewer Decoupling**:
+    - **Generator Mandate (Main Branch)**: This branch is responsible for data generation and processing. CI workflows MUST execute the landscape benchmarks and convert raw text results into rendering-ready JSON using tools in `_scripts/`.
+    - **Viewer Mandate (gh-pages Branch)**: The `gh-pages` branch is a pure data consumer. It MUST NOT contain Go source code or processing logic. It exists solely to host static visualization assets and data artifacts.
 
 ## 5. Coding Conventions
 - **Explicit Aliasing**:

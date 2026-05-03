@@ -1,0 +1,86 @@
+= Regex Engine Performance Landscape: Multidimensional Auditing
+:sectnums:
+:toc: left
+
+This document defines the "Performance Landscape" methodology used to visualize and analyze regex engine performance as a response function over a 3D pattern space (S, B, L).
+
+== Philosophy: Beyond Scalar Metrics
+
+Traditional benchmarks report a single scalar value (e.g., `MB/s`). However, regex engines are complex state machines whose performance is highly sensitive to the structural properties of the pattern and the input data.
+
+The **Performance Landscape** treats performance as a function:
+[math]
+f_e(S, B, L) = \frac{Throughput_e(p, input)}{Throughput_{stdlib}(p, input)}
+
+Where:
+- **S (Selectivity)**: How rare or frequent matches are.
+- **B (Branching Complexity)**: The NFA/DFA state density and nesting depth.
+- **L (Locality)**: SIMD-friendliness and data predictability.
+
+== The Three Axes (SBL)
+
+=== S: Selectivity (Search Efficiency)
+Selectivity measures the "sparsity" of matches in the input stream.
+- **S = 1.0**: Extremely rare matches (e.g., searching for a specific UUID in terabytes of logs). Engines with strong `SearchWarp` (SIMD/MAP) excel here.
+- **S = 0.0**: Dense matches (e.g., `[a-z]` matching every byte). Engines with tight inner loops and low per-match overhead excel here.
+
+=== B: Branching Complexity (Automaton Density)
+Branching complexity represents the structural "entropy" of the regex automaton.
+- **B = 1.0**: Highly complex patterns with deep nesting and many alternations (e.g., massive postal code lists). Tests DFA state-transition efficiency and memory locality.
+- **B = 0.0**: Simple literal or linear sequences.
+
+=== L: Locality (Hardware Friendliness)
+Locality measures how well the workload fits modern CPU execution models (SIMD, Pipeline, Cache).
+- **L = 1.0**: High contiguity (long literal runs) and low entropy. SIMD-accelerated engines (Hyperscan, `regexp-re`) show massive peaks.
+- **L = 0.0**: Random, unpredictable transitions and high entropy data.
+
+== Implementation Details
+
+The implementation is located in `internal/benchmark/landscape`.
+
+=== Metric Calculation
+- **B Calculation**: Extracted from the AST via `landscape.ComputeB`. It uses a weighted sum of alternations, quantifiers, and nesting depth, normalized via a sigmoid function.
+- **L Calculation**: A hybrid of **Pattern Locality** (contiguity ratio) and **Input Locality** (byte-level entropy).
+- **S Calculation**: Measured at runtime as `1.0 - (matchCount / totalBytes)`.
+
+=== Data Export Format
+Results are exported as a JSON array of `Result` objects, which can be aggregated into a 3D grid for visualization.
+
+[source,json]
+----
+{
+  "engine_id": "regexp-re",
+  "pattern_id": "([a-z]+)@([a-z]+).com",
+  "sbl": { "s": 0.99, "b": 0.45, "l": 0.85 },
+  "speedup": 12.5,
+  "throughput_mb_s": 4500.2
+}
+----
+
+== Usage: `bench-landscape`
+
+The `bench-landscape` tool is used to generate landscape data.
+
+[source,bash]
+----
+# Build the tool with all available engines
+cd internal/benchmark
+go build -tags coregex,goregexp,goregexpre ./tools/bench-landscape/main.go
+
+# Run the benchmark
+./main -o results.json
+----
+
+== Visualization Models
+
+=== 1. Performance Surface (3D)
+Plots `Speedup` as a Z-axis over `S` and `B` axes. This reveals the "Shape" of the engine.
+- **Plateau**: Stable performance across all complexities (e.g., RE2).
+- **Peak**: Massive speedups in specific SIMD-friendly zones (e.g., Hyperscan).
+- **Valley**: Performance collapses in complex branching scenarios.
+
+=== 2. Gradient Maps
+Reveals sensitivity to specific axes. A high gradient along the `B` axis indicates that the engine's performance is bottlenecked by DFA state management.
+
+=== 3. Ridge Profiles
+Cross-sections of the landscape used for direct engine-to-engine comparison at specific structural points.
