@@ -1,0 +1,306 @@
+[
+  {
+    "engine": "GoRegexp",
+    "category": "Synthetic/CCWarp",
+    "s": 1,
+    "b": 0.5646362918030291,
+    "l": 0,
+    "throughput": 69.522
+  },
+  {
+    "engine": "GoRegexp",
+    "category": "Synthetic/PureDFA",
+    "s": 1,
+    "b": 0.7989910002494707,
+    "l": 0.16666666666666666,
+    "throughput": 38.474
+  },
+  {
+    "engine": "GoRegexp",
+    "category": "Anchors/pat=^127.0.0.1",
+    "s": 0.05,
+    "b": 0.51499550161941,
+    "l": 0.3333333333333333,
+    "throughput": 62930422.572000004
+  },
+  {
+    "engine": "GoRegexp",
+    "category": "Anchors/pat=\\bGET\\b",
+    "s": 0.05,
+    "b": 0.51499550161941,
+    "l": 1,
+    "throughput": 2001341.4700000002
+  },
+  {
+    "engine": "GoRegexp",
+    "category": "Anchors/pat=HTTP/1.1$",
+    "s": 0.05,
+    "b": 0.51499550161941,
+    "l": 0.75,
+    "throughput": 874.5440000000001
+  },
+  {
+    "engine": "GoRegexp",
+    "category": "Synthetic/SIMDWarp",
+    "s": 0.01,
+    "b": 0.5,
+    "l": 1,
+    "throughput": 55239.76000000001
+  },
+  {
+    "engine": "GoRegexp",
+    "category": "Synthetic/SearchWarp",
+    "s": 0.01,
+    "b": 0.549833997312478,
+    "l": 0,
+    "throughput": 45.60600000000001
+  },
+  {
+    "engine": "GoRegexp",
+    "category": "StandardSuite/CharClass/(?i)[@-A]+",
+    "s": 0.005825242718446602,
+    "b": 0.549833997312478,
+    "l": 0,
+    "throughput": 7778385.444
+  },
+  {
+    "engine": "GoRegexp",
+    "category": "StandardSuite/Complex/a+",
+    "s": 0.0038910505836575876,
+    "b": 0.549833997312478,
+    "l": 1,
+    "throughput": 8259118.44
+  },
+  {
+    "engine": "GoRegexp",
+    "category": "StandardSuite/Alternation/(fo|foo)",
+    "s": 0.0038910505836575876,
+    "b": 0.5938731029341427,
+    "l": 0.6666666666666666,
+    "throughput": 5975359.756
+  },
+  {
+    "engine": "GoRegexp",
+    "category": "StandardSuite/Literal/a",
+    "s": 0.0029211295034079843,
+    "b": 0.5,
+    "l": 1,
+    "throughput": 9806341.848000001
+  },
+  {
+    "engine": "GoRegexp",
+    "category": "StandardSuite/Anchored/^(?:a)$",
+    "s": 0.0029211295034079843,
+    "b": 0.51499550161941,
+    "l": 1,
+    "throughput": 27727648.514
+  },
+  {
+    "engine": "GoRegexp",
+    "category": "Capturing/Email",
+    "s": 0.00007628928898382667,
+    "b": 0.6592603884513855,
+    "l": 0.2,
+    "throughput": 486909.254
+  },
+  {
+    "engine": "GoRegexp",
+    "category": "Capturing/URI",
+    "s": 0.00007628928898382667,
+    "b": 0.8145725807070178,
+    "l": 0.18181818181818182,
+    "throughput": 2228642.1340000005
+  },
+  {
+    "engine": "GoRegexp",
+    "category": "LargeAlternation/Count=10",
+    "s": 0.0000076290962286516434,
+    "b": 0.8629487074245402,
+    "l": 0.125,
+    "throughput": 55593.948
+  },
+  {
+    "engine": "GoRegexp",
+    "category": "LargeAlternation/Count=100",
+    "s": 0.0000076290962286516434,
+    "b": 0.9999822658382175,
+    "l": 0.023529411764705882,
+    "throughput": 59501.766
+  },
+  {
+    "engine": "GoRegexp",
+    "category": "LargeAlternation/Count=10000",
+    "s": 0.0000076290962286516434,
+    "b": 1,
+    "l": 0.0003403014098201264,
+    "throughput": 33271.532
+  },
+  {
+    "engine": "GoRegexp",
+    "category": "LargeAlternation/Count=1000",
+    "s": 0.0000076290962286516434,
+    "b": 1,
+    "l": 0.00392156862745098,
+    "throughput": 46227.05
+  },
+  {
+    "engine": "GoRegexp",
+    "category": "LiteralScan/pat=Sherlock",
+    "s": 0.000006584318786378361,
+    "b": 0.5,
+    "l": 1,
+    "throughput": 4282367.552
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "Synthetic/CCWarp",
+    "s": 1,
+    "b": 0.5646362918030291,
+    "l": 0,
+    "throughput": 5626.232
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "Synthetic/PureDFA",
+    "s": 1,
+    "b": 0.7989910002494707,
+    "l": 0.16666666666666666,
+    "throughput": 171.88400000000001
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "Anchors/pat=^127.0.0.1",
+    "s": 0.05,
+    "b": 0.51499550161941,
+    "l": 0.3333333333333333,
+    "throughput": 164718629.31
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "Anchors/pat=HTTP/1.1$",
+    "s": 0.05,
+    "b": 0.51499550161941,
+    "l": 0.75,
+    "throughput": 2614.4440000000004
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "Anchors/pat=\\bGET\\b",
+    "s": 0.05,
+    "b": 0.51499550161941,
+    "l": 1,
+    "throughput": 6842071.7299999995
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "Synthetic/SIMDWarp",
+    "s": 0.01,
+    "b": 0.5,
+    "l": 1,
+    "throughput": 57109.924
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "Synthetic/SearchWarp",
+    "s": 0.01,
+    "b": 0.549833997312478,
+    "l": 0,
+    "throughput": 5178.302
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "StandardSuite/CharClass/(?i)[@-A]+",
+    "s": 0.005825242718446602,
+    "b": 0.549833997312478,
+    "l": 0,
+    "throughput": 421.212
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "StandardSuite/Complex/a+",
+    "s": 0.0038910505836575876,
+    "b": 0.549833997312478,
+    "l": 1,
+    "throughput": 188.23000000000002
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "StandardSuite/Alternation/(fo|foo)",
+    "s": 0.0038910505836575876,
+    "b": 0.5938731029341427,
+    "l": 0.6666666666666666,
+    "throughput": 24740061.168
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "StandardSuite/Literal/a",
+    "s": 0.0029211295034079843,
+    "b": 0.5,
+    "l": 1,
+    "throughput": 77081093.354
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "StandardSuite/Anchored/^(?:a)$",
+    "s": 0.0029211295034079843,
+    "b": 0.51499550161941,
+    "l": 1,
+    "throughput": 148707708.93400002
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "Capturing/Email",
+    "s": 0.00007628928898382667,
+    "b": 0.6592603884513855,
+    "l": 0.2,
+    "throughput": 177.294
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "Capturing/URI",
+    "s": 0.00007628928898382667,
+    "b": 0.8145725807070178,
+    "l": 0.18181818181818182,
+    "throughput": 12927141.032
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "LargeAlternation/Count=10",
+    "s": 0.0000076290962286516434,
+    "b": 0.8629487074245402,
+    "l": 0.125,
+    "throughput": 56235.228
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "LargeAlternation/Count=100",
+    "s": 0.0000076290962286516434,
+    "b": 0.9999822658382175,
+    "l": 0.023529411764705882,
+    "throughput": 72744.91
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "LargeAlternation/Count=10000",
+    "s": 0.0000076290962286516434,
+    "b": 1,
+    "l": 0.0003403014098201264,
+    "throughput": 70869.896
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "LargeAlternation/Count=1000",
+    "s": 0.0000076290962286516434,
+    "b": 1,
+    "l": 0.00392156862745098,
+    "throughput": 70231.274
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "LiteralScan/pat=Sherlock",
+    "s": 0.000006584318786378361,
+    "b": 0.5,
+    "l": 1,
+    "throughput": 60234513.676
+  }
+]
