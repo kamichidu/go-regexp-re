@@ -91,7 +91,16 @@ function renderLandscapeBin(results, bin) {
         colorscale: 'Portland',
         zmin: 0,
         zmax: 5,
-        showscale: bin.id === 'literal',
+        showscale: true,
+        colorbar: { 
+            title: 'Speedup',
+            orientation: 'h',
+            thickness: 15,
+            len: 0.8,
+            y: -0.3,
+            tickvals: [0, 1, 2, 3, 4, 5],
+            ticktext: ['1x', '10x', '100x', '1kx', '10kx', '100kx']
+        },
         hoverongaps: false,
         hovertemplate: 'S: %{x}<br>B: %{y}<br>Speedup: %{customdata}x<extra></extra>',
         customdata: bValues.map(b => sValues.map(s => {
@@ -107,7 +116,7 @@ function renderLandscapeBin(results, bin) {
     }];
 
     const layout = {
-        margin: { t: 10, b: 25, l: 30, r: 5 },
+        margin: { t: 10, b: 60, l: 30, r: 10 },
         xaxis: { 
             title: 'S', 
             range: [1, 0], // Normalized domain, reversed
