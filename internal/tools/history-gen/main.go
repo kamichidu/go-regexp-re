@@ -90,9 +90,6 @@ func main() {
 			if stdTp > 0 {
 				speedup := re.Throughput / stdTp
 
-				// Cap individual outliers to suppress measurement noise
-				if speedup > 100000.0 { speedup = 100000.0 }
-
 				logSum += math.Log(speedup)
 				if speedup < minSpeedup {
 					minSpeedup = speedup
