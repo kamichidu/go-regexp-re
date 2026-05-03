@@ -36,5 +36,8 @@ This branch is strictly prohibited from containing data generation or processing
 - **Zero-Babel/Zero-Build**: Favor vanilla JavaScript and standard CSS to keep the viewer lightweight and zero-maintenance. Avoid complex frontend build pipelines (Webpack, Vite, etc.) unless explicitly requested.
 - **Resilience**: The viewer MUST provide clear status messages if data is missing or if a fetch fails, guiding the user to run the benchmark on the main branch.
 
+## 5. Safety & Workflow Mandates
+- **STRICT PROHIBITION: NO UNAUTHORIZED PUSH**: You MUST NOT perform a `git push` operation under any circumstances without explicit, turn-by-turn confirmation from the user. Even during CI/CD setup or deployment tasks, you must stop at the commit stage and ask for permission before pushing to remote.
+
 ---
 **Note**: This branch is a destination for CI artifacts. Never perform development of core engine logic here.
