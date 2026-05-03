@@ -112,17 +112,11 @@ function renderLandscape(results) {
     };
 
     Plotly.newPlot('landscape-chart', data, layout);
-    selector.onchange = () => renderLandscape(results);
-}
-
-    const layout = {
-        title: `S x B Performance Landscape (L=${lSlice})`,
-        xaxis: { title: 'Selectivity (S)', autorange: 'reversed' },
-        yaxis: { title: 'Complexity (B)' }
+    selector.onchange = () => {
+        renderLandscape(results);
+        renderRegression(results);
+        renderDeepDive(results);
     };
-
-    Plotly.newPlot('landscape-chart', data, layout);
-    selector.onchange = () => renderLandscape(results);
 }
 
 async function renderTrends() {
