@@ -63,15 +63,16 @@ function renderLandscapeBin(results, bin) {
         type: 'heatmap',
         colorscale: 'Portland',
         zmin: 0,
-        zmax: 5,
+        // Remove hard cap, let it scale to the 'explosion'
         showscale: bin.id === 'literal',
         colorbar: { 
             title: 'Speedup',
             thickness: 15,
-            tickvals: [0, 1, 2, 3, 4, 5],
-            ticktext: ['1x', '10x', '100x', '1kx', '10kx', '100kx']
+            tickvals: [0, 1, 2, 3, 4, 5, 6],
+            ticktext: ['1x', '10x', '100x', '1kx', '10kx', '100kx', '1Mx']
         },
         hoverongaps: false,
+
         hovertemplate: 'S: %{x}<br>B: %{y}<br>Speedup: %{customdata}x<extra></extra>',
         customdata: bValues.map(b => sValues.map(s => {
             const reMatches = ourResults.filter(r => Math.abs(r.s - s) < 0.01 && Math.abs(r.b - b) < 0.01);
