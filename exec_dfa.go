@@ -242,18 +242,17 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 				break
 			}
 
-			// Pass 1.2: Unified Propagator (Verification)
+			// Pass 1.2: Lightweight Unified Propagator (Verification)
 			if re.primaryAnchor != nil {
 				anchor := re.primaryAnchor
 				absPos := i + pos
 
-				// 1. Boundary Constraints
+				// 1. O(1) Boundary Constraints
 				if anchor.HasBeginText && (in.AbsPos+absPos != 0) {
-					// This should have been handled by the iterator optimization above,
-					// but keep as fallback for correctness.
 					return -1, -1, 1<<30 - 1
 				}
-				if anchor.HasBeginLine {
+				if anchor.HasBeginLine && re.primaryAugmented == nil {
+					// Redundant if primaryAugmented was used (since it includes \n)
 					if absPos > 0 {
 						if b[absPos-1] != '\n' {
 							i = absPos + 1
@@ -274,7 +273,8 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 						continue
 					}
 				}
-				if anchor.HasEndLine {
+				if anchor.HasEndLine && re.primaryAugmented == nil {
+					// Simplified check: only check range if anchor is NOT Augmented with \n
 					startOffset := anchor.MinDistToLineEnd
 					endOffset := anchor.MaxDistToLineEnd
 					found := false
@@ -285,8 +285,18 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 						found = true // EOF
 					}
 					if !found && cStart < numBytes {
-						if bytes.IndexByte(b[cStart:cEnd+1], '\n') >= 0 {
-							found = true
+						// Only IndexByte if the range is large, otherwise direct compare
+						if cEnd-cStart < 4 {
+							for k := cStart; k <= cEnd; k++ {
+								if b[k] == '\n' {
+									found = true
+									break
+								}
+							}
+						} else {
+							if bytes.IndexByte(b[cStart:cEnd+1], '\n') >= 0 {
+								found = true
+							}
 						}
 					}
 					if !found {
@@ -296,7 +306,22 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 					}
 				}
 
-				// 2. Fixed Offset Alignment
+				// 2. O(1) Literal Pruning (SimpleBackward)
+				pruned := false
+				for _, c := range anchor.SimpleBackward {
+					idx := absPos + c.Offset
+					if idx < 0 || b[idx] != byte(c.Info.V0) {
+						pruned = true
+						break
+					}
+				}
+				if pruned {
+					i = absPos + 1
+					restartBase = i - 1
+					continue
+				}
+
+				// 3. Fixed Offset Alignment & Final Check before DFA
 				if anchor.IsFixed {
 					candidateStart := absPos - anchor.Distance
 					if candidateStart < i {
@@ -308,23 +333,11 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 						break
 					}
 
-					// 3. Multi-Point Constraint Verification
-					if anchor.HasConstraints {
-						if _, newStart, ok := anchor.Validate(b, absPos, candidateStart); !ok {
-							if newStart > candidateStart {
-								restartBase = newStart - 1
-							} else {
-								i = absPos + 1
-								restartBase = i - 1
-							}
-							continue
-						}
-					}
-
+					// EARLY HANDOVER: If we made it here, just start the DFA.
+					// Exhaustive verification with anchor.Validate is too slow in Pass 0.
 					restartBase = candidateStart
 					i = restartBase
 				} else {
-					// Pivot anchor without fixed distance (unlikely with our extraction)
 					restartBase = absPos
 					i = restartBase
 				}

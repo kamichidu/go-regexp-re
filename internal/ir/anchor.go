@@ -54,6 +54,7 @@ type AnchorInfo struct {
 	MinDistToLineEnd int  // Minimum distance from anchor start to line end
 	MaxDistToLineEnd int  // Maximum distance from anchor start to line end
 	Augmented        []AugmentedPattern
+	SimpleBackward   []Constraint // Only fixed length, single byte constraints
 }
 
 // ExtractAnchors traverses the AST and identifies all potential anchors.
@@ -437,6 +438,13 @@ func ExtractConstraints(re *syntax.Regexp, anchor *AnchorInfo) {
 			anchor.Augmented = append(anchor.Augmented, AugmentedPattern{Pattern: anchor.Anchor, Offset: 0, IsEnd: true})
 		}
 	}
+
+	// 3. Extract simple backward checks for fast pruning
+	for _, c := range anchor.Backward {
+		if !c.IsRepeat && c.Length == 1 && c.Info.Kernel == CCWarpEqual {
+			anchor.SimpleBackward = append(anchor.SimpleBackward, c)
+		}
+	}
 }
 
 func extractDistToLineEnd(re *syntax.Regexp, anchor *AnchorInfo) (int, int, bool) {
@@ -640,6 +648,22 @@ func extractConstraints(re *syntax.Regexp, anchor *AnchorInfo) {
 		if sub.Op == syntax.OpBeginText || sub.Op == syntax.OpBeginLine {
 			continue
 		}
+
+		if sub.Op == syntax.OpLiteral && sub.Flags&syntax.FoldCase == 0 {
+			// Decompose literal backwards
+			for j := len(sub.Rune) - 1; j >= 0; j-- {
+				r := sub.Rune[j]
+				d := utf8.RuneLen(r)
+				anchor.Backward = append(anchor.Backward, Constraint{
+					Offset: backOffset - d,
+					Length: d,
+					Info:   CCWarpInfo{Kernel: CCWarpEqual, V0: uint64(r)},
+				})
+				backOffset -= d
+			}
+			continue
+		}
+
 		d := minLength(sub)
 		if d < 0 {
 			break
@@ -676,6 +700,21 @@ func extractConstraints(re *syntax.Regexp, anchor *AnchorInfo) {
 		if sub.Op == syntax.OpEndText || sub.Op == syntax.OpEndLine {
 			continue
 		}
+
+		if sub.Op == syntax.OpLiteral && sub.Flags&syntax.FoldCase == 0 {
+			// Decompose literal forwards
+			for _, r := range sub.Rune {
+				d := utf8.RuneLen(r)
+				anchor.Forward = append(anchor.Forward, Constraint{
+					Offset: forwardOffset,
+					Length: d,
+					Info:   CCWarpInfo{Kernel: CCWarpEqual, V0: uint64(r)},
+				})
+				forwardOffset += d
+			}
+			continue
+		}
+
 		d := minLength(sub)
 		isRepeat := false
 		if sub.Op == syntax.OpStar || sub.Op == syntax.OpPlus || (sub.Op == syntax.OpRepeat && sub.Max == -1) {
