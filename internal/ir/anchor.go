@@ -740,8 +740,21 @@ func toCCWarp(re *syntax.Regexp) (CCWarpInfo, bool) {
 			return CCWarpInfo{Kernel: CCWarpEqual, V0: uint64(re.Rune[0])}, true
 		}
 	case syntax.OpCharClass:
-		if re.Flags&syntax.FoldCase == 0 && len(re.Rune) == 2 {
-			return CCWarpInfo{Kernel: CCWarpSingleRange, V0: uint64(re.Rune[0]), V1: uint64(re.Rune[1])}, true
+		if re.Flags&syntax.FoldCase == 0 {
+			if len(re.Rune) == 2 {
+				return CCWarpInfo{Kernel: CCWarpSingleRange, V0: uint64(re.Rune[0]), V1: uint64(re.Rune[1])}, true
+			}
+			var extra []uint64
+			for i := 0; i+1 < len(re.Rune); i += 2 {
+				for r := re.Rune[i]; r <= re.Rune[i+1]; r++ {
+					if r < 0x80 {
+						extra = append(extra, uint64(r))
+					}
+				}
+			}
+			if len(extra) > 0 {
+				return CCWarpInfo{Kernel: CCWarpEqualSet, Extra: extra}, true
+			}
 		}
 	case syntax.OpAnyCharNotNL:
 		return CCWarpInfo{Kernel: CCWarpAnyExceptNL}, true
