@@ -132,79 +132,86 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 			}
 		}
 		if len(res.mapAnchors) > 0 {
-			bestIdx := 0
-			bestScore := res.mapAnchors[0].Score()
-			for i := 1; i < len(res.mapAnchors); i++ {
-				score := res.mapAnchors[i].Score()
-				if score > bestScore {
-					bestScore = score
-					bestIdx = i
-				}
-			}
-			res.primaryAnchor = &res.mapAnchors[bestIdx]
-
-			// Pick best augmented pattern for the primary anchor
-			for i := range res.primaryAnchor.Augmented {
-				aug := &res.primaryAnchor.Augmented[i]
-				if !aug.IsStart && !aug.IsEnd {
-					if res.primaryAugmented == nil || len(aug.Pattern) > len(res.primaryAugmented.Pattern) {
-						res.primaryAugmented = aug
+			// 1. Calculate searchAny from ALL anchors in the covering set
+			var buf []byte
+			seen := make(map[byte]bool)
+			allCovered := true
+			for _, a := range res.mapAnchors {
+				if !a.HasClass {
+					if len(a.Anchor) > 0 {
+						b := a.Anchor[0]
+						if !seen[b] {
+							buf = append(buf, b)
+							seen[b] = true
+						}
+					} else {
+						allCovered = false
+						break
 					}
-				}
-			}
-
-			if len(res.mapAnchors) > 1 {
-				var buf []byte
-				seen := make(map[byte]bool)
-				allCovered := true
-				for _, a := range res.mapAnchors {
-					if !a.HasClass {
-						if len(a.Anchor) > 0 {
-							b := a.Anchor[0]
-							if !seen[b] {
-								buf = append(buf, b)
-								seen[b] = true
+				} else {
+					switch a.Class.Kernel {
+					case ir.CCWarpEqual:
+						b := byte(a.Class.V0)
+						if !seen[b] {
+							buf = append(buf, b)
+							seen[b] = true
+						}
+					case ir.CCWarpSingleRange:
+						low, high := byte(a.Class.V0), byte(a.Class.V1)
+						if high-low < 8 {
+							for b := low; b <= high; b++ {
+								if !seen[b] {
+									buf = append(buf, b)
+									seen[b] = true
+								}
 							}
 						} else {
 							allCovered = false
-							break
 						}
-					} else {
-						switch a.Class.Kernel {
-						case ir.CCWarpEqual:
-							b := byte(a.Class.V0)
-							if !seen[b] {
-								buf = append(buf, b)
-								seen[b] = true
-							}
-						case ir.CCWarpSingleRange:
-							low, high := byte(a.Class.V0), byte(a.Class.V1)
-							if high-low < 8 {
-								for b := low; b <= high; b++ {
-									if !seen[b] {
-										buf = append(buf, b)
-										seen[b] = true
-									}
-								}
-							} else {
-								allCovered = false
-							}
-						default:
-							allCovered = false
-						}
-						if !allCovered {
-							break
-						}
+					default:
+						allCovered = false
+					}
+					if !allCovered {
+						break
 					}
 				}
-				if allCovered && len(buf) > 0 {
-					if res.lineBounded {
-						if !seen['\n'] {
-							buf = append(buf, '\n')
-							seen['\n'] = true
+			}
+			if allCovered && len(buf) > 0 {
+				if res.lineBounded {
+					if !seen['\n'] {
+						buf = append(buf, '\n')
+						seen['\n'] = true
+					}
+				}
+				res.searchAny = string(buf)
+			}
+
+			// 2. Select the best Mandatory anchor as primaryAnchor.
+			// If no anchor is mandatory for all paths AND fixed-distance,
+			// we MUST NOT use a single primaryAnchor for aggressive jumping.
+			bestIdx := -1
+			bestScore := -1
+			for i := range res.mapAnchors {
+				if res.mapAnchors[i].Mandatory && res.mapAnchors[i].IsFixed {
+					score := res.mapAnchors[i].Score()
+					if score > bestScore {
+						bestScore = score
+						bestIdx = i
+					}
+				}
+			}
+
+			if bestIdx >= 0 {
+				res.primaryAnchor = &res.mapAnchors[bestIdx]
+
+				// Pick best augmented pattern for the primary anchor
+				for i := range res.primaryAnchor.Augmented {
+					aug := &res.primaryAnchor.Augmented[i]
+					if !aug.IsStart && !aug.IsEnd {
+						if res.primaryAugmented == nil || len(aug.Pattern) > len(res.primaryAugmented.Pattern) {
+							res.primaryAugmented = aug
 						}
 					}
-					res.searchAny = string(buf)
 				}
 			}
 		}
