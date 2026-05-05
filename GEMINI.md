@@ -30,6 +30,9 @@ To maximize throughput, the engine MUST select the most efficient execution loop
 - **Fast Path (Boundary-Only Discovery)**: Selected for `Match` and `FindIndex` calls where capture groups are not required. It utilizes a minimalist execution loop (Pass 0 + Pass 1) with zero history recording and early exit on first match.
 - **Full Path (Multi-Pass Sparse TDFA)**: Selected for `FindSubmatchIndex` calls. It employs the comprehensive 5-pass pipeline to guarantee peak performance and Go parity:
     - **Pass 0 (MAP)**: Primary search phase. Identifies mandatory paths and extracts anchor candidates (**Prefix**, **Pivot**, or **Suffix**).
+        - **Search**: Identifies raw candidate positions using SIMD/SWAR.
+        - **Gaze**: Verifies O(1) constraints (anchors, fixed-distance literals) to reject false candidates early.
+        - **Snap**: Identifies the true match start (Horizon) by reverse-scanning variable-length repetitions.
     - **Pass 1: Boundary Discovery (Searching DFA)**: Uses a Safe Searching DFA to identify match end and winning priority in $O(n)$.
     - **Pass 1.5: Leftmost Start Discovery**: Since searching DFAs conflate start positions, the engine performs a manual scan to find the exact leftmost `start`.
     - **Pass 2: Anchored Recording (Precise Forward Scan)**: Re-runs an Anchored DFA over the identified match range to generate a noise-free execution history. History initialization MUST be $O(1)$ relative to total input.
@@ -161,7 +164,7 @@ To ensure 100% accurate anchor verification and submatch extraction regardless o
 - **Virtual Slicing (Allocation Exclusion)**: `ir.Input` MUST hold the full, original byte slice (`OriginalB`) to act as a zero-allocation alternative to repeated slice truncations.
 - **Relative-Coordinate Hot Loops**: Internal execution loops MUST maintain a **Relative Coordinate System**. Loop variables (`i`), priority (`prio`), and internal capture indices MUST be 0-based relative to the start of the current virtual slice (`in.AbsPos`). This ensures that absolute coordinate addition is excluded from the $O(1)$ hot path.
 - **Zero-Ambiguity Contextual Anchors**: `VerifyBegin`, `VerifyEnd`, and `VerifyWord (\b)` MUST use `(in.AbsPos + i)` to index into `in.OriginalB`. This allows accurate boundary assessment even when the virtual slice starts in the middle of a word or line.
-- **Pointer-Passing for Input Context**: To avoid the 48-byte struct copy overhead (`runtime.duffcopy`) in hot loops, the `ir.Input` structure MUST be passed by pointer (`*ir.Input`) to all anchor verification and execution helper functions.
+- **Unified Discovery/Propagator Integration**: Pass 0 (MAP) MUST utilize the same absolute context to perform Search/Gaze/Snap operations, ensuring that identified candidates are globally valid before starting the DFA.
 - **Exit-Only Absolute Conversion**: Conversion from relative to absolute coordinates (e.g., `regs[i] += in.AbsPos`) MUST be performed **exactly once** at the public API boundary before returning results to the caller.
 - **Encapsulation**: This absolute coordinate system is an internal architectural detail. Public APIs MUST continue to provide standard, buffer-relative indices (0-based from the provided slice) to maintain 100% compatibility with Go's `regexp` package.
 
