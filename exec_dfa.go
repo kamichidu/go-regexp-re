@@ -114,6 +114,46 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 					break
 				}
 
+				// 1.1 Distance to End (EOF) Pruning
+				if anchor.HasEndText {
+					absAnchorPos := i + pos
+					remaining := in.TotalBytes - (in.AbsPos + absAnchorPos)
+					if remaining < anchor.MinDistToEnd || remaining > anchor.MaxDistToEnd {
+						// This anchor cannot possibly lead to a match at EOF
+						i = i + pos + 1
+						restartBase = i - 1
+						continue
+					}
+				}
+
+				// 1.2 Distance to Line End (\n or EOF) Pruning
+				if anchor.HasEndLine {
+					// Check for \n in the fixed range [min, max] from anchor start
+					startOffset := anchor.MinDistToLineEnd
+					endOffset := anchor.MaxDistToLineEnd
+
+					foundLineEnd := false
+					checkStart := i + pos + startOffset
+					checkEnd := i + pos + endOffset
+					if checkEnd > numBytes {
+						checkEnd = numBytes
+						foundLineEnd = true // Implicitly found EOF
+					}
+
+					if !foundLineEnd {
+						// Look for \n in the range
+						if bytes.IndexByte(b[checkStart:checkEnd+1], '\n') >= 0 {
+							foundLineEnd = true
+						}
+					}
+
+					if !foundLineEnd {
+						i = i + pos + 1
+						restartBase = i - 1
+						continue
+					}
+				}
+
 				if re.lineBounded && anchor.Distance > 0 {
 					if b[i+pos] == '\n' {
 						restartBase = i + pos + 1
@@ -353,6 +393,46 @@ func fastMatchExecLoop(re *Regexp, in *ir.Input) (int, int, int) {
 				}
 				if pos < 0 {
 					break
+				}
+
+				// 1.1 Distance to End (EOF) Pruning
+				if anchor.HasEndText {
+					absAnchorPos := i + pos
+					remaining := in.TotalBytes - (in.AbsPos + absAnchorPos)
+					if remaining < anchor.MinDistToEnd || remaining > anchor.MaxDistToEnd {
+						// This anchor cannot possibly lead to a match at EOF
+						i = i + pos + 1
+						restartBase = i - 1
+						continue
+					}
+				}
+
+				// 1.2 Distance to Line End (\n or EOF) Pruning
+				if anchor.HasEndLine {
+					// Check for \n in the fixed range [min, max] from anchor start
+					startOffset := anchor.MinDistToLineEnd
+					endOffset := anchor.MaxDistToLineEnd
+
+					foundLineEnd := false
+					checkStart := i + pos + startOffset
+					checkEnd := i + pos + endOffset
+					if checkEnd > numBytes {
+						checkEnd = numBytes
+						foundLineEnd = true // Implicitly found EOF
+					}
+
+					if !foundLineEnd {
+						// Look for \n in the range
+						if bytes.IndexByte(b[checkStart:checkEnd+1], '\n') >= 0 {
+							foundLineEnd = true
+						}
+					}
+
+					if !foundLineEnd {
+						i = i + pos + 1
+						restartBase = i - 1
+						continue
+					}
 				}
 
 				if re.lineBounded && anchor.Distance > 0 {

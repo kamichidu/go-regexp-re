@@ -27,18 +27,23 @@ type Constraint struct {
 
 // AnchorInfo holds information about a potential anchor in the pattern.
 type AnchorInfo struct {
-	Anchor         []byte
-	Class          CCWarpInfo // If Anchor is empty, use this SWAR class anchor
-	HasClass       bool
-	Type           AnchorType
-	Distance       int  // Minimum distance from the start of the match
-	IsFixed        bool // True if Distance is the EXACT distance
-	Mandatory      bool // True if this anchor must be present in every match
-	Forward        []Constraint
-	Backward       []Constraint
-	HasConstraints bool // True if Forward or Backward is not empty
-	HasBeginText   bool // This anchor path is strictly anchored to ^
-	HasEndText     bool // This anchor path is strictly anchored to $
+	Anchor           []byte
+	Class            CCWarpInfo // If Anchor is empty, use this SWAR class anchor
+	HasClass         bool
+	Type             AnchorType
+	Distance         int  // Minimum distance from the start of the match
+	IsFixed          bool // True if Distance is the EXACT distance
+	Mandatory        bool // True if this anchor must be present in every match
+	Forward          []Constraint
+	Backward         []Constraint
+	HasConstraints   bool // True if Forward or Backward is not empty
+	HasBeginText     bool // This anchor path is strictly anchored to ^
+	HasEndText       bool // This anchor path is strictly anchored to $
+	MinDistToEnd     int  // Minimum distance from anchor start to $
+	MaxDistToEnd     int  // Maximum distance from anchor start to $
+	HasEndLine       bool // This anchor path is strictly anchored to line end ($ or \n)
+	MinDistToLineEnd int  // Minimum distance from anchor start to line end
+	MaxDistToLineEnd int  // Maximum distance from anchor start to line end
 }
 
 // ExtractAnchors traverses the AST and identifies all potential anchors.
@@ -374,6 +379,174 @@ func ExtractConstraints(re *syntax.Regexp, anchor *AnchorInfo) {
 	if len(anchor.Backward) > 0 || len(anchor.Forward) > 0 {
 		anchor.HasConstraints = true
 	}
+
+	// Extract distance to $
+	minD, maxD, hasEnd := extractDistToEnd(flatRE, anchor)
+	if hasEnd {
+		anchor.HasEndText = true
+		anchor.MinDistToEnd = minD
+		anchor.MaxDistToEnd = maxD
+	}
+
+	// Extract distance to line end
+	minL, maxL, hasLineEnd := extractDistToLineEnd(flatRE, anchor)
+	if hasLineEnd {
+		anchor.HasEndLine = true
+		anchor.MinDistToLineEnd = minL
+		anchor.MaxDistToLineEnd = maxL
+	}
+}
+
+func extractDistToLineEnd(re *syntax.Regexp, anchor *AnchorInfo) (int, int, bool) {
+	if re == nil {
+		return 0, 0, false
+	}
+	if re.Op == syntax.OpAlternate {
+		min, max := 1<<30, -1
+		anyEnd := false
+		for _, sub := range re.Sub {
+			d0, d1, ok := extractDistToLineEnd(sub, anchor)
+			if ok {
+				anyEnd = true
+				if d0 < min {
+					min = d0
+				}
+				if d1 > max {
+					max = d1
+				}
+			}
+		}
+		return min, max, anyEnd
+	}
+	if re.Op != syntax.OpConcat {
+		return 0, 0, false
+	}
+
+	currentOffset := 0
+	anchorIdx := -1
+	for i, sub := range re.Sub {
+		if currentOffset == anchor.Distance {
+			if anchor.HasClass {
+				if info, ok := toCCWarp(sub); ok && info.Kernel == anchor.Class.Kernel && info.V0 == anchor.Class.V0 && info.V1 == anchor.Class.V1 {
+					anchorIdx = i
+					break
+				}
+			} else {
+				if lit, ok := isLiteral(sub); ok && string(lit) == string(anchor.Anchor) {
+					anchorIdx = i
+					break
+				}
+			}
+		}
+		d := minLength(sub)
+		if d < 0 {
+			break
+		}
+		currentOffset += d
+	}
+
+	if anchorIdx < 0 {
+		return 0, 0, false
+	}
+
+	minDist, maxDist := 0, 0
+	foundEnd := false
+	for i := anchorIdx + 1; i < len(re.Sub); i++ {
+		sub := re.Sub[i]
+		if sub.Op == syntax.OpEndLine || sub.Op == syntax.OpEndText {
+			foundEnd = true
+			break
+		}
+		d0 := minLength(sub)
+		d1 := maxLength(sub)
+		if d0 < 0 || d1 < 0 {
+			return 0, 0, false
+		}
+		minDist += d0
+		maxDist += d1
+	}
+
+	if foundEnd {
+		return minDist, maxDist, true
+	}
+	return 0, 0, false
+}
+
+func extractDistToEnd(re *syntax.Regexp, anchor *AnchorInfo) (int, int, bool) {
+	if re == nil {
+		return 0, 0, false
+	}
+	if re.Op == syntax.OpAlternate {
+		min, max := 1<<30, -1
+		anyEnd := false
+		for _, sub := range re.Sub {
+			d0, d1, ok := extractDistToEnd(sub, anchor)
+			if ok {
+				anyEnd = true
+				if d0 < min {
+					min = d0
+				}
+				if d1 > max {
+					max = d1
+				}
+			}
+		}
+		return min, max, anyEnd
+	}
+	if re.Op != syntax.OpConcat {
+		return 0, 0, false
+	}
+
+	currentOffset := 0
+	anchorIdx := -1
+	for i, sub := range re.Sub {
+		if currentOffset == anchor.Distance {
+			if anchor.HasClass {
+				if info, ok := toCCWarp(sub); ok && info.Kernel == anchor.Class.Kernel && info.V0 == anchor.Class.V0 && info.V1 == anchor.Class.V1 {
+					anchorIdx = i
+					break
+				}
+			} else {
+				if lit, ok := isLiteral(sub); ok && string(lit) == string(anchor.Anchor) {
+					anchorIdx = i
+					break
+				}
+			}
+		}
+		d := minLength(sub)
+		if d < 0 {
+			break
+		}
+		currentOffset += d
+	}
+
+	if anchorIdx < 0 {
+		return 0, 0, false
+	}
+
+	minDist, maxDist := 0, 0
+	foundEnd := false
+	for i := anchorIdx + 1; i < len(re.Sub); i++ {
+		sub := re.Sub[i]
+		if sub.Op == syntax.OpEndText {
+			foundEnd = true
+			break
+		}
+		d0 := minLength(sub)
+		d1 := maxLength(sub)
+		if d0 < 0 || d1 < 0 {
+			// Variable length part, but not end.
+			// If we hit something like .*, we can't determine the distance to end.
+			return 0, 0, false
+		}
+		minDist += d0
+		maxDist += d1
+	}
+
+	if foundEnd {
+		return minDist, maxDist, true
+	}
+	return 0, 0, false
 }
 
 func extractConstraints(re *syntax.Regexp, anchor *AnchorInfo) {
