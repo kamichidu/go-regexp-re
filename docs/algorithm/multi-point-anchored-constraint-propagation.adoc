@@ -9,26 +9,33 @@ MAP is designed to handle complex patterns with multiple entry points (e.g., `(^
 
 == 1. Multi-Entry Point Anchor Discovery
 
-The engine analyzes the optimized AST to identify the most "selective" literal or character class for each mandatory path.
+The engine analyzes the optimized AST to identify the most "selective" literal or character class for each mandatory path. MAP treats both content (literals) and structural boundaries (`^`, `$`) as primary discovery sources.
 
 |===
 | Anchor Type | Location | Discovery Tool | Propagation Direction
-| *Prefix* | Pattern Start | `bytes.HasPrefix` / `IndexByte` | Forward only.
+| *Prefix* | Pattern Start | `bytes.HasPrefix` / `Index` | Forward only.
 | *Pivot* | Middle of Pattern | `bytes.Index` or `IndexClass` | Bi-directional.
-| *Suffix* | Pattern End | `bytes.LastIndex` | Backward only.
+| *Suffix* | Pattern End | `bytes.Index` (Augmented) | Backward only.
+| *Boundary* | Structural End | `bytes.IndexByte('\n')` | Distance-based.
 |===
 
-=== A. Support for Alternation (Covering Set)
+=== A. Augmented Anchors (Boundary-Content Integration)
+To maximize SIMD efficiency, MAP "augments" literal anchors with adjacent structural constraints during compilation. This merges two separate checks into a single `bytes.Index` call.
+
+- **Line-Start Augmentation**: `(?m)^Rare` becomes the search pattern `"\nRare"`. The engine also performs a one-time check at buffer index 0 for `"Rare"`.
+- **Line-End Augmentation**: `(?m)Rare$` becomes the search pattern `"Rare\n"`. The engine also performs a one-time check at buffer EOF for `"Rare"`.
+- **Fused Suffix Search**: For patterns like `HTTP/1.1$`, the engine prioritizes searching for `"1\n"` (in multiline) or `"1"` at `EOF-1` (in single-line) rather than searching for the prefix `"HTTP/1"`.
+
+=== B. Anchor Selection Criteria (Structural Density)
+The engine selects a single **Primary Iterator** based on the "Structural Density" of the augmented patterns:
+- **Literal Score**: 10 points per character.
+- **Boundary Bonus**: +20 for `^`/`$` (Text boundaries), +15 for `(?m)^`/`(?m)$` (Line boundaries).
+- **Specificity Score**: Higher for rare classes or multi-literal sequences.
+
+=== C. Support for Alternation (Covering Set)
 MAP identifies a **Covering Set** of anchors that represent all possible execution paths. If a pattern has alternations (e.g., `apple|banana`), the engine ensures that at least one selective anchor is tracked for every branch.
 - **Multi-Index Discovery**: Uses `bytes.IndexAny` to find the first byte of any anchor in the covering set.
 - **Exhaustive Coverage**: If a branch has no selective anchor, MAP may be partially disabled or fall back to a less selective common anchor to maintain 100% safety.
-
-=== B. Anchor Selection Criteria (Heuristic Score)
-Not all anchors are equal. The engine selects anchors based on a heuristic score:
-- **Literal Anchor (Weight: 10/char)**: Triggers SIMD `bytes.Index`.
-- **Class Anchor (Weight: 8 for Equal, 5 for Range)**: Triggers SWAR `IndexClass`.
-- **Fixed-Distance Bonus (+50)**: Anchors with a constant distance from match start are highly preferred as they allow precise `restartBase` jumps.
-- **Mandatory Requirement**: Only anchors proven to be **Mandatory** for a specific path are used to trigger skips.
 ...
 == 8. Advanced Geographical Optimizations
 
@@ -53,14 +60,15 @@ To ensure 100% compatibility with standard regular expression semantics, MAP adh
 - **Capture Transparency**: Anchor extraction uses **Capture Stripping** to ignore `OpCapture` boundaries, merging adjacent literals into longer, more efficient anchors (e.g., `abc(def)ghi` -> `abcdefghi`).
 - **Anchor Context Awareness**: Anchors tied to `^` (BeginText) are validated only at index 0, while Pivot anchors search the entire buffer.
 
-== 3. Constraint Propagation Model
+== 3. Unified Constraint Propagation Model
 
-Once an anchor is discovered at position `P`, the engine does not immediately start the DFA. Instead, it applies **Constraints** that must hold true:
+Once the Primary Iterator identifies a candidate position `P`, the engine enters the **Unified Propagator** phase. Before Pass 1 (DFA) is invoked, MAP verifies all remaining structural and literal constraints associated with that path:
 
-- **Forward Constraints**: Character classes or bytes that MUST appear at offset `P+k`. Supports **Dynamic Warp** for repetitions.
-- **Backward Constraints**: Character classes or bytes that MUST appear at offset `P-k`.
+- **Distance-to-Boundary Verification**: If the pattern is anchored to `$`, check if `len(buffer) - P` matches the required offset.
+- **Multi-Point Cross-Check**: If other mandatory anchors were identified but not chosen as the iterator, verify their presence at the correct relative offsets from `P`.
+- **Boundary Verification**: Verify `\b`, `\B`, and other non-searchable boundaries.
 
-These constraints are "folded" during compilation into 64-bit masks or arithmetic range checks.
+This "Pass 0 Propagation" ensures that the DFA is only executed for positions that have already satisfied 100% of the pattern's fixed-length structural requirements.
 
 == 4. SWAR-Integrated Validation
 
