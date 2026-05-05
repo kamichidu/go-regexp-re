@@ -621,24 +621,23 @@ func extractConstraints(re *syntax.Regexp, anchor *AnchorInfo) {
 			continue
 		}
 
+		d := minLength(sub)
+		maxD := maxLength(sub)
+		isRepeat := d != maxD || sub.Op == syntax.OpStar || sub.Op == syntax.OpPlus || (sub.Op == syntax.OpRepeat && sub.Max == -1)
+
 		if sub.Op == syntax.OpLiteral && sub.Flags&syntax.FoldCase == 0 {
 			for j := len(sub.Rune) - 1; j >= 0; j-- {
 				r := sub.Rune[j]
-				d := utf8.RuneLen(r)
+				rd := utf8.RuneLen(r)
 				anchor.Backward = append(anchor.Backward, Constraint{
-					Offset: backOffset - d, Length: d,
+					Offset: backOffset - rd, Length: rd,
 					Info: CCWarpInfo{Kernel: CCWarpEqual, V0: uint64(r)},
 				})
-				backOffset -= d
+				backOffset -= rd
 			}
 			continue
 		}
 
-		d := minLength(sub)
-		isRepeat := false
-		if sub.Op == syntax.OpStar || sub.Op == syntax.OpPlus || (sub.Op == syntax.OpRepeat && sub.Max == -1) {
-			isRepeat = true
-		}
 		if info, ok := toCCWarp(sub); ok {
 			anchor.Backward = append(anchor.Backward, Constraint{
 				Offset: backOffset - d, Length: d, IsRepeat: isRepeat, Info: info,
@@ -669,23 +668,22 @@ func extractConstraints(re *syntax.Regexp, anchor *AnchorInfo) {
 			continue
 		}
 
+		d := minLength(sub)
+		maxD := maxLength(sub)
+		isRepeat := d != maxD || sub.Op == syntax.OpStar || sub.Op == syntax.OpPlus || (sub.Op == syntax.OpRepeat && sub.Max == -1)
+
 		if sub.Op == syntax.OpLiteral && sub.Flags&syntax.FoldCase == 0 {
 			for _, r := range sub.Rune {
-				d := utf8.RuneLen(r)
+				rd := utf8.RuneLen(r)
 				anchor.Forward = append(anchor.Forward, Constraint{
-					Offset: forwardOffset, Length: d,
+					Offset: forwardOffset, Length: rd,
 					Info: CCWarpInfo{Kernel: CCWarpEqual, V0: uint64(r)},
 				})
-				forwardOffset += d
+				forwardOffset += rd
 			}
 			continue
 		}
 
-		d := minLength(sub)
-		isRepeat := false
-		if sub.Op == syntax.OpStar || sub.Op == syntax.OpPlus || (sub.Op == syntax.OpRepeat && sub.Max == -1) {
-			isRepeat = true
-		}
 		if info, ok := toCCWarp(sub); ok {
 			anchor.Forward = append(anchor.Forward, Constraint{
 				Offset: forwardOffset, Length: d, IsRepeat: isRepeat, Info: info,
@@ -736,25 +734,28 @@ func toCCWarp(re *syntax.Regexp) (CCWarpInfo, bool) {
 	}
 	switch re.Op {
 	case syntax.OpLiteral:
-		if len(re.Rune) == 1 && re.Flags&syntax.FoldCase == 0 {
+		if len(re.Rune) == 1 {
 			return CCWarpInfo{Kernel: CCWarpEqual, V0: uint64(re.Rune[0])}, true
 		}
 	case syntax.OpCharClass:
-		if re.Flags&syntax.FoldCase == 0 {
-			if len(re.Rune) == 2 {
-				return CCWarpInfo{Kernel: CCWarpSingleRange, V0: uint64(re.Rune[0]), V1: uint64(re.Rune[1])}, true
+		if len(re.Rune) == 2 {
+			return CCWarpInfo{Kernel: CCWarpSingleRange, V0: uint64(re.Rune[0]), V1: uint64(re.Rune[1])}, true
+		}
+		if len(re.Rune) == 4 && re.Rune[0] == 0 && re.Rune[3] == 0x10FFFF {
+			// Negated single range or char
+			low, high := re.Rune[1]+1, re.Rune[2]-1
+			if low <= high {
+				return CCWarpInfo{Kernel: CCWarpNotSingleRange, V0: uint64(low), V1: uint64(high)}, true
 			}
-			var extra []uint64
-			for i := 0; i+1 < len(re.Rune); i += 2 {
-				for r := re.Rune[i]; r <= re.Rune[i+1]; r++ {
-					if r < 0x80 {
-						extra = append(extra, uint64(r))
-					}
-				}
+		}
+		var extra []uint64
+		for i := 0; i+1 < len(re.Rune); i += 2 {
+			for r := re.Rune[i]; r <= re.Rune[i+1] && r < 0x80; r++ {
+				extra = append(extra, uint64(r))
 			}
-			if len(extra) > 0 {
-				return CCWarpInfo{Kernel: CCWarpEqualSet, Extra: extra}, true
-			}
+		}
+		if len(extra) > 0 {
+			return CCWarpInfo{Kernel: CCWarpEqualSet, Extra: extra}, true
 		}
 	case syntax.OpAnyCharNotNL:
 		return CCWarpInfo{Kernel: CCWarpAnyExceptNL}, true
@@ -819,13 +820,21 @@ func findCoveringSuffixAnchors(re *syntax.Regexp, distFromEnd int, atEnd bool, h
 		currentAtEnd := atEnd
 		currentHasEndText := hasEndText
 		currentHasEndLine := hasEndLine
-		currentIsFixed := true
+
 		for i := len(re.Sub) - 1; i >= 0; i-- {
 			sub := re.Sub[i]
 			subAnchors := findCoveringSuffixAnchors(sub, currentDist, currentAtEnd, currentHasEndText, currentHasEndLine)
 			if len(subAnchors) > 0 {
+				// To be IsFixed, EVERYTHING before this sub must be fixed distance
+				prefixIsFixed := true
+				for k := 0; k < i; k++ {
+					if minLength(re.Sub[k]) != maxLength(re.Sub[k]) {
+						prefixIsFixed = false
+						break
+					}
+				}
 				for j := range subAnchors {
-					subAnchors[j].IsFixed = subAnchors[j].IsFixed && currentIsFixed
+					subAnchors[j].IsFixed = subAnchors[j].IsFixed && prefixIsFixed
 				}
 				return subAnchors
 			}
@@ -836,10 +845,6 @@ func findCoveringSuffixAnchors(re *syntax.Regexp, distFromEnd int, atEnd bool, h
 				currentHasEndLine = true
 			}
 			d := minLength(sub)
-			maxD := maxLength(sub)
-			if d != maxD {
-				currentIsFixed = false
-			}
 			if d > 0 {
 				currentAtEnd = false
 			}
@@ -991,6 +996,20 @@ func (a *AnchorInfo) Validate(b []byte, p int, matchStart int) (int, int, bool) 
 						return p, i, false
 					}
 				}
+			case CCWarpSingleRange:
+				low, high := byte(c.Info.V0), byte(c.Info.V1)
+				for i := matchStart; i < end; i++ {
+					if v := b[i]; v < low || v > high {
+						return p, i, false
+					}
+				}
+			case CCWarpNotSingleRange:
+				low, high := byte(c.Info.V0), byte(c.Info.V1)
+				for i := matchStart; i < end; i++ {
+					if v := b[i]; v >= low && v <= high {
+						return p, i, false
+					}
+				}
 			}
 		} else {
 			start := p + c.Offset
@@ -1034,73 +1053,73 @@ func ValidateFixed(info CCWarpInfo, b []byte) bool {
 	switch info.Kernel {
 	case CCWarpEqual:
 		target := byte(info.V0)
-		return bytes.Count(b, []byte{target}) == len(b)
+		for _, v := range b {
+			if v != target {
+				return false
+			}
+		}
+		return true
 	case CCWarpSingleRange:
 		low, high := byte(info.V0), byte(info.V1)
-		low64, high64 := splat(uint64(low)), splat(uint64(high))
-		i := 0
-		for i+8 <= len(b) {
-			v := binary.LittleEndian.Uint64(b[i:])
-			if ((v+0x7f7f7f7f7f7f7f7f-high64)|(v-low64))&0x8080808080808080 != 0x8080808080808080 {
-				return false
-			}
-			i += 8
-		}
-		for ; i < len(b); i++ {
-			if v := b[i]; v < low || v > high {
+		for _, v := range b {
+			if v < low || v > high {
 				return false
 			}
 		}
+		return true
 	case CCWarpNotSingleRange:
 		low, high := byte(info.V0), byte(info.V1)
-		low64, high64 := splat(uint64(low)), splat(uint64(high))
-		i := 0
-		for i+8 <= len(b) {
-			v := binary.LittleEndian.Uint64(b[i:])
-			if ((v+0x7f7f7f7f7f7f7f7f-high64)|(v-low64))&0x8080808080808080 == 0x8080808080808080 {
-				return false
-			}
-			i += 8
-		}
-		for ; i < len(b); i++ {
-			if v := b[i]; v >= low && v <= high {
+		for _, v := range b {
+			if v >= low && v <= high {
 				return false
 			}
 		}
+		return true
 	case CCWarpAnyChar:
-		i := 0
-		for i+8 <= len(b) {
-			v := binary.LittleEndian.Uint64(b[i:])
-			if v&0x8080808080808080 != 0 {
-				return false
-			}
-			i += 8
-		}
-		for ; i < len(b); i++ {
-			if b[i] >= 0x80 {
+		for _, v := range b {
+			if v >= 0x80 {
 				return false
 			}
 		}
+		return true
 	case CCWarpAnyExceptNL:
-		if bytes.IndexByte(b, '\n') >= 0 {
-			return false
-		}
-		i := 0
-		for i+8 <= len(b) {
-			v := binary.LittleEndian.Uint64(b[i:])
-			if v&0x8080808080808080 != 0 {
-				return false
-			}
-			i += 8
-		}
-		for ; i < len(b); i++ {
-			if b[i] >= 0x80 {
+		for _, v := range b {
+			if v == '\n' || v >= 0x80 {
 				return false
 			}
 		}
+		return true
 	case CCWarpNotEqual:
 		target := byte(info.V0)
-		return bytes.IndexByte(b, target) < 0
+		for _, v := range b {
+			if v == target {
+				return false
+			}
+		}
+		return true
+	case CCWarpEqualSet:
+		for _, target := range b {
+			found := false
+			for _, v := range info.Extra {
+				if byte(v) == target {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return false
+			}
+		}
+		return true
+	case CCWarpNotEqualSet:
+		for _, target := range b {
+			for _, v := range info.Extra {
+				if byte(v) == target {
+					return false
+				}
+			}
+		}
+		return true
 	}
 	return true
 }
@@ -1109,13 +1128,15 @@ func Warp(info CCWarpInfo, b []byte) int {
 	i := 0
 	switch info.Kernel {
 	case CCWarpAnyChar:
-		return len(b)
-	case CCWarpAnyExceptNL:
-		pos := bytes.IndexByte(b, '\n')
-		if pos < 0 {
-			return len(b)
+		for i < len(b) && b[i] < 0x80 {
+			i++
 		}
-		return pos
+		return i
+	case CCWarpAnyExceptNL:
+		for i < len(b) && b[i] != '\n' && b[i] < 0x80 {
+			i++
+		}
+		return i
 	case CCWarpEqual:
 		target := byte(info.V0)
 		target64 := splat(uint64(target))
@@ -1128,6 +1149,11 @@ func Warp(info CCWarpInfo, b []byte) int {
 			i += 8
 		}
 		for i < len(b) && b[i] == target {
+			i++
+		}
+	case CCWarpNotEqual:
+		target := byte(info.V0)
+		for i < len(b) && b[i] != target {
 			i++
 		}
 	case CCWarpSingleRange:
@@ -1147,6 +1173,11 @@ func Warp(info CCWarpInfo, b []byte) int {
 			}
 			i++
 		}
+	case CCWarpNotSingleRange:
+		low, high := byte(info.V0), byte(info.V1)
+		for i < len(b) && (b[i] < low || b[i] > high) {
+			i++
+		}
 	case CCWarpEqualSet:
 		for i < len(b) {
 			target := b[i]
@@ -1158,6 +1189,21 @@ func Warp(info CCWarpInfo, b []byte) int {
 				}
 			}
 			if !found {
+				break
+			}
+			i++
+		}
+	case CCWarpNotEqualSet:
+		for i < len(b) {
+			target := b[i]
+			found := false
+			for _, v := range info.Extra {
+				if byte(v) == target {
+					found = true
+					break
+				}
+			}
+			if found {
 				break
 			}
 			i++
@@ -1183,11 +1229,25 @@ func WarpBack(info CCWarpInfo, b []byte) int {
 		for i < n && b[n-1-i] == target {
 			i++
 		}
+	case CCWarpNotEqual:
+		target := byte(info.V0)
+		for i < n && b[n-1-i] != target {
+			i++
+		}
 	case CCWarpSingleRange:
 		low, high := byte(info.V0), byte(info.V1)
 		for i < n {
 			v := b[n-1-i]
 			if v < low || v > high {
+				break
+			}
+			i++
+		}
+	case CCWarpNotSingleRange:
+		low, high := byte(info.V0), byte(info.V1)
+		for i < n {
+			v := b[n-1-i]
+			if v >= low && v <= high {
 				break
 			}
 			i++
@@ -1203,6 +1263,21 @@ func WarpBack(info CCWarpInfo, b []byte) int {
 				}
 			}
 			if !found {
+				break
+			}
+			i++
+		}
+	case CCWarpNotEqualSet:
+		for i < n {
+			target := b[n-1-i]
+			found := false
+			for _, v := range info.Extra {
+				if byte(v) == target {
+					found = true
+					break
+				}
+			}
+			if found {
 				break
 			}
 			i++
@@ -1239,6 +1314,15 @@ func IndexClass(info CCWarpInfo, b []byte) int {
 			return -1
 		}
 		return bytes.IndexByte(b, byte(info.V0))
+	case CCWarpNotEqual:
+		target := byte(info.V0)
+		for i < len(b) {
+			if b[i] != target || (info.IncludeNL && b[i] == '\n') {
+				return i
+			}
+			i++
+		}
+		return -1
 	case CCWarpSingleRange:
 		low, high := byte(info.V0), byte(info.V1)
 		low64, high64 := splat(uint64(low)), splat(uint64(high))
@@ -1264,10 +1348,39 @@ func IndexClass(info CCWarpInfo, b []byte) int {
 				return i
 			}
 		}
-	case CCWarpNotEqual:
-		target := byte(info.V0)
+	case CCWarpNotSingleRange:
+		low, high := byte(info.V0), byte(info.V1)
 		for i < len(b) {
-			if b[i] != target || (info.IncludeNL && b[i] == '\n') {
+			if b[i] < low || b[i] > high || (info.IncludeNL && b[i] == '\n') {
+				return i
+			}
+			i++
+		}
+		return -1
+	case CCWarpEqualSet:
+		for i < len(b) {
+			target := b[i]
+			for _, v := range info.Extra {
+				if byte(v) == target {
+					return i
+				}
+			}
+			if info.IncludeNL && target == '\n' {
+				return i
+			}
+			i++
+		}
+	case CCWarpNotEqualSet:
+		for i < len(b) {
+			target := b[i]
+			found := false
+			for _, v := range info.Extra {
+				if byte(v) == target {
+					found = true
+					break
+				}
+			}
+			if !found || (info.IncludeNL && target == '\n') {
 				return i
 			}
 			i++
