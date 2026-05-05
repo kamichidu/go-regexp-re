@@ -2,37 +2,33 @@ package regexp
 
 import (
 	"context"
-	"unsafe"
-
 	"github.com/kamichidu/go-regexp-re/internal/ir"
 	"github.com/kamichidu/go-regexp-re/syntax"
+	"unsafe"
 )
 
-// UnsupportedError represents a valid regular expression pattern that is not
-// currently supported by the DFA engine due to structural limitations.
-type UnsupportedError = syntax.UnsupportedError
-
 type Regexp struct {
-	expr           string
-	numSubexp      int
-	prefix         []byte
-	complete       bool
-	anchorStart    bool
-	hasAnchors     bool
-	prog           *syntax.Prog
-	dfa            *ir.DFA
-	literalMatcher *ir.LiteralMatcher
-	subexpNames    []string
-	strategy       matchStrategy
-	searchState    uint32
-	matchState     uint32
-	uIndices       []uint32
-	uPrioDeltas    []int32
-	searchWarp     ir.CCWarpInfo
-	mapAnchors     []ir.AnchorInfo
-	primaryAnchor  *ir.AnchorInfo
-	searchAny      string
-	lineBounded    bool
+	expr             string
+	numSubexp        int
+	prefix           []byte
+	complete         bool
+	anchorStart      bool
+	hasAnchors       bool
+	prog             *syntax.Prog
+	dfa              *ir.DFA
+	literalMatcher   *ir.LiteralMatcher
+	subexpNames      []string
+	strategy         matchStrategy
+	searchState      uint32
+	matchState       uint32
+	uIndices         []uint32
+	uPrioDeltas      []int32
+	searchWarp       ir.CCWarpInfo
+	mapAnchors       []ir.AnchorInfo
+	primaryAnchor    *ir.AnchorInfo
+	searchAny        string
+	lineBounded      bool
+	primaryAugmented *ir.AugmentedPattern
 }
 
 type CompileOptions struct {
@@ -135,60 +131,81 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 				res.mapAnchors[i].Class.IncludeNL = true
 			}
 		}
-		if len(res.mapAnchors) == 1 {
-			res.primaryAnchor = &res.mapAnchors[0]
-		} else if len(res.mapAnchors) > 1 {
-			var buf []byte
-			seen := make(map[byte]bool)
-			allCovered := true
-			for _, a := range res.mapAnchors {
-				if !a.HasClass {
-					if len(a.Anchor) > 0 {
-						b := a.Anchor[0]
-						if !seen[b] {
-							buf = append(buf, b)
-							seen[b] = true
-						}
-					} else {
-						allCovered = false
-						break
-					}
-				} else {
-					switch a.Class.Kernel {
-					case ir.CCWarpEqual:
-						b := byte(a.Class.V0)
-						if !seen[b] {
-							buf = append(buf, b)
-							seen[b] = true
-						}
-					case ir.CCWarpSingleRange:
-						low, high := byte(a.Class.V0), byte(a.Class.V1)
-						if high-low < 8 {
-							for b := low; b <= high; b++ {
-								if !seen[b] {
-									buf = append(buf, b)
-									seen[b] = true
-								}
-							}
-						} else {
-							allCovered = false
-						}
-					default:
-						allCovered = false
-					}
-					if !allCovered {
-						break
+		if len(res.mapAnchors) > 0 {
+			bestIdx := 0
+			bestScore := res.mapAnchors[0].Score()
+			for i := 1; i < len(res.mapAnchors); i++ {
+				score := res.mapAnchors[i].Score()
+				if score > bestScore {
+					bestScore = score
+					bestIdx = i
+				}
+			}
+			res.primaryAnchor = &res.mapAnchors[bestIdx]
+
+			// Pick best augmented pattern for the primary anchor
+			for i := range res.primaryAnchor.Augmented {
+				aug := &res.primaryAnchor.Augmented[i]
+				if !aug.IsStart && !aug.IsEnd {
+					if res.primaryAugmented == nil || len(aug.Pattern) > len(res.primaryAugmented.Pattern) {
+						res.primaryAugmented = aug
 					}
 				}
 			}
-			if allCovered && len(buf) > 0 {
-				if res.lineBounded {
-					if !seen['\n'] {
-						buf = append(buf, '\n')
-						seen['\n'] = true
+
+			if len(res.mapAnchors) > 1 {
+				var buf []byte
+				seen := make(map[byte]bool)
+				allCovered := true
+				for _, a := range res.mapAnchors {
+					if !a.HasClass {
+						if len(a.Anchor) > 0 {
+							b := a.Anchor[0]
+							if !seen[b] {
+								buf = append(buf, b)
+								seen[b] = true
+							}
+						} else {
+							allCovered = false
+							break
+						}
+					} else {
+						switch a.Class.Kernel {
+						case ir.CCWarpEqual:
+							b := byte(a.Class.V0)
+							if !seen[b] {
+								buf = append(buf, b)
+								seen[b] = true
+							}
+						case ir.CCWarpSingleRange:
+							low, high := byte(a.Class.V0), byte(a.Class.V1)
+							if high-low < 8 {
+								for b := low; b <= high; b++ {
+									if !seen[b] {
+										buf = append(buf, b)
+										seen[b] = true
+									}
+								}
+							} else {
+								allCovered = false
+							}
+						default:
+							allCovered = false
+						}
+						if !allCovered {
+							break
+						}
 					}
 				}
-				res.searchAny = string(buf)
+				if allCovered && len(buf) > 0 {
+					if res.lineBounded {
+						if !seen['\n'] {
+							buf = append(buf, '\n')
+							seen['\n'] = true
+						}
+					}
+					res.searchAny = string(buf)
+				}
 			}
 		}
 	}
@@ -266,6 +283,10 @@ func MustCompile(expr string) *Regexp {
 }
 
 func (re *Regexp) String() string { return re.expr }
+
+// UnsupportedError represents a valid regular expression pattern that is not
+// supported by the current DFA-based engine.
+type UnsupportedError = syntax.UnsupportedError
 
 func (re *Regexp) LiteralPrefix() (prefix string, complete bool) {
 	return string(re.prefix), re.complete

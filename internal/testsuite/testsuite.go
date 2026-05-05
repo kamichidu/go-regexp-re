@@ -909,10 +909,11 @@ func BenchmarkAnchors(b *testing.B) {
 	}
 
 	patterns := []string{
-		"^127.0.0.1",    // Line start
-		"HTTP/1.1$",     // Line end
-		"(?m)HTTP/1.1$", // Line end (multiline)
-		"\\bGET\\b",     // Word boundary
+		"^127.0.0.1",     // Line start
+		"(?m)^127.0.0.1", // Line start (multiline)
+		"HTTP/1.1$",      // Line end
+		"(?m)HTTP/1.1$",  // Line end (multiline)
+		"\\bGET\\b",      // Word boundary
 	}
 
 	runOnEngines(b, func(b *testing.B, engine Engine) {

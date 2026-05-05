@@ -91,91 +91,216 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 	bestStart, bestEnd, bestPriority := -1, -1, 1<<30-1
 
 	// Pass 1: High-Speed Discovery.
-	// We iterate through potential start positions using SearchWarp/SIMD skips.
 	for restartBase := 0; restartBase <= numBytes; restartBase++ {
+		if anchorStart && restartBase > 0 {
+			break
+		}
 		i := restartBase
 		state, prio := matchState, 0
 
-		// Pass 1.1: MAP (Multi-Point Anchor) Skip
+		// Pass 1.1: Unified Discovery (Iterator)
 		if !anchorStart && bestStart < 0 && (matchState&ir.AcceptingStateFlag) == 0 && i < numBytes {
-			if re.primaryAnchor != nil {
-				anchor := re.primaryAnchor
-				var pos int = -1
-				if !anchor.HasClass {
-					pos = bytes.Index(b[i:], anchor.Anchor)
-				} else {
-					if anchor.Class.IndexAny != "" {
-						pos = bytes.IndexAny(b[i:], anchor.Class.IndexAny)
-					} else {
-						pos = ir.IndexClass(anchor.Class, b[i:])
+			var pos int = -1
+
+			// 1. Special check for start-of-buffer augmented patterns
+			if i == 0 && in.AbsPos == 0 && re.primaryAnchor != nil {
+				for j := range re.primaryAnchor.Augmented {
+					aug := &re.primaryAnchor.Augmented[j]
+					if aug.IsStart && bytes.HasPrefix(b, aug.Pattern) {
+						pos = aug.Offset
+						break
 					}
 				}
-				if pos < 0 {
-					break
-				}
+			}
 
-				// 1.1 Distance to End (EOF) Pruning
-				if anchor.HasEndText {
-					absAnchorPos := i + pos
-					remaining := in.TotalBytes - (in.AbsPos + absAnchorPos)
-					if remaining < anchor.MinDistToEnd || remaining > anchor.MaxDistToEnd {
-						// This anchor cannot possibly lead to a match at EOF
-						i = i + pos + 1
-						restartBase = i - 1
-						continue
+			// 1.1 Special check for end-of-buffer augmented patterns
+			if pos < 0 && in.AbsPos+numBytes == in.TotalBytes && re.primaryAnchor != nil {
+				for j := range re.primaryAnchor.Augmented {
+					aug := &re.primaryAnchor.Augmented[j]
+					if aug.IsEnd && bytes.HasSuffix(b, aug.Pattern) {
+						pos = numBytes - len(aug.Pattern) + aug.Offset
+						break
 					}
 				}
+			}
 
-				// 1.2 Distance to Line End (\n or EOF) Pruning
-				if anchor.HasEndLine {
-					// Check for \n in the fixed range [min, max] from anchor start
-					startOffset := anchor.MinDistToLineEnd
-					endOffset := anchor.MaxDistToLineEnd
-
-					foundLineEnd := false
-					checkStart := i + pos + startOffset
-					checkEnd := i + pos + endOffset
-					if checkEnd > numBytes {
-						checkEnd = numBytes
-						foundLineEnd = true // Implicitly found EOF
+			if pos < 0 {
+				if re.primaryAugmented != nil {
+					// 2. Augmented Pattern Iterator (e.g., "\nRare", "Rare\n")
+					pos = bytes.Index(b[i:], re.primaryAugmented.Pattern)
+					if pos >= 0 {
+						pos += re.primaryAugmented.Offset
 					}
+				} else if re.primaryAnchor != nil {
+					anchor := re.primaryAnchor
 
-					if !foundLineEnd {
-						// Look for \n in the range
-						if bytes.IndexByte(b[checkStart:checkEnd+1], '\n') >= 0 {
-							foundLineEnd = true
+					// 2.1 Text-Boundary Optimization: If anchored to ^, only check start
+					if anchor.HasBeginText {
+						if in.AbsPos+i == 0 {
+							// Check if the anchor literal matches at the required distance
+							matched := false
+							start := anchor.Distance
+							end := start + len(anchor.Anchor)
+							if anchor.HasClass {
+								end = start + 1
+							}
+							if end <= numBytes {
+								if !anchor.HasClass {
+									if bytes.Equal(b[start:end], anchor.Anchor) {
+										matched = true
+									}
+								} else {
+									if ir.ValidateFixed(anchor.Class, b[start:end]) {
+										matched = true
+									}
+								}
+							}
+							if matched {
+								pos = anchor.Distance
+							} else {
+								// Impossible to match
+								return -1, -1, 1<<30 - 1
+							}
+						} else {
+							// Already past the absolute start
+							return -1, -1, 1<<30 - 1
 						}
-					}
+					} else if anchor.Type == ir.AnchorSuffix && (anchor.HasEndText || anchor.HasEndLine) {
+						// 3. Suffix-First Strategy: find the boundary (EOF or \n) first.
+						boundary := -1
+						isEOF := false
+						if anchor.HasEndText {
+							boundary = numBytes
+							isEOF = true
+						} else {
+							nextNL := bytes.IndexByte(b[i:], '\n')
+							if nextNL >= 0 {
+								boundary = i + nextNL
+							} else {
+								boundary = numBytes
+								isEOF = true
+							}
+						}
 
-					if !foundLineEnd {
-						i = i + pos + 1
-						restartBase = i - 1
-						continue
-					}
-				}
+						anchorLen := len(anchor.Anchor)
+						if anchor.HasClass {
+							anchorLen = 1
+						}
 
-				if re.lineBounded && anchor.Distance > 0 {
-					if b[i+pos] == '\n' {
-						restartBase = i + pos + 1
-						i = restartBase
-						continue
-					}
-
-					// For literals, Index doesn't check for \n, so we still need LastIndexByte.
-					if !anchor.HasClass {
-						lastNL := bytes.LastIndexByte(b[i:i+pos], '\n')
-						if lastNL >= 0 {
-							restartBase = i + lastNL + 1
-							i = restartBase
+						pos = (boundary - i) - anchorLen - anchor.MinDistToLineEnd
+						if pos < 0 {
+							if isEOF {
+								break
+							}
+							restartBase = boundary
 							continue
 						}
+
+						// Verify anchor content
+						matched := false
+						if !anchor.HasClass {
+							if bytes.Equal(b[i+pos:i+pos+anchorLen], anchor.Anchor) {
+								matched = true
+							}
+						} else {
+							if ir.ValidateFixed(anchor.Class, b[i+pos:i+pos+anchorLen]) {
+								matched = true
+							}
+						}
+
+						if !matched {
+							if isEOF {
+								break
+							}
+							restartBase = boundary
+							continue
+						}
+					} else {
+						// 4. Standard Pivot/Prefix Search
+						if !anchor.HasClass {
+							pos = bytes.Index(b[i:], anchor.Anchor)
+						} else {
+							if anchor.Class.IndexAny != "" {
+								pos = bytes.IndexAny(b[i:], anchor.Class.IndexAny)
+							} else {
+								pos = ir.IndexClass(anchor.Class, b[i:])
+							}
+						}
+					}
+				} else if len(re.prefix) > 0 {
+					pos = bytes.Index(b[i:], re.prefix)
+				} else if re.searchWarp.Kernel != ir.CCWarpNone {
+					if re.searchWarp.IndexAny != "" {
+						pos = bytes.IndexAny(b[i:], re.searchWarp.IndexAny)
+					} else {
+						pos = ir.IndexClass(re.searchWarp, b[i:])
+					}
+				}
+			}
+
+			if pos < 0 {
+				break
+			}
+
+			// Pass 1.2: Unified Propagator (Verification)
+			if re.primaryAnchor != nil {
+				anchor := re.primaryAnchor
+				absPos := i + pos
+
+				// 1. Boundary Constraints
+				if anchor.HasBeginText && (in.AbsPos+absPos != 0) {
+					// This should have been handled by the iterator optimization above,
+					// but keep as fallback for correctness.
+					return -1, -1, 1<<30 - 1
+				}
+				if anchor.HasBeginLine {
+					if absPos > 0 {
+						if b[absPos-1] != '\n' {
+							i = absPos + 1
+							restartBase = i - 1
+							continue
+						}
+					} else if in.AbsPos > 0 {
+						i = absPos + 1
+						restartBase = i - 1
+						continue
+					}
+				}
+				if anchor.HasEndText {
+					remaining := in.TotalBytes - (in.AbsPos + absPos)
+					if remaining < anchor.MinDistToEnd || remaining > anchor.MaxDistToEnd {
+						i = absPos + 1
+						restartBase = i - 1
+						continue
+					}
+				}
+				if anchor.HasEndLine {
+					startOffset := anchor.MinDistToLineEnd
+					endOffset := anchor.MaxDistToLineEnd
+					found := false
+					cStart := absPos + startOffset
+					cEnd := absPos + endOffset
+					if cEnd >= numBytes {
+						cEnd = numBytes - 1
+						found = true // EOF
+					}
+					if !found && cStart < numBytes {
+						if bytes.IndexByte(b[cStart:cEnd+1], '\n') >= 0 {
+							found = true
+						}
+					}
+					if !found {
+						i = absPos + 1
+						restartBase = i - 1
+						continue
 					}
 				}
 
+				// 2. Fixed Offset Alignment
 				if anchor.IsFixed {
-					candidateStart := i + pos - anchor.Distance
+					candidateStart := absPos - anchor.Distance
 					if candidateStart < i {
-						i = i + pos + 1
+						i = absPos + 1
 						restartBase = i - 1
 						continue
 					}
@@ -183,13 +308,13 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 						break
 					}
 
-					// Pass 0: Pre-validation
+					// 3. Multi-Point Constraint Verification
 					if anchor.HasConstraints {
-						if _, newStart, ok := anchor.Validate(b, i+pos, candidateStart); !ok {
+						if _, newStart, ok := anchor.Validate(b, absPos, candidateStart); !ok {
 							if newStart > candidateStart {
 								restartBase = newStart - 1
 							} else {
-								i = i + pos + 1
+								i = absPos + 1
 								restartBase = i - 1
 							}
 							continue
@@ -199,60 +324,11 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 					restartBase = candidateStart
 					i = restartBase
 				} else {
-					// Variable distance anchor: we must start from restartBase.
-					// Use Validate to prune invalid restartBase positions.
-					if _, newStart, ok := anchor.Validate(b, i+pos, restartBase); !ok {
-						if newStart > restartBase {
-							restartBase = newStart - 1
-						}
-						continue
-					}
+					// Pivot anchor without fixed distance (unlikely with our extraction)
+					restartBase = absPos
+					i = restartBase
 				}
-			} else if re.searchAny != "" {
-				pos := bytes.IndexAny(b[i:], re.searchAny)
-				if pos < 0 {
-					break
-				}
-
-				if re.lineBounded {
-					if b[i+pos] == '\n' {
-						restartBase = i + pos + 1
-						i = restartBase
-						continue
-					}
-				}
-
-				// Any match MUST contain one of these anchors at or after i+pos.
-				// But we don't know the distance, so we can't jump restartBase to pos.
-				// Just proceed to DFA.
-			} else if len(re.prefix) > 0 {
-				pos := bytes.Index(b[i:], re.prefix)
-				if pos < 0 {
-					break
-				}
-
-				if re.lineBounded {
-					lastNL := bytes.LastIndexByte(b[i:i+pos], '\n')
-					if lastNL >= 0 {
-						restartBase = i + lastNL + 1
-						i = restartBase
-						continue
-					}
-				}
-
-				restartBase += pos
-				i = restartBase
-			} else if re.searchWarp.Kernel != ir.CCWarpNone {
-				info := re.searchWarp
-				var pos int = -1
-				if info.IndexAny != "" {
-					pos = bytes.IndexAny(b[i:], info.IndexAny)
-				} else {
-					pos = ir.IndexClass(info, b[i:])
-				}
-				if pos < 0 {
-					break
-				}
+			} else {
 				restartBase += pos
 				i = restartBase
 			}
@@ -261,476 +337,67 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 		currentBestEnd := -1
 		currentBestPrio := 1<<30 - 1
 
-		// Pass 1.5: Leftmost-Longest Validation.
-		// From each candidate start, perform an anchored scan to find the best match.
 		if (state & ir.AcceptingStateFlag) != 0 {
 			sidx := state & ir.StateIDMask
 			req := guards[sidx]
 			if req == 0 || (ir.VerifyEnd(in, i, req) && ir.VerifyBegin(in, i, req) && ir.VerifyWord(in, i, req)) {
 				currentBestEnd = i
-				currentBestPrio = prio + d.MatchPriority(sidx)
-			}
-			if currentBestEnd >= 0 && d.IsBestMatch(state) && prio == 0 {
-				return restartBase, currentBestEnd, currentBestPrio
+				currentBestPrio = prio + int(d.MatchPriority(sidx))
 			}
 		}
 
 		for i < numBytes {
-			sidx := state & ir.StateIDMask
+			byteVal := b[i]
 
+			// CCWarp Optimization
 			if (state & ir.CCWarpFlag) != 0 {
-				info := ccWarps[sidx]
+				info := ccWarps[state&ir.StateIDMask]
 				skipped := ir.Warp(info, b[i:])
 				if skipped > 0 {
 					i += skipped
-					if (state & ir.AcceptingStateFlag) != 0 {
-						req := guards[sidx]
-						if req == 0 || (ir.VerifyEnd(in, i, req) && ir.VerifyBegin(in, i, req) && ir.VerifyWord(in, i, req)) {
-							currentBestEnd = i
-							currentBestPrio = prio + d.MatchPriority(sidx)
-						}
-					}
+					state &= ^ir.CCWarpFlag
 					continue
 				}
 			}
 
-			byteVal := b[i]
-			off := (int(sidx) << 8) | int(byteVal)
+			off := (int(state&ir.StateIDMask) << 8) | int(byteVal)
 			rawNext := trans[off]
 
 			if rawNext == ir.InvalidState {
 				break
 			}
 
-			if (rawNext & ir.AnchorVerifyFlag) != 0 {
-				req := syntax.EmptyOp((rawNext & ir.AnchorMask) >> 22)
-				if !(ir.VerifyEnd(in, i, req) && ir.VerifyBegin(in, i, req) && ir.VerifyWord(in, i, req)) {
-					break
-				}
-			}
-
-			if (rawNext&ir.TaggedStateFlag) != 0 && off < len(uIndices) {
+			if (rawNext & ir.TaggedStateFlag) != 0 {
 				uIdx := uIndices[off]
-				if int(uIdx) < len(uPrioDeltas) {
-					prio += int(uPrioDeltas[uIdx])
-				}
+				prio += int(uPrioDeltas[uIdx])
 			}
 
 			state = rawNext
-			i += 1
-			if byteVal >= 0x80 && (rawNext&ir.WarpStateFlag) != 0 {
-				i += ir.GetTrailingByteCount(byteVal)
-			}
+			i++
 
 			if (state & ir.AcceptingStateFlag) != 0 {
-				sidx = state & ir.StateIDMask
+				sidx := state & ir.StateIDMask
 				req := guards[sidx]
 				if req == 0 || (ir.VerifyEnd(in, i, req) && ir.VerifyBegin(in, i, req) && ir.VerifyWord(in, i, req)) {
-					p := prio + d.MatchPriority(sidx)
-					if p <= currentBestPrio {
-						currentBestEnd = i
-						currentBestPrio = p
-					}
-				}
-				if currentBestEnd >= 0 && d.IsBestMatch(state) && prio == 0 {
-					// Unbeatable match found
-					return restartBase, currentBestEnd, currentBestPrio
+					currentBestEnd = i
+					currentBestPrio = prio + int(d.MatchPriority(sidx))
 				}
 			}
 		}
 
 		if currentBestEnd >= 0 {
-			if currentBestPrio < bestPriority {
+			if restartBase < bestStart || (restartBase == bestStart && currentBestEnd > bestEnd) || (restartBase == bestStart && currentBestEnd == bestEnd && currentBestPrio < bestPriority) {
 				bestStart, bestEnd, bestPriority = restartBase, currentBestEnd, currentBestPrio
 			}
-			// Since we found a match at restartBase, any match starting at restartBase+1
-			// would be lower priority (Go's leftmost-first).
 			return bestStart, bestEnd, bestPriority
 		}
-		if anchorStart {
-			break
-		}
 	}
+
 	return bestStart, bestEnd, bestPriority
 }
 
 func fastMatchExecLoop(re *Regexp, in *ir.Input) (int, int, int) {
-	d := re.dfa
-	trans := d.Transitions()
-	guards := d.AcceptingGuards()
-	b := in.B
-	numBytes := len(b)
-	matchState := re.matchState
-	anchorStart := re.anchorStart
-
-	bestStart, bestEnd, bestPriority := -1, -1, 1<<30-1
-	if len(trans) > 0 {
-		_ = trans[len(trans)-1]
-	}
-	if len(guards) > 0 {
-		_ = guards[len(guards)-1]
-	}
-
-	ccWarps := d.CCWarpTable()
-
-	for restartBase := 0; restartBase <= numBytes; restartBase++ {
-		i := restartBase
-		state := matchState
-
-		// 1. MAP (Multi-Point Anchor) Skip
-		if !anchorStart && bestStart < 0 && (matchState&ir.AcceptingStateFlag) == 0 && i < numBytes {
-			if re.primaryAnchor != nil {
-				anchor := re.primaryAnchor
-				var pos int = -1
-				if !anchor.HasClass {
-					pos = bytes.Index(b[i:], anchor.Anchor)
-				} else {
-					if anchor.Class.IndexAny != "" {
-						pos = bytes.IndexAny(b[i:], anchor.Class.IndexAny)
-					} else {
-						pos = ir.IndexClass(anchor.Class, b[i:])
-					}
-				}
-				if pos < 0 {
-					break
-				}
-
-				// 1.1 Distance to End (EOF) Pruning
-				if anchor.HasEndText {
-					absAnchorPos := i + pos
-					remaining := in.TotalBytes - (in.AbsPos + absAnchorPos)
-					if remaining < anchor.MinDistToEnd || remaining > anchor.MaxDistToEnd {
-						// This anchor cannot possibly lead to a match at EOF
-						i = i + pos + 1
-						restartBase = i - 1
-						continue
-					}
-				}
-
-				// 1.2 Distance to Line End (\n or EOF) Pruning
-				if anchor.HasEndLine {
-					// Check for \n in the fixed range [min, max] from anchor start
-					startOffset := anchor.MinDistToLineEnd
-					endOffset := anchor.MaxDistToLineEnd
-
-					foundLineEnd := false
-					checkStart := i + pos + startOffset
-					checkEnd := i + pos + endOffset
-					if checkEnd > numBytes {
-						checkEnd = numBytes
-						foundLineEnd = true // Implicitly found EOF
-					}
-
-					if !foundLineEnd {
-						// Look for \n in the range
-						if bytes.IndexByte(b[checkStart:checkEnd+1], '\n') >= 0 {
-							foundLineEnd = true
-						}
-					}
-
-					if !foundLineEnd {
-						i = i + pos + 1
-						restartBase = i - 1
-						continue
-					}
-				}
-
-				if re.lineBounded && anchor.Distance > 0 {
-					if b[i+pos] == '\n' {
-						restartBase = i + pos + 1
-						i = restartBase
-						continue
-					}
-
-					// For literals, Index doesn't check for \n, so we still need LastIndexByte.
-					if !anchor.HasClass {
-						lastNL := bytes.LastIndexByte(b[i:i+pos], '\n')
-						if lastNL >= 0 {
-							restartBase = i + lastNL + 1
-							i = restartBase
-							continue
-						}
-					}
-				}
-
-				if anchor.IsFixed {
-					candidateStart := i + pos - anchor.Distance
-					if candidateStart < i {
-						i = i + pos + 1
-						restartBase = i - 1
-						continue
-					}
-					if candidateStart >= numBytes {
-						break
-					}
-
-					// Pass 0: Pre-validation
-					if anchor.HasConstraints {
-						if _, newStart, ok := anchor.Validate(b, i+pos, candidateStart); !ok {
-							if newStart > candidateStart {
-								restartBase = newStart - 1
-							} else {
-								i = i + pos + 1
-								restartBase = i - 1
-							}
-							continue
-						}
-					}
-
-					restartBase = candidateStart
-					i = restartBase
-				} else {
-					// Variable distance anchor: we must start from restartBase.
-					// Use Validate to prune invalid restartBase positions.
-					if _, newStart, ok := anchor.Validate(b, i+pos, restartBase); !ok {
-						if newStart > restartBase {
-							restartBase = newStart - 1
-						}
-						continue
-					}
-				}
-			} else if re.searchAny != "" {
-				pos := bytes.IndexAny(b[i:], re.searchAny)
-				if pos < 0 {
-					break
-				}
-
-				if re.lineBounded {
-					if b[i+pos] == '\n' {
-						restartBase = i + pos + 1
-						i = restartBase
-						continue
-					}
-				}
-			} else if len(re.prefix) > 0 {
-				pos := bytes.Index(b[i:], re.prefix)
-				if pos < 0 {
-					break
-				}
-
-				if re.lineBounded {
-					lastNL := bytes.LastIndexByte(b[i:i+pos], '\n')
-					if lastNL >= 0 {
-						restartBase = i + lastNL + 1
-						i = restartBase
-						continue
-					}
-				}
-
-				restartBase += pos
-				i = restartBase
-			} else if re.searchWarp.Kernel != ir.CCWarpNone {
-				info := re.searchWarp
-				var pos int = -1
-				if info.IndexAny != "" {
-					pos = bytes.IndexAny(b[i:], info.IndexAny)
-				} else {
-					pos = ir.IndexClass(info, b[i:])
-				}
-				if pos < 0 {
-					break
-				}
-				restartBase += pos
-				i = restartBase
-			}
-		}
-
-		currentBestEnd := -1
-
-		if (state & ir.AcceptingStateFlag) != 0 {
-			sidx := state & ir.StateIDMask
-			req := guards[sidx]
-			if req == 0 || (ir.VerifyEnd(in, i, req) && ir.VerifyBegin(in, i, req) && ir.VerifyWord(in, i, req)) {
-				currentBestEnd = i
-			}
-		}
-
-		for i < numBytes {
-			sidx := state & ir.StateIDMask
-
-			if (state & ir.CCWarpFlag) != 0 {
-				info := ccWarps[sidx]
-				skipped := ir.Warp(info, b[i:])
-				if skipped > 0 {
-					i += skipped
-					if (state & ir.AcceptingStateFlag) != 0 {
-						req := guards[sidx]
-						if req == 0 || (ir.VerifyEnd(in, i, req) && ir.VerifyBegin(in, i, req) && ir.VerifyWord(in, i, req)) {
-							currentBestEnd = i
-						}
-					}
-					continue
-				}
-			}
-
-			byteVal := b[i]
-			off := (int(sidx) << 8) | int(byteVal)
-			rawNext := trans[off]
-
-			if rawNext == ir.InvalidState {
-				break
-			}
-
-			if (rawNext & ir.AnchorVerifyFlag) != 0 {
-				req := syntax.EmptyOp((rawNext & ir.AnchorMask) >> 22)
-				if !(ir.VerifyEnd(in, i, req) && ir.VerifyBegin(in, i, req) && ir.VerifyWord(in, i, req)) {
-					break
-				}
-			}
-
-			state = rawNext
-			i += 1
-			if byteVal >= 0x80 && (rawNext&ir.WarpStateFlag) != 0 {
-				i += ir.GetTrailingByteCount(byteVal)
-			}
-
-			if (state & ir.AcceptingStateFlag) != 0 {
-				sidx = state & ir.StateIDMask
-				req := guards[sidx]
-				if req == 0 || (ir.VerifyEnd(in, i, req) && ir.VerifyBegin(in, i, req) && ir.VerifyWord(in, i, req)) {
-					currentBestEnd = i
-				}
-			}
-		}
-
-		if currentBestEnd >= 0 {
-			return restartBase, currentBestEnd, 0
-		}
-		if anchorStart {
-			break
-		}
-	}
-	return bestStart, bestEnd, bestPriority
-}
-func extendedMatchExecLoop(re *Regexp, in ir.Input) (int, int, int) {
-	d := re.dfa
-	trans := d.Transitions()
-	guards := d.AcceptingGuards()
-	uIndices := re.uIndices
-	uPrioDeltas := re.uPrioDeltas
-	b := in.B
-	numBytes := len(b)
-	matchState := re.matchState
-	anchorStart := re.anchorStart
-
-	bestStart, bestEnd, bestPriority := -1, -1, 1<<60-1
-	if len(trans) > 0 {
-		_ = trans[len(trans)-1]
-	}
-	if len(guards) > 0 {
-		_ = guards[len(guards)-1]
-	}
-
-	ccWarps := d.CCWarpTable()
-
-	for restartBase := 0; restartBase <= numBytes; restartBase++ {
-		i := restartBase
-		state, prio := matchState, 0
-
-		if !anchorStart && bestStart < 0 && (matchState&ir.AcceptingStateFlag) == 0 && i < numBytes {
-			if len(re.prefix) > 0 {
-				pos := bytes.Index(b[i:], re.prefix)
-				if pos < 0 {
-					break
-				}
-				restartBase += pos
-				i = restartBase
-			} else if re.searchWarp.Kernel != ir.CCWarpNone {
-				info := re.searchWarp
-				var pos int = -1
-				if info.IndexAny != "" {
-					pos = bytes.IndexAny(b[i:], info.IndexAny)
-				} else {
-					pos = ir.IndexClass(info, b[i:])
-				}
-				if pos < 0 {
-					break
-				}
-				restartBase += pos
-				i = restartBase
-			}
-		}
-
-		currentBestEnd := -1
-		currentBestPrio := int64(1<<60 - 1)
-
-		if (state & ir.AcceptingStateFlag) != 0 {
-			sidx := state & ir.StateIDMask
-			req := guards[sidx]
-			if req == 0 || (ir.VerifyEnd(&in, i, req) && ir.VerifyBegin(&in, i, req) && ir.VerifyWord(&in, i, req)) {
-				currentBestEnd = i
-				currentBestPrio = int64(prio) + int64(d.MatchPriority(sidx))
-			}
-		}
-
-		for i < numBytes {
-			sidx := state & ir.StateIDMask
-
-			if (state & ir.CCWarpFlag) != 0 {
-				info := ccWarps[sidx]
-				skipped := ir.Warp(info, b[i:])
-				if skipped > 0 {
-					i += skipped
-					if (state & ir.AcceptingStateFlag) != 0 {
-						req := guards[sidx]
-						if req == 0 || (ir.VerifyEnd(&in, i, req) && ir.VerifyBegin(&in, i, req) && ir.VerifyWord(&in, i, req)) {
-							currentBestEnd = i
-							currentBestPrio = int64(prio) + int64(d.MatchPriority(sidx))
-						}
-					}
-					continue
-				}
-			}
-
-			byteVal := b[i]
-			off := (int(sidx) << 8) | int(byteVal)
-			rawNext := trans[off]
-
-			if rawNext == ir.InvalidState {
-				break
-			}
-
-			if (rawNext & ir.AnchorVerifyFlag) != 0 {
-				req := syntax.EmptyOp((rawNext & ir.AnchorMask) >> 22)
-				if !(ir.VerifyEnd(&in, i, req) && ir.VerifyBegin(&in, i, req) && ir.VerifyWord(&in, i, req)) {
-					break
-				}
-			}
-
-			if (rawNext&ir.TaggedStateFlag) != 0 && off < len(uIndices) {
-				uIdx := uIndices[off]
-				if int(uIdx) < len(uPrioDeltas) {
-					prio += int(uPrioDeltas[uIdx])
-				}
-			}
-
-			state = rawNext
-			i += 1
-			if byteVal >= 0x80 && (rawNext&ir.WarpStateFlag) != 0 {
-				i += ir.GetTrailingByteCount(byteVal)
-			}
-
-			if (state & ir.AcceptingStateFlag) != 0 {
-				sidx = state & ir.StateIDMask
-				req := guards[sidx]
-				if req == 0 || (ir.VerifyEnd(&in, i, req) && ir.VerifyBegin(&in, i, req) && ir.VerifyWord(&in, i, req)) {
-					p := int64(prio) + int64(d.MatchPriority(sidx))
-					if p <= currentBestPrio {
-						currentBestEnd = i
-						currentBestPrio = p
-					}
-				}
-			}
-		}
-
-		if currentBestEnd >= 0 {
-			return restartBase, currentBestEnd, int(currentBestPrio)
-		}
-		if anchorStart {
-			break
-		}
-	}
-	return bestStart, bestEnd, bestPriority
+	return fastDiscoveryLoop(re, in)
 }
 
 func extendedSubmatchExecLoop(re *Regexp, in ir.Input, mc *matchContext) (int, int, int) {
@@ -744,7 +411,7 @@ func extendedSubmatchExecLoop(re *Regexp, in ir.Input, mc *matchContext) (int, i
 	matchState := re.matchState
 	anchorStart := re.anchorStart
 
-	bestStart, bestEnd, bestPriority := -1, -1, 1<<60-1
+	bestStart, bestEnd, bestPriority := -1, -1, int64(1<<60-1)
 	if len(trans) > 0 {
 		_ = trans[len(trans)-1]
 	}
@@ -758,6 +425,7 @@ func extendedSubmatchExecLoop(re *Regexp, in ir.Input, mc *matchContext) (int, i
 		i := restartBase
 		state, prio := matchState, 0
 
+		// Simple prefix/warp skip for extended loop (can be improved similarly to fastDiscoveryLoop)
 		if !anchorStart && bestStart < 0 && (matchState&ir.AcceptingStateFlag) == 0 && i < numBytes {
 			if len(re.prefix) > 0 {
 				pos := bytes.Index(b[i:], re.prefix)
@@ -866,13 +534,12 @@ func extendedSubmatchExecLoop(re *Regexp, in ir.Input, mc *matchContext) (int, i
 		}
 
 		if currentBestEnd >= 0 {
-			// TRICKY: The history must be correct for currentBestEnd.
-			// Since we record BEFORE byte consumption, history is always fine.
 			return restartBase, currentBestEnd, int(currentBestPrio)
 		}
 		if anchorStart {
 			break
 		}
 	}
-	return bestStart, bestEnd, bestPriority
+
+	return bestStart, bestEnd, int(bestPriority)
 }
