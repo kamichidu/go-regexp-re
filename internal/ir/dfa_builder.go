@@ -169,7 +169,7 @@ func NewDFAWithMemoryLimit(ctx context.Context, re *syntax.Regexp, prog *syntax.
 	startRes := getCachedClosure([]NFAPath{{ID: uint32(prog.Start), Priority: 0}})
 	d.matchState = addDfaState(startRes.NextClosure, startRes.Updates, startRes.MatchAnchors, false)
 	d.startUpdates = startRes.Updates
-	d.searchState = addDfaState(startRes.NextClosure, startRes.Updates, startRes.MatchAnchors, false)
+	d.searchState = addDfaState(startRes.NextClosure, startRes.Updates, startRes.MatchAnchors, true)
 
 	d.recapTables = []GroupRecapTable{{Transitions: make([][]RecapEntry, 0, 1024)}}
 
@@ -189,6 +189,7 @@ func NewDFAWithMemoryLimit(ctx context.Context, re *syntax.Regexp, prog *syntax.
 
 			nextPaths := make([]NFAPath, 0, len(closure))
 			var nextAnchors syntax.EmptyOp
+			minP := int32(1<<30 - 1)
 			for _, p := range closure {
 				t := instructionTries[p.ID]
 				if t == nil {
@@ -202,7 +203,12 @@ func NewDFAWithMemoryLimit(ctx context.Context, re *syntax.Regexp, prog *syntax.
 							nextNodeID = 0
 						}
 						nextPaths = append(nextPaths, NFAPath{ID: nextID, NodeID: nextNodeID, Priority: p.Priority, Tags: p.Tags})
-						nextAnchors |= p.Anchors
+						if p.Priority < minP {
+							minP = p.Priority
+							nextAnchors = p.Anchors
+						} else if p.Priority == minP {
+							nextAnchors |= p.Anchors
+						}
 						break
 					}
 				}
@@ -418,6 +424,7 @@ func epsilonClosureWithAnchorWall(prog *syntax.Prog, paths []NFAPath) ClosureRes
 	}
 	resMap := make(map[stateKey]NFAPath)
 	var matchAnchors syntax.EmptyOp
+	minMatchPrio := int32(1<<30 - 1)
 	for len(stack) > 0 {
 		ph := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
@@ -443,7 +450,12 @@ func epsilonClosureWithAnchorWall(prog *syntax.Prog, paths []NFAPath) ClosureRes
 				resMap[rk] = existing
 			}
 			if p.NodeID == 0 && inst.Op == syntax.InstMatch {
-				matchAnchors |= p.Anchors
+				if p.Priority < minMatchPrio {
+					minMatchPrio = p.Priority
+					matchAnchors = p.Anchors
+				} else if p.Priority == minMatchPrio {
+					matchAnchors |= p.Anchors
+				}
 			}
 			continue
 		}

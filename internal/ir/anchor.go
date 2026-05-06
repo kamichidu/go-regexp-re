@@ -246,12 +246,12 @@ func extractAnchors(re *syntax.Regexp, offset int, mandatory bool, atStart bool,
 			}
 
 			d := minLength(sub)
-			maxD := maxLength(sub)
-			if d > 0 || maxD > 0 || maxD == -1 {
+			if d > 0 {
 				currentHasBeginText = false
 				currentHasBeginLine = false
 			}
 
+			maxD := maxLength(sub)
 			if d != maxD {
 				currentIsFixed = false
 			}
@@ -467,9 +467,26 @@ func extractDistToLineEnd(re *syntax.Regexp, anchor *AnchorInfo) (int, int, bool
 	for i, sub := range re.Sub {
 		if currentOffset == anchor.Distance {
 			if anchor.HasClass {
-				if info, ok := toCCWarp(sub); ok && info.Kernel == anchor.Class.Kernel && info.V0 == anchor.Class.V0 && info.V1 == anchor.Class.V1 {
-					anchorIdx = i
-					break
+				if info, ok := toCCWarp(sub); ok && info.Kernel == anchor.Class.Kernel {
+					match := true
+					if info.Kernel == CCWarpEqualSet || info.Kernel == CCWarpNotEqualSet {
+						if len(info.Extra) != len(anchor.Class.Extra) {
+							match = false
+						} else {
+							for k := range info.Extra {
+								if info.Extra[k] != anchor.Class.Extra[k] {
+									match = false
+									break
+								}
+							}
+						}
+					} else {
+						match = info.V0 == anchor.Class.V0 && info.V1 == anchor.Class.V1
+					}
+					if match {
+						anchorIdx = i
+						break
+					}
 				}
 			} else {
 				if lit, ok := isLiteral(sub); ok && string(lit) == string(anchor.Anchor) {
@@ -540,9 +557,26 @@ func extractDistToEnd(re *syntax.Regexp, anchor *AnchorInfo) (int, int, bool) {
 	for i, sub := range re.Sub {
 		if currentOffset == anchor.Distance {
 			if anchor.HasClass {
-				if info, ok := toCCWarp(sub); ok && info.Kernel == anchor.Class.Kernel && info.V0 == anchor.Class.V0 && info.V1 == anchor.Class.V1 {
-					anchorIdx = i
-					break
+				if info, ok := toCCWarp(sub); ok && info.Kernel == anchor.Class.Kernel {
+					match := true
+					if info.Kernel == CCWarpEqualSet || info.Kernel == CCWarpNotEqualSet {
+						if len(info.Extra) != len(anchor.Class.Extra) {
+							match = false
+						} else {
+							for k := range info.Extra {
+								if info.Extra[k] != anchor.Class.Extra[k] {
+									match = false
+									break
+								}
+							}
+						}
+					} else {
+						match = info.V0 == anchor.Class.V0 && info.V1 == anchor.Class.V1
+					}
+					if match {
+						anchorIdx = i
+						break
+					}
 				}
 			} else {
 				if lit, ok := isLiteral(sub); ok && string(lit) == string(anchor.Anchor) {
@@ -602,9 +636,26 @@ func extractConstraints(re *syntax.Regexp, anchor *AnchorInfo) {
 	for i, sub := range re.Sub {
 		if currentOffset == anchor.Distance {
 			if anchor.HasClass {
-				if info, ok := toCCWarp(sub); ok && info.Kernel == anchor.Class.Kernel && info.V0 == anchor.Class.V0 && info.V1 == anchor.Class.V1 {
-					anchorIdx = i
-					break
+				if info, ok := toCCWarp(sub); ok && info.Kernel == anchor.Class.Kernel {
+					match := true
+					if info.Kernel == CCWarpEqualSet || info.Kernel == CCWarpNotEqualSet {
+						if len(info.Extra) != len(anchor.Class.Extra) {
+							match = false
+						} else {
+							for k := range info.Extra {
+								if info.Extra[k] != anchor.Class.Extra[k] {
+									match = false
+									break
+								}
+							}
+						}
+					} else {
+						match = info.V0 == anchor.Class.V0 && info.V1 == anchor.Class.V1
+					}
+					if match {
+						anchorIdx = i
+						break
+					}
 				}
 			} else {
 				if lit, ok := isLiteral(sub); ok && string(lit) == string(anchor.Anchor) {
@@ -759,8 +810,11 @@ func toCCWarp(re *syntax.Regexp) (CCWarpInfo, bool) {
 		}
 		var extra []uint64
 		for i := 0; i+1 < len(re.Rune); i += 2 {
-			for r := re.Rune[i]; r <= re.Rune[i+1] && r < 0x80; r++ {
+			for r := re.Rune[i]; r <= re.Rune[i+1]; r++ {
 				extra = append(extra, uint64(r))
+				if len(extra) > 1000 {
+					return CCWarpInfo{}, false // Too large
+				}
 			}
 		}
 		if len(extra) > 0 {
@@ -776,6 +830,50 @@ func toCCWarp(re *syntax.Regexp) (CCWarpInfo, bool) {
 		}
 	case syntax.OpCapture:
 		return toCCWarp(re.Sub[0])
+	case syntax.OpAlternate:
+		var combined []uint64
+		seen := make(map[uint64]bool)
+		allSimple := true
+		for _, sub := range re.Sub {
+			if sub.Op == syntax.OpEmptyMatch || sub.Op == syntax.OpBeginText || sub.Op == syntax.OpBeginLine || sub.Op == syntax.OpEndText || sub.Op == syntax.OpEndLine {
+				continue
+			}
+			info, ok := toCCWarp(sub)
+			if !ok {
+				allSimple = false
+				break
+			}
+			switch info.Kernel {
+			case CCWarpEqual:
+				if !seen[info.V0] {
+					combined = append(combined, info.V0)
+					seen[info.V0] = true
+				}
+			case CCWarpEqualSet:
+				for _, v := range info.Extra {
+					if !seen[v] {
+						combined = append(combined, v)
+						seen[v] = true
+					}
+				}
+			case CCWarpSingleRange:
+				for v := info.V0; v <= info.V1 && v < 0x80; v++ {
+					if !seen[v] {
+						combined = append(combined, v)
+						seen[v] = true
+					}
+				}
+			default:
+				allSimple = false
+				break
+			}
+			if !allSimple {
+				break
+			}
+		}
+		if allSimple && len(combined) > 0 {
+			return CCWarpInfo{Kernel: CCWarpEqualSet, Extra: combined}, true
+		}
 	}
 	return CCWarpInfo{}, false
 }
@@ -865,16 +963,30 @@ func findCoveringSuffixAnchors(re *syntax.Regexp, distFromEnd int, atEnd bool, h
 		}
 	case syntax.OpAlternate:
 		var all []AnchorInfo
+		commonIsFixed := true
+		commonDist := -1
 		for _, sub := range re.Sub {
 			subAnchors := findCoveringSuffixAnchors(sub, distFromEnd, atEnd, hasEndText, hasEndLine)
 			if len(subAnchors) == 0 {
 				return nil
 			}
-			for i := range subAnchors {
-				subAnchors[i].IsFixed = false
-				subAnchors[i].Mandatory = false
+			for j := range subAnchors {
+				if commonDist < 0 {
+					commonDist = subAnchors[j].Distance
+				} else if commonDist != subAnchors[j].Distance {
+					commonIsFixed = false
+				}
+				if !subAnchors[j].IsFixed {
+					commonIsFixed = false
+				}
+				subAnchors[j].Mandatory = false
 			}
 			all = append(all, subAnchors...)
+		}
+		if !commonIsFixed {
+			for i := range all {
+				all[i].IsFixed = false
+			}
 		}
 		return all
 	}
@@ -944,12 +1056,12 @@ func findCoveringAnchors(re *syntax.Regexp, offset int, atStart bool, hasBeginTe
 			}
 
 			d := minLength(sub)
-			maxD := maxLength(sub)
-			if d > 0 || maxD > 0 || maxD == -1 {
+			if d > 0 {
 				currentHasBeginText = false
 				currentHasBeginLine = false
 			}
 
+			maxD := maxLength(sub)
 			if d != maxD {
 				currentIsFixed = false
 			}
@@ -967,16 +1079,30 @@ func findCoveringAnchors(re *syntax.Regexp, offset int, atStart bool, hasBeginTe
 		}
 	case syntax.OpAlternate:
 		var all []AnchorInfo
+		commonIsFixed := true
+		commonDist := -1
 		for _, sub := range re.Sub {
 			subAnchors := findCoveringAnchors(sub, offset, atStart, hasBeginText, hasBeginLine)
 			if len(subAnchors) == 0 {
 				return nil
 			}
-			for i := range subAnchors {
-				subAnchors[i].IsFixed = false
-				subAnchors[i].Mandatory = false
+			for j := range subAnchors {
+				if commonDist < 0 {
+					commonDist = subAnchors[j].Distance
+				} else if commonDist != subAnchors[j].Distance {
+					commonIsFixed = false
+				}
+				if !subAnchors[j].IsFixed {
+					commonIsFixed = false
+				}
+				subAnchors[j].Mandatory = false
 			}
 			all = append(all, subAnchors...)
+		}
+		if !commonIsFixed {
+			for i := range all {
+				all[i].IsFixed = false
+			}
 		}
 		return all
 	}

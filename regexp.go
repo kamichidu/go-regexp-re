@@ -159,7 +159,7 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 						}
 					case ir.CCWarpSingleRange:
 						low, high := byte(a.Class.V0), byte(a.Class.V1)
-						if high-low < 16 {
+						if high-low < 255 {
 							for b := low; b <= high; b++ {
 								if !seen[b] {
 									buf = append(buf, b)
@@ -170,7 +170,7 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 							allCovered = false
 						}
 					case ir.CCWarpEqualSet:
-						if len(a.Class.Extra) < 16 {
+						if len(a.Class.Extra) < 256 {
 							for _, v := range a.Class.Extra {
 								b := byte(v)
 								if !seen[b] {

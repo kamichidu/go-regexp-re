@@ -168,7 +168,8 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 					if len(re.searchAny) == 1 {
 						pos = bytes.IndexByte(b[i:], re.searchAny[0])
 					} else {
-						// For small sets of raw bytes, IndexByte loop is safer than IndexAny (which uses UTF-8)
+						// For sets, use a loop over bytes.IndexByte to find the EARLIEST occurrence.
+						// We don't use IndexAny because it interprets the input as UTF-8.
 						for _, target := range re.searchAny {
 							p := bytes.IndexByte(b[i:], target)
 							if p >= 0 && (pos < 0 || p < pos) {
@@ -180,12 +181,15 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 					if pos >= 0 {
 						trial := i + pos
 						fb := b[trial]
-						for k := range re.mapAnchors {
-							a := &re.mapAnchors[k]
-							if (!a.HasClass && len(a.Anchor) > 0 && a.Anchor[0] == fb && bytes.HasPrefix(b[trial:], a.Anchor)) || (a.HasClass && ir.ValidateFixed(a.Class, b[trial:trial+1])) {
-								candidatePos = trial
-								candidateAnchor = a
-								break
+						// Fast verification using searchMask
+						if (re.searchMask[fb/64] & (1 << (fb % 64))) != 0 {
+							for k := range re.mapAnchors {
+								a := &re.mapAnchors[k]
+								if (!a.HasClass && len(a.Anchor) > 0 && a.Anchor[0] == fb && bytes.HasPrefix(b[trial:], a.Anchor)) || (a.HasClass && ir.ValidateFixed(a.Class, b[trial:trial+1])) {
+									candidatePos = trial
+									candidateAnchor = a
+									break
+								}
 							}
 						}
 						if candidatePos < 0 {
@@ -219,13 +223,16 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 		// --- Phase 2: Gaze (Verify O(1) constraints) ---
 		if bestAnchor != nil {
 			rejected := false
-			if bestAnchor.HasBeginText && (in.AbsPos+absPos != 0) {
+			totalAbsPos := in.AbsPos + absPos
+			if bestAnchor.HasBeginText && (totalAbsPos != 0) {
 				rejected = true
 			}
-			if !rejected && bestAnchor.HasBeginLine && re.primaryAugmented == nil && absPos > 0 && b[absPos-1] != '\n' {
-				rejected = true
+			if !rejected && bestAnchor.HasBeginLine && re.primaryAugmented == nil {
+				if totalAbsPos > 0 && in.OriginalB[totalAbsPos-1] != '\n' {
+					rejected = true
+				}
 			}
-			if !rejected && bestAnchor.HasEndText && (in.TotalBytes-(in.AbsPos+absPos) < bestAnchor.MinDistToEnd) {
+			if !rejected && bestAnchor.HasEndText && (in.TotalBytes-totalAbsPos < bestAnchor.MinDistToEnd) {
 				rejected = true
 			}
 			if !rejected {
