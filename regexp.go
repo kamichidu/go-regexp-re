@@ -238,6 +238,8 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 		res.strategy = opts.forceStrategy
 	} else if res.literalMatcher != nil {
 		res.strategy = strategyLiteral
+	} else if res.hasAnchors || res.numSubexp > 0 {
+		res.strategy = strategyExtended
 	} else if res.dfa != nil {
 		res.strategy = strategyFast
 	} else {
