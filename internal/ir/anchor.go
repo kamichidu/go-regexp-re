@@ -210,7 +210,11 @@ func extractAnchors(re *syntax.Regexp, offset int, mandatory bool, atStart bool,
 			}
 		}
 	case syntax.OpRepeat, syntax.OpQuest, syntax.OpStar, syntax.OpPlus:
-		anchors = append(anchors, extractAnchors(re.Sub[0], offset, false, atStart, atEnd, hasBeginText, hasBeginLine)...)
+		m := false
+		if re.Op == syntax.OpPlus || (re.Op == syntax.OpRepeat && re.Min > 0) {
+			m = mandatory
+		}
+		anchors = append(anchors, extractAnchors(re.Sub[0], offset, m, atStart, atEnd, hasBeginText, hasBeginLine)...)
 	case syntax.OpCapture:
 		anchors = append(anchors, extractAnchors(re.Sub[0], offset, mandatory, atStart, atEnd, hasBeginText, hasBeginLine)...)
 	case syntax.OpConcat:
@@ -234,15 +238,20 @@ func extractAnchors(re *syntax.Regexp, offset int, mandatory bool, atStart bool,
 			}
 			anchors = append(anchors, subAnchors...)
 
-			if sub.Op == syntax.OpBeginText && currentAtStart {
+			if sub.Op == syntax.OpBeginText {
 				currentHasBeginText = true
 			}
-			if sub.Op == syntax.OpBeginLine && currentAtStart {
+			if sub.Op == syntax.OpBeginLine {
 				currentHasBeginLine = true
 			}
 
 			d := minLength(sub)
 			maxD := maxLength(sub)
+			if d > 0 || maxD > 0 || maxD == -1 {
+				currentHasBeginText = false
+				currentHasBeginLine = false
+			}
+
 			if d != maxD {
 				currentIsFixed = false
 			}
@@ -892,6 +901,22 @@ func findCoveringAnchors(re *syntax.Regexp, offset int, atStart bool, hasBeginTe
 				}}
 			}
 		}
+	case syntax.OpCharClass:
+		if re.Flags&syntax.FoldCase == 0 {
+			if len(re.Rune) == 2 && re.Rune[0] == re.Rune[1] {
+				var b [utf8.UTFMax]byte
+				n := utf8.EncodeRune(b[:], re.Rune[0])
+				return []AnchorInfo{{
+					Anchor: b[:n], Type: AnchorPivot, Distance: offset,
+					IsFixed: true, Mandatory: true, HasBeginText: hasBeginText, HasBeginLine: hasBeginLine,
+				}}
+			} else if info, ok := toCCWarp(re); ok {
+				return []AnchorInfo{{
+					Class: info, HasClass: true, Type: AnchorPivot, Distance: offset,
+					IsFixed: true, Mandatory: true, HasBeginText: hasBeginText, HasBeginLine: hasBeginLine,
+				}}
+			}
+		}
 	case syntax.OpRepeat, syntax.OpQuest, syntax.OpStar, syntax.OpPlus:
 		return findCoveringAnchors(re.Sub[0], offset, atStart, hasBeginText, hasBeginLine)
 	case syntax.OpCapture:
@@ -904,25 +929,35 @@ func findCoveringAnchors(re *syntax.Regexp, offset int, atStart bool, hasBeginTe
 		currentIsFixed := true
 		for _, sub := range re.Sub {
 			subAnchors := findCoveringAnchors(sub, currentOffset, currentAtStart, currentHasBeginText, currentHasBeginLine)
-			if len(subAnchors) > 0 {
+			if len(subAnchors) > 0 && !matchesEmpty(sub) {
 				for j := range subAnchors {
 					subAnchors[j].IsFixed = subAnchors[j].IsFixed && currentIsFixed
 				}
 				return subAnchors
 			}
-			if sub.Op == syntax.OpBeginText && currentAtStart {
+
+			if sub.Op == syntax.OpBeginText {
 				currentHasBeginText = true
 			}
-			if sub.Op == syntax.OpBeginLine && currentAtStart {
+			if sub.Op == syntax.OpBeginLine {
 				currentHasBeginLine = true
 			}
+
 			d := minLength(sub)
 			maxD := maxLength(sub)
+			if d > 0 || maxD > 0 || maxD == -1 {
+				currentHasBeginText = false
+				currentHasBeginLine = false
+			}
+
 			if d != maxD {
 				currentIsFixed = false
 			}
 			if d > 0 {
 				currentAtStart = false
+			}
+			if !matchesEmpty(sub) {
+				break
 			}
 			if d >= 0 {
 				currentOffset += d

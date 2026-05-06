@@ -88,7 +88,7 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 	// i: Progress pointer. Points to the next possible position of interest.
 	for i := 0; i <= numBytes; {
 		if i <= lastI {
-			panic(fmt.Sprintf("infinite loop detected in fastDiscoveryLoop: i=%d lastI=%d pattern=%q prefix=%q searchAny=%q", i, lastI, re.expr, re.prefix, re.searchAny))
+			panic(fmt.Sprintf("infinite loop detected in fastDiscoveryLoop: i=%d lastI=%d pattern=%q prefix=%q searchAny=%v", i, lastI, re.expr, re.prefix, re.searchAny))
 		}
 		lastI = i
 
@@ -100,7 +100,7 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 		var bestAnchor *ir.AnchorInfo
 
 		// --- Phase 1: Search ---
-		if !anchorStart && (matchState&ir.AcceptingStateFlag) == 0 && (re.primaryAnchor != nil || re.searchAny != "" || len(re.prefix) > 0) {
+		if !anchorStart && (matchState&ir.AcceptingStateFlag) == 0 && (re.primaryAnchor != nil || len(re.searchAny) > 0 || len(re.prefix) > 0) {
 			// Find the next potential candidate starting from i
 			candidatePos := -1
 			var candidateAnchor *ir.AnchorInfo
@@ -163,8 +163,20 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 							candidateAnchor = anchor
 						}
 					}
-				} else if re.searchAny != "" {
-					pos := bytes.IndexAny(b[i:], re.searchAny)
+				} else if len(re.searchAny) > 0 {
+					var pos int = -1
+					if len(re.searchAny) == 1 {
+						pos = bytes.IndexByte(b[i:], re.searchAny[0])
+					} else {
+						// For small sets of raw bytes, IndexByte loop is safer than IndexAny (which uses UTF-8)
+						for _, target := range re.searchAny {
+							p := bytes.IndexByte(b[i:], target)
+							if p >= 0 && (pos < 0 || p < pos) {
+								pos = p
+							}
+						}
+					}
+
 					if pos >= 0 {
 						trial := i + pos
 						fb := b[trial]
