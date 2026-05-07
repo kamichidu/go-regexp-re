@@ -29,9 +29,9 @@ To maximize throughput, the engine MUST select the most efficient execution loop
 - **0-Pass (Literal Bypass)**: Selected for pure constant strings and anchored literals. Bypasses all DFA construction. Uses pointer-passing and direct bytes.Equal/Index to achieve 0-allocation parity with standard library.
 - **Fast Path (Boundary-Only Discovery)**: Selected for `Match` and `FindIndex` calls where capture groups are not required. It utilizes a minimalist execution loop (Pass 0 + Pass 1) with zero history recording and early exit on first match.
 - **Full Path (Multi-Pass Sparse TDFA)**: Selected for `FindSubmatchIndex` calls. It employs the comprehensive 5-pass pipeline to guarantee peak performance and Go parity:
-    - **Pass 0 (MAP)**: Primary search phase. Identifies mandatory paths and extracts anchor candidates (**Prefix**, **Pivot**, or **Suffix**).
-        - **Search**: Identifies raw candidate positions using SIMD/SWAR.
-        - **Gaze**: Verifies O(1) constraints (anchors, fixed-distance literals) to reject false candidates early.
+- **Pass 0 (MAP)**: Primary search phase. Identifies mandatory paths and extracts anchor candidates (**Prefix**, **Pivot**, or **Suffix**).
+        - **Search**: Identifies raw candidate positions using SIMD/SWAR. **Leverages LCP (Longest Common Prefix) Factoring to extract mandatory prefixes from alternations (e.g., 'fo' from '(fo|foo)'), enabling high-speed string scanning even for complex choices.**
+        - **Gaze**: Verifies O(1) constraints (anchors, fixed-distance literals) to reject false candidates early. **Optimized with SkipGaze: Anchors verified by Search (like factored prefixes) or those without surrounding constraints bypass this phase entirely to eliminate redundant CPU cycles.**
         - **Snap**: Identifies the true match start (Horizon) by reverse-scanning variable-length repetitions.
     - **Pass 1: Boundary Discovery (Searching DFA)**: Uses a Safe Searching DFA to identify match end and winning priority in $O(n)$.
     - **Pass 1.5: Leftmost Start Discovery**: Since searching DFAs conflate start positions, the engine performs a manual scan to find the exact leftmost `start`.
@@ -100,6 +100,9 @@ To minimize compilation overhead, the engine MUST use an **Architectural Shortcu
 
 ### 2.10 Multi-Point Anchor & Constraint Optimization (Pass 0 - MAP)
 The engine MUST extract the most selective anchors from mandatory AST paths to minimize DFA activations.
+- **Unified MAP/DFA Construction**: To eliminate redundant AST traversals and minimize compilation latency, MAP analysis and anchor extraction MUST be integrated directly into the `ir.DFA` construction process. The resulting DFA MUST carry the optimized anchor set as metadata.
+- **LCP Factoring Mandate**: For patterns with alternations, the engine MUST identify and factor out the Longest Common Prefix (LCP) across all mandatory paths at the same fixed distance. This LCP MUST be promoted to a **Virtual Mandatory Anchor**, enabling SIMD-based string scanning (`bytes.Index`) for complex choices like `(abc|abd)`.
+- **SkipGaze Optimization**: If an anchor is fully verified by the Search phase (e.g., a factored literal) and carries no additional boundary or backward constraints, the compiler MUST mark it as **SkipGaze**. The execution loop MUST bypass Phase 2 (Gaze) for such anchors to eliminate redundant CPU cycles.
 - **Multi-Entry Point Discovery**: The engine MUST traverse **`OpAlternate`** to identify all possible entry points and categorize anchors into **Prefix** (start-anchored), **Pivot** (middle-anchored), or **Suffix** (end-anchored) candidates for EACH mandatory path (**Covering Set**).
 - **Mandatory Set Safety**: MAP utilizes the union of anchors from all alternate branches as a covering set. If any branch lacks an anchor, MAP MUST be disabled for that covering level to ensure correctness.
 - **Anchor Characteristic Preservation**: When combining anchors from `OpAlternate`, the engine MUST preserve `IsFixed` and `Distance` attributes if they are consistent across all branches, enabling precise Horizon Snapping even for complex alternations.

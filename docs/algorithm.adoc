@@ -45,6 +45,9 @@ A proposal to use `bytes.IndexAny` as a noise-skipping pre-filter. It was reject
 === 11. xref:algorithm/hybrid-rle-history.adoc[Hybrid RLE History (Submatch Memory Optimization)]
 An advanced 32-bit bit-packing strategy that applies Run-Length Encoding (RLE) during SWAR skips. It reduces history buffer consumption by up to 99.9% for repetitive patterns and enables ultra-fast "Warp Jumps" during backward path selection in the Multi-Pass pipeline.
 
+=== 12. xref:algorithm/multi-point-anchored-constraint-propagation.adoc[LCP Factoring (Alternation Optimization)]
+An optimization that extracts common prefixes from alternation branches to enable high-speed SIMD scanning for complex choices.
+
 == Design Philosophy
 
 * **Pure Go (Zero CGO)**: Achieving maximum performance without sacrificing portability or introducing the overhead of C-interop.

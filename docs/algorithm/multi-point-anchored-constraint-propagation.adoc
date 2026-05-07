@@ -26,7 +26,12 @@ To maximize SIMD efficiency, MAP "augments" literal anchors with adjacent struct
 - **Line-End Augmentation**: `(?m)Rare$` becomes the search pattern `"Rare\n"`. The engine also performs a one-time check at buffer EOF for `"Rare"`.
 - **Fused Suffix Search**: For patterns like `HTTP/1.1$`, the engine prioritizes searching for `"1\n"` (in multiline) or `"1"` at `EOF-1` (in single-line) rather than searching for the prefix `"HTTP/1"`.
 
-=== B. Anchor Selection Criteria (Structural Density)
+=== B. LCP Factoring (Alternation Optimization)
+To optimize alternations with common prefixes, MAP employs **Longest Common Prefix (LCP) Factoring**.
+- **Mechanism**: If all branches of an alternation share a common literal prefix at the same fixed distance (e.g., `fo` in `(fo|foo)`), the engine factors out this prefix and promotes it to a **Virtual Mandatory Anchor**.
+- **Performance Impact**: This transforms a low-selectivity single-byte search (`IndexByte('f')`) into a high-selectivity string search (`bytes.Index("fo")`), significantly reducing DFA activations and false positives.
+
+=== C. Anchor Selection Criteria (Structural Density)
 The engine selects a single **Primary Iterator** based on the "Structural Density" of the augmented patterns:
 - **Literal Score**: 10 points per character.
 - **Boundary Bonus**: +20 for `^`/`$` (Text boundaries), +15 for `(?m)^`/`(?m)$` (Line boundaries).
@@ -43,7 +48,7 @@ MAP identifies a **Covering Set** of anchors that represent all possible executi
 To further reduce DFA activations, MAP employs "Geographical" awareness based on the pattern's line-bounded nature.
 
 === A. Line-Anchored Jump (Warp to Line Start)
-For **Line-Bounded** patterns (non-multiline `.`), any match must exist entirely within a single line. 
+For **Line-Bounded** patterns (non-multiline `.`), any match must exist entirely within a single line.
 - When an anchor is discovered, the engine uses `bytes.LastIndexByte` (or merged scan) to find the beginning of the current line.
 - The search starting point (`restartBase`) is warped directly to this line start, bypassing all DFA transitions for the line's prefix.
 
@@ -68,6 +73,7 @@ Once the Primary Iterator identifies a candidate position `P`, the engine enters
 === A. O(1) Pruning Constraints
 The propagator only executes checks that are significantly cheaper than a few DFA steps:
 
+- **SkipGaze Optimization**: To eliminate redundant verification, the compiler identifies anchors that are "Self-Verifying"—meaning their content is fully guaranteed by the Search phase (SIMD/SWAR) and they possess no surrounding boundary or distance constraints. Such anchors bypass the Gaze phase entirely.
 - **Boundary Distance Verification**: If anchored to `$`, verify if the remaining buffer length is within the expected range `[MinDist, MaxDist]`.
 - **Structural Boundary Check**: Verify if `P` is preceded/followed by `\n` if the pattern is line-anchored.
 - **Single-Point Literal Check**: If the pattern has other mandatory literal points, verify a single byte or short prefix at a fixed offset from `P`.
