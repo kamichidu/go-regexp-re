@@ -1000,6 +1000,7 @@ func findCoveringSuffixAnchors(re *syntax.Regexp, distFromEnd int, atEnd bool, h
 			sub := re.Sub[i]
 			subAnchors := findCoveringSuffixAnchors(sub, currentDist, currentAtEnd, currentHasEndText, currentHasEndLine)
 			if len(subAnchors) > 0 {
+				isNullable := matchesEmpty(sub)
 				// To be IsFixed, EVERYTHING before this sub must be fixed distance
 				prefixIsFixed := true
 				for k := 0; k < i; k++ {
@@ -1010,6 +1011,9 @@ func findCoveringSuffixAnchors(re *syntax.Regexp, distFromEnd int, atEnd bool, h
 				}
 				for j := range subAnchors {
 					subAnchors[j].IsFixed = subAnchors[j].IsFixed && prefixIsFixed
+					if isNullable {
+						subAnchors[j].Mandatory = false
+					}
 				}
 				all = append(all, subAnchors...)
 			}
@@ -1124,8 +1128,12 @@ func findCoveringAnchors(re *syntax.Regexp, offset int, atStart bool, hasBeginTe
 		for _, sub := range re.Sub {
 			subAnchors := findCoveringAnchors(sub, currentOffset, currentAtStart, currentHasBeginText, currentHasBeginLine)
 			if len(subAnchors) > 0 {
+				isNullable := matchesEmpty(sub)
 				for j := range subAnchors {
 					subAnchors[j].IsFixed = subAnchors[j].IsFixed && currentIsFixed
+					if isNullable {
+						subAnchors[j].Mandatory = false
+					}
 				}
 				all = append(all, subAnchors...)
 			}
