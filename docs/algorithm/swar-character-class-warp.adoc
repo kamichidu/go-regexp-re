@@ -74,9 +74,14 @@ Earlier versions used manual loop unrolling (8x) to maximize throughput. However
 
 === 4. Cache Locality Optimization
 To prevent performance degradation in complex regex patterns with many states, the core transition data is optimized for the L1 cache.
-- **Slim CCWarpInfo**: The structure is kept to **32 bytes**.
-- **Heap Fallback**: Large data sets (like 128-bit masks) are offloaded to an `Extra` slice (heap-allocated once).
+- **Strict 32-byte CCWarpInfo**: The structure is designed to fit exactly within a half cache line (32 bytes on most modern CPUs) including alignment.
+    *   `Kernel (uint8)` + `IncludeNL (bool)` + `Padding (2B)` = 4 bytes
+    *   `V0 (uint32)` + `V1 (uint32)` = 8 bytes
+    *   `Extra ([]uint64)` = 24 bytes (on 64-bit systems)
+    *   **Total = 32 bytes**
+- **Heap Fallback**: Large data sets (like 128-bit masks) are offloaded to the `Extra` slice (heap-allocated once during compilation).
 - **Impact**: This ensures that even DFA tables with hundreds of states can fit within the L2 cache, minimizing memory latency during state transitions.
+- **Pointer-Passing**: Kernel functions always take a pointer to `CCWarpInfo` to eliminate the 32-byte stack copy per call, which is critical for maintaining zero-allocation in the `Capturing/Email` benchmark.
 
 === 5. Integration with the Execution Pipeline
 CCWarp is tightly integrated into the Multi-Pass execution pipeline:

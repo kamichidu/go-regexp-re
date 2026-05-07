@@ -451,8 +451,8 @@ func NewDFAWithMemoryLimit(ctx context.Context, re *syntax.Regexp, prog *syntax.
 			if isSingleRange && low != -1 {
 				d.ccWarpTable[i] = CCWarpInfo{
 					Kernel: CCWarpSingleRange,
-					V0:     uint64(low),
-					V1:     uint64(high),
+					V0:     uint32(low),
+					V1:     uint32(high),
 				}
 			}
 		}
@@ -501,8 +501,8 @@ func NewDFAWithMemoryLimit(ctx context.Context, re *syntax.Regexp, prog *syntax.
 		if isSingleRange && low != -1 {
 			d.searchWarp = CCWarpInfo{
 				Kernel: CCWarpSingleRange,
-				V0:     uint64(low),
-				V1:     uint64(high),
+				V0:     uint32(low),
+				V1:     uint32(high),
 			}
 		}
 	}
@@ -812,8 +812,8 @@ func buildSearchDFA(prog *syntax.Prog) *SearchDFA {
 	if high-low+1 == len(trigger) {
 		triggerInfo = CCWarpInfo{
 			Kernel: CCWarpSingleRange,
-			V0:     uint64(low),
-			V1:     uint64(high),
+			V0:     uint32(low),
+			V1:     uint32(high),
 		}
 	} else {
 		extra := make([]uint64, len(trigger))

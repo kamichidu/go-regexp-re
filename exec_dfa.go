@@ -30,7 +30,7 @@ func anchoredRecordingLoop(re *Regexp, in *ir.Input, mc *matchContext, start, en
 		if (state & ir.CCWarpFlag) != 0 {
 			sidx := state & ir.StateIDMask
 			info := ccWarps[sidx]
-			skipped := ir.Warp(info, b[i:end])
+			skipped := ir.Warp(&info, b[i:end])
 			if skipped > 0 {
 				mc.appendWarp(sidx, skipped)
 				i += skipped
@@ -119,7 +119,7 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 					i = numBytes
 				}
 			case ir.SearchStrategySearchWarp:
-				pos := ir.IndexClass(re.searchWarp, b[i:])
+				pos := ir.IndexClass(&re.searchWarp, b[i:])
 				if pos >= 0 {
 					matchLiteralPos = i + pos
 					candidatePos = matchLiteralPos
@@ -130,7 +130,7 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 				sd := d.SearchDFA()
 				foundSDFA := false
 				for i < numBytes {
-					idx := ir.IndexClass(sd.Trigger, b[i:])
+					idx := ir.IndexClass(&sd.Trigger, b[i:])
 					if idx < 0 {
 						break
 					}
@@ -210,7 +210,7 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 						if !anchor.HasClass {
 							pos = bytes.Index(b[i:], anchor.Anchor)
 						} else {
-							pos = ir.IndexClass(anchor.Class, b[i:])
+							pos = ir.IndexClass(&anchor.Class, b[i:])
 						}
 						if pos >= 0 {
 							candidatePos, candidateAnchor = i+pos, anchor
@@ -234,7 +234,7 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 						if (re.searchMask[fb/64] & (1 << (fb % 64))) != 0 {
 							for k := range re.mapAnchors {
 								a := &re.mapAnchors[k]
-								if (!a.HasClass && len(a.Anchor) > 0 && a.Anchor[0] == fb && bytes.HasPrefix(b[trial:], a.Anchor)) || (a.HasClass && ir.ValidateFixed(a.Class, b[trial:trial+1])) {
+								if (!a.HasClass && len(a.Anchor) > 0 && a.Anchor[0] == fb && bytes.HasPrefix(b[trial:], a.Anchor)) || (a.HasClass && ir.ValidateFixed(&a.Class, b[trial:trial+1])) {
 									candidatePos, candidateAnchor = trial, a
 									break
 								}
@@ -318,7 +318,7 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 			} else {
 				for _, c := range bestAnchor.Backward {
 					if c.IsRepeat {
-						j -= ir.WarpBack(c.Info, b[:j])
+						j -= ir.WarpBack(&c.Info, b[:j])
 					} else {
 						j -= c.Length
 					}
@@ -359,7 +359,8 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 			if (state & ir.CCWarpFlag) != 0 {
 				sidx := state & ir.StateIDMask
 				info := ccWarps[sidx]
-				skipped := ir.Warp(info, b[scanPos:])
+				skipped := ir.Warp(&info, b[scanPos:])
+
 				if skipped > 0 {
 					scanPos += skipped
 					state &= ^ir.CCWarpFlag
@@ -467,7 +468,7 @@ func extendedSubmatchExecLoop(re *Regexp, in ir.Input, mc *matchContext) (int, i
 
 			if (state & ir.CCWarpFlag) != 0 {
 				info := ccWarps[sidx]
-				skipped := ir.Warp(info, b[i:])
+				skipped := ir.Warp(&info, b[i:])
 				if skipped > 0 {
 					mc.appendWarp(sidx, skipped)
 					i += skipped
