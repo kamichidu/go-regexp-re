@@ -100,7 +100,7 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 		var bestAnchor *ir.AnchorInfo
 
 		// --- Phase 1: Search ---
-		if !anchorStart && (matchState&ir.AcceptingStateFlag) == 0 && (re.primaryAnchor != nil || len(re.searchAny) > 0 || len(re.prefix) > 0) {
+		if !anchorStart && (matchState&ir.AcceptingStateFlag) == 0 && (re.primaryAnchor != nil || len(re.searchAny) > 0 || len(re.prefix) > 0 || re.searchWarp.Kernel != ir.CCWarpNone) {
 			// Find the next potential candidate starting from i
 			candidatePos := -1
 			var candidateAnchor *ir.AnchorInfo
@@ -172,7 +172,16 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 							candidateAnchor = anchor
 						}
 					} else {
-						pos := bytes.Index(b[i:], anchor.Anchor)
+						var pos int = -1
+						if !anchor.HasClass {
+							pos = bytes.Index(b[i:], anchor.Anchor)
+						} else {
+							if anchor.Class.IndexAny != "" {
+								pos = bytes.IndexAny(b[i:], anchor.Class.IndexAny)
+							} else {
+								pos = ir.IndexClass(anchor.Class, b[i:])
+							}
+						}
 						if pos >= 0 {
 							candidatePos = i + pos
 							candidateAnchor = anchor
@@ -183,14 +192,7 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 					if len(re.searchAny) == 1 {
 						pos = bytes.IndexByte(b[i:], re.searchAny[0])
 					} else {
-						// For sets, use a loop over bytes.IndexByte to find the EARLIEST occurrence.
-						// We don't use IndexAny because it interprets the input as UTF-8.
-						for _, target := range re.searchAny {
-							p := bytes.IndexByte(b[i:], target)
-							if p >= 0 && (pos < 0 || p < pos) {
-								pos = p
-							}
-						}
+						pos = bytes.IndexAny(b[i:], string(re.searchAny))
 					}
 
 					if pos >= 0 {
@@ -215,6 +217,16 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 					}
 				} else if len(re.prefix) > 0 {
 					pos := bytes.Index(b[i:], re.prefix)
+					if pos >= 0 {
+						candidatePos = i + pos
+					}
+				} else if re.searchWarp.Kernel != ir.CCWarpNone {
+					pos := -1
+					if re.searchWarp.IndexAny != "" {
+						pos = bytes.IndexAny(b[i:], re.searchWarp.IndexAny)
+					} else {
+						pos = ir.IndexClass(re.searchWarp, b[i:])
+					}
 					if pos >= 0 {
 						candidatePos = i + pos
 					}

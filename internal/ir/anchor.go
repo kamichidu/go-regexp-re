@@ -1381,12 +1381,32 @@ func Warp(info CCWarpInfo, b []byte) int {
 	i := 0
 	switch info.Kernel {
 	case CCWarpAnyChar:
-		for i < len(b) && b[i] < 0x80 {
+		n := len(b)
+		for i+8 <= n {
+			v := binary.LittleEndian.Uint64(b[i:])
+			if v&0x8080808080808080 != 0 {
+				break
+			}
+			i += 8
+		}
+		for i < n && b[i] < 0x80 {
 			i++
 		}
 		return i
 	case CCWarpAnyExceptNL:
-		for i < len(b) && b[i] != '\n' && b[i] < 0x80 {
+		pos := bytes.IndexByte(b, '\n')
+		limit := len(b)
+		if pos >= 0 {
+			limit = pos
+		}
+		for i+8 <= limit {
+			v := binary.LittleEndian.Uint64(b[i:])
+			if v&0x8080808080808080 != 0 {
+				break
+			}
+			i += 8
+		}
+		for i < limit && b[i] < 0x80 {
 			i++
 		}
 		return i
@@ -1611,6 +1631,9 @@ func IndexClass(info CCWarpInfo, b []byte) int {
 		}
 		return -1
 	case CCWarpEqualSet:
+		if info.IndexAny != "" {
+			return bytes.IndexAny(b, info.IndexAny)
+		}
 		for i < len(b) {
 			target := b[i]
 			for _, v := range info.Extra {
