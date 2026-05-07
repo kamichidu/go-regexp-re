@@ -707,7 +707,15 @@ func extractConstraints(re *syntax.Regexp, anchor *AnchorInfo) {
 				break
 			}
 		} else {
-			if d > 0 {
+			if d == maxD && d > 0 {
+				anchor.Backward = append(anchor.Backward, Constraint{
+					Offset: backOffset - d, Length: d, IsRepeat: false,
+				})
+			} else if maxLength(sub) > 0 {
+				anchor.Backward = append(anchor.Backward, Constraint{
+					Offset: backOffset, Length: 0, IsRepeat: true,
+					Info: CCWarpInfo{Kernel: CCWarpAnyChar},
+				})
 				break
 			}
 		}
@@ -753,7 +761,15 @@ func extractConstraints(re *syntax.Regexp, anchor *AnchorInfo) {
 				break
 			}
 		} else {
-			if d > 0 {
+			if d == maxD && d > 0 {
+				anchor.Forward = append(anchor.Forward, Constraint{
+					Offset: forwardOffset, Length: d, IsRepeat: false,
+				})
+			} else if maxLength(sub) > 0 {
+				anchor.Forward = append(anchor.Forward, Constraint{
+					Offset: forwardOffset, Length: 0, IsRepeat: true,
+					Info: CCWarpInfo{Kernel: CCWarpAnyChar},
+				})
 				break
 			}
 		}
@@ -979,6 +995,7 @@ func findCoveringSuffixAnchors(re *syntax.Regexp, distFromEnd int, atEnd bool, h
 		currentHasEndText := hasEndText
 		currentHasEndLine := hasEndLine
 
+		var all []AnchorInfo
 		for i := len(re.Sub) - 1; i >= 0; i-- {
 			sub := re.Sub[i]
 			subAnchors := findCoveringSuffixAnchors(sub, currentDist, currentAtEnd, currentHasEndText, currentHasEndLine)
@@ -994,8 +1011,12 @@ func findCoveringSuffixAnchors(re *syntax.Regexp, distFromEnd int, atEnd bool, h
 				for j := range subAnchors {
 					subAnchors[j].IsFixed = subAnchors[j].IsFixed && prefixIsFixed
 				}
-				return subAnchors
+				all = append(all, subAnchors...)
 			}
+			if !matchesEmpty(sub) {
+				return all
+			}
+
 			if sub.Op == syntax.OpEndText && currentAtEnd {
 				currentHasEndText = true
 			}
@@ -1012,6 +1033,7 @@ func findCoveringSuffixAnchors(re *syntax.Regexp, distFromEnd int, atEnd bool, h
 				currentDist = -1000000
 			}
 		}
+		return all
 	case syntax.OpAlternate:
 		var all []AnchorInfo
 		commonIsFixed := true
@@ -1098,13 +1120,18 @@ func findCoveringAnchors(re *syntax.Regexp, offset int, atStart bool, hasBeginTe
 		currentHasBeginText := hasBeginText
 		currentHasBeginLine := hasBeginLine
 		currentIsFixed := true
+		var all []AnchorInfo
 		for _, sub := range re.Sub {
 			subAnchors := findCoveringAnchors(sub, currentOffset, currentAtStart, currentHasBeginText, currentHasBeginLine)
-			if len(subAnchors) > 0 && !matchesEmpty(sub) {
+			if len(subAnchors) > 0 {
 				for j := range subAnchors {
 					subAnchors[j].IsFixed = subAnchors[j].IsFixed && currentIsFixed
 				}
-				return subAnchors
+				all = append(all, subAnchors...)
+			}
+
+			if !matchesEmpty(sub) {
+				return all
 			}
 
 			if sub.Op == syntax.OpBeginText {
@@ -1127,15 +1154,13 @@ func findCoveringAnchors(re *syntax.Regexp, offset int, atStart bool, hasBeginTe
 			if d > 0 {
 				currentAtStart = false
 			}
-			if !matchesEmpty(sub) {
-				break
-			}
 			if d >= 0 {
 				currentOffset += d
 			} else {
 				currentOffset = 1000000
 			}
 		}
+		return all
 	case syntax.OpAlternate:
 		var all []AnchorInfo
 		commonIsFixed := true
