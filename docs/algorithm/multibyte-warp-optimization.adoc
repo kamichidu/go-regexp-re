@@ -40,13 +40,15 @@ if (rawNext & ir.WarpStateFlag) != 0 {
     skip := ir.GetTrailingByteCount(byteVal)
 
     // For submatch extraction, we record a Warp Entry in history
-    mc.appendWarp(stateID, skip)
+    if mc.recordHistory {
+        mc.appendWarp(stateID, skip)
+    }
 
     i += 1 + skip
 }
 ----
 
-The `WarpStateFlag` is applied **ONLY** when all active NFA paths in a state accept any valid UTF-8 continuation (e.g., `InstRuneAny` or `.` dot). Fixed multi-byte runes (like "あ") do not trigger Warp to ensure each byte is correctly verified.
+The `WarpStateFlag` is applied **ONLY** when all active NFA paths in a state accept any valid UTF-8 continuation (e.g., `InstRuneAny` or `.` dot). This is typically seen in states representing "universal self-loops" like `.*` or `(?s).*`. Fixed multi-byte runes (like "あ") or specific multi-byte character classes do not trigger Warp to ensure each byte of the sequence is correctly verified against the transition table.
 
 === 2.3 Byte-level Trie Expansion
 

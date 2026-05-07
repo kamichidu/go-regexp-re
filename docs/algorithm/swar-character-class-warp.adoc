@@ -15,8 +15,9 @@ The engine applies SWAR optimizations in two distinct phases to maximize through
 When the engine is in the initial `searchState` (scanning for a match start), it uses the **SearchWarp** phase to skip "noise" characters. 
 
 - **Hybrid Strategy**: To achieve peak performance, SearchWarp prioritizes Go standard library SIMD-accelerated functions:
-    *   **Single Character**: Uses `bytes.IndexByte` (up to 15 GB/s).
-    *   **Small Set/Range**: Uses `bytes.IndexAny` with a pre-calculated character string.
+    *   **Single Byte**: Uses `bytes.IndexByte` (up to 15 GB/s).
+    *   **ASCII Search Set**: Uses `bytes.IndexAny` with a pre-calculated ASCII string.
+    *   **Non-ASCII Search Set**: Uses manual `IndexByte` loops to find the earliest occurrence of any byte in the set. This avoids `bytes.IndexAny`'s UTF-8 interpretation of raw bytes, which can lead to false negatives for multi-byte lead bytes.
     *   **Large/Negated Set**: Falls back to specialized SWAR kernels (e.g., `CCWarpNotSingleRange`) to skip noise 8 bytes at a time.
 - **Goal**: Rapidly skip segments of text that cannot possibly start a match.
 - **Sharing**: It shares the same kernel definitions as CCWarp but applies **inverted logic**: it skips as long as characters are NOT in the "Start Set".
@@ -24,6 +25,7 @@ When the engine is in the initial `searchState` (scanning for a match start), it
 === 2. CCWarp (Match Fast-Forwarding)
 Once a match has begun and the DFA enters a self-looping state (like the `+` in `[0-9]+`), it switches to the **CCWarp** phase.
 - **Goal**: Consume as many matching characters as possible without leaving the current DFA state.
+- **ASCII-Only Restriction**: CCWarp pre-filters (Equal, Range, Set) are strictly restricted to ASCII runes. Multi-byte runes are excluded from these fast-paths to prevent "filter pollution" where truncated lead-bytes could cause incorrect skipping of valid multi-byte sequences.
 - **Performance**: This phase allows the engine to "swallow" the bulk of the match at memory-bandwidth speeds.
 
 == The Core Principle: Bitwise Parallelism

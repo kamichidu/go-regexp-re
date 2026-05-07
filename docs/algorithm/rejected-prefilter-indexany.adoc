@@ -48,4 +48,6 @@ The proposal was rejected for the following technical reasons:
 
 == Conclusion
 
-For character classes and `\w`, the engine will continue to rely on its **Fast-Path DFA** and **Bit-Parallel DFA** execution loops. Significant speedups for these patterns would require custom SIMD range-check assembly kernels, which falls outside the current "Pure Go" mandate of the project.
+For character classes and `\w`, the engine will continue to rely on its **Fast-Path DFA** and **Bit-Parallel DFA** execution loops for the primary scan.
+
+**Clarification on SearchWarp**: Note that `bytes.IndexAny` is **still utilized** in the **SearchWarp (Discovery Phase)** specifically for small, ASCII-only character sets. In this context, it acts as a high-speed pre-filter to find potential match start candidates before entering the DFA. However, it remains "rejected" as a general-purpose replacement for the core DFA transition loop due to the reasons cited above.
