@@ -255,7 +255,7 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 		}
 
 		// --- Phase 2: Gaze (Verify O(1) constraints) ---
-		if bestAnchor != nil && len(bestAnchor.Anchor) > 0 {
+		if bestAnchor != nil && !bestAnchor.SkipGaze && len(bestAnchor.Anchor) > 0 {
 			rejected := false
 			totalAbsPos := in.AbsPos + absPos
 			if bestAnchor.HasBeginText && (totalAbsPos != 0) {

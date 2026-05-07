@@ -56,6 +56,7 @@ type AnchorInfo struct {
 	MaxDistToLineEnd int  // Maximum distance from anchor start to line end
 	Augmented        []AugmentedPattern
 	SimpleBackward   []Constraint // Only fixed length, single byte constraints
+	SkipGaze         bool         // If true, Phase 2 (Gaze) can be skipped
 }
 
 // ExtractAnchors traverses the AST and identifies all potential anchors.

@@ -187,7 +187,15 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 					HasBeginLine: hasBeginLine,
 					HasEndText:   hasEndText,
 					HasEndLine:   hasEndLine,
+					SkipGaze:     true, // Factored prefix is already verified by bytes.Index
 				})
+			}
+		}
+
+		for i := range res.mapAnchors {
+			a := &res.mapAnchors[i]
+			if !a.HasConstraints && !a.HasBeginText && !a.HasBeginLine && !a.HasEndText && !a.HasEndLine && len(a.SimpleBackward) == 0 {
+				a.SkipGaze = true
 			}
 		}
 
