@@ -5,7 +5,7 @@
 
 Multi-Point Anchored Constraint Propagation (MAP) is an advanced execution strategy for `go-regexp-re` that acts as **Pass 0**. By extracting and evaluating multiple anchor points from mandatory AST paths, the engine can skip vast amounts of "non-matching" data using SIMD-accelerated instructions and SWAR-based validation before ever invoking the heavy DFA machinery.
 
-MAP is designed to handle complex patterns with multiple entry points (e.g., `(^|[abc])literal`) and provides a zero-false-negative guarantee through strict safety mandates.
+MAP handles complex patterns with multiple entry points (e.g., `(^|[abc])literal`) by accumulating both mandatory and **optional** anchors (marked as non-mandatory candidates) into its search set, providing a zero-false-negative guarantee.
 
 == 1. Multi-Entry Point Anchor Discovery
 
@@ -36,6 +36,7 @@ The engine selects a single **Primary Iterator** based on the "Structural Densit
 MAP identifies a **Covering Set** of anchors that represent all possible execution paths. If a pattern has alternations (e.g., `apple|banana`), the engine ensures that at least one selective anchor is tracked for every branch.
 - **Multi-Index Discovery**: Uses `bytes.IndexAny` to find the first byte of any anchor in the covering set.
 - **Exhaustive Coverage**: If a branch has no selective anchor, MAP may be partially disabled or fall back to a less selective common anchor to maintain 100% safety.
+- **Nullable-Safe Accumulation**: For concatenations starting with nullable elements (e.g., `(a*)b`), MAP extracts anchors from both the optional prefix (`a`) and the subsequent mandatory element (`b`).
 ...
 == 8. Advanced Geographical Optimizations
 
@@ -56,7 +57,7 @@ To eliminate the overhead of a second scan, the `IndexClass` SWAR kernels are **
 
 To ensure 100% compatibility with standard regular expression semantics, MAP adheres to strict safety rules:
 
-- **Nullable Pattern Protection**: If any path in the pattern can match an empty string (`minLength == 0`), MAP is **disabled** to prevent incorrect rejection of empty matches.
+- **Nullable Pattern Protection**: If an entire path in the pattern can match an empty string (`minLength == 0`), MAP is **disabled** to prevent incorrect rejection. For nullable *sub-elements* in a concatenation, anchors are extracted but marked as **Mandatory: false** to ensure they act as search hints without blocking potential matches.
 - **Capture Transparency**: Anchor extraction uses **Capture Stripping** to ignore `OpCapture` boundaries, merging adjacent literals into longer, more efficient anchors (e.g., `abc(def)ghi` -> `abcdefghi`).
 - **Anchor Context Awareness**: Anchors tied to `^` (BeginText) are validated only at index 0, while Pivot anchors search the entire buffer.
 

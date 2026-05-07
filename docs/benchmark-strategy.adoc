@@ -56,13 +56,15 @@ We categorize metrics into two types based on their stability and sensitivity to
 The project maintains a tiered benchmarking pipeline to ensure zero-regression and historical transparency.
 
 === 1. PR-Level Delta Analysis (`benchmark-pr.yml`)
+- **Focused Scope**: To ensure fast feedback, PR benchmarks are limited to the **`Synthetic`** suite, focusing on core optimization layers.
 - **Baseline Retrieval**: Downloads the latest `main` baseline from `gh-pages`.
 - **Ratio-of-Ratios**: Uses `internal/tools/bench-ratio` to compare the PR's speedup factor against the main's speedup factor.
 - **Regression Detection**: A PR is flagged if its relative performance (Ratio) degrades by more than **10%**, regardless of absolute execution time.
 
 === 2. Main-Branch Audit (`benchmark.yml`)
-- **Latest Baseline**: Updates `benchmarks/baseline/benchmark-main.txt` on `gh-pages` for future PR comparisons.
-- **Historical Archive**: Saves timestamped results in `benchmarks/history/` to enable long-term performance trend analysis using `benchstat`.
+- **Full Coverage**: Executes the complete benchmark suite to establish a global baseline.
+- **Robust Persistence**: Results and visualizations are deployed to `gh-pages` **before** the regression check. This ensures that the performance history is preserved even if a regression is detected.
+- **Latest Baseline**: Updates `benchmarks/baseline/benchmark-main.txt` for future PR comparisons.
 
 == Tooling & Usage
 

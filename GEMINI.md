@@ -116,6 +116,7 @@ The engine MUST extract the most selective anchors from mandatory AST paths to m
 - **Forward/Backward Constraint Guard**: Once an anchor candidate is found, validate surrounding character constraints (fixed-length or dynamic warps) using path-specific SWAR kernels before starting the DFA.
 - **Zero-Width Assertion Transparency**: Anchor extraction MUST skip past zero-width assertions (e.g., `^`, `$`, `\b`) to identify the most selective literal anchor in a mandatory path.
 - **Boundary-Aware MAP**: Word boundaries (`\b`, `\B`) are supported by MAP by utilizing the Absolute Coordinate Context for safe verification at candidate positions.
+- **Nullable-Safe Anchor Accumulation**: Anchor extraction MUST accumulate candidates from nullable elements in a concatenation (e.g., `(^|[ ,;])`). Such anchors MUST be marked as non-mandatory to ensure they act as search hints without incorrectly blocking matches.
 
 ### 2.11 Pure Go (No CGO)
 - **Zero Overhead**: Native Go only. CGO is strictly prohibited.
