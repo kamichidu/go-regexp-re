@@ -102,7 +102,8 @@ The engine MUST extract the most selective anchors from mandatory AST paths to m
 - **Multi-Entry Point Discovery**: The engine MUST traverse **`OpAlternate`** to identify all possible entry points and categorize anchors into **Prefix** (start-anchored), **Pivot** (middle-anchored), or **Suffix** (end-anchored) candidates for EACH mandatory path (**Covering Set**).
 - **Mandatory Set Safety**: MAP utilizes the union of anchors from all alternate branches as a covering set. If any branch lacks an anchor, MAP MUST be disabled for that covering level to ensure correctness.
 - **Anchor Characteristic Preservation**: When combining anchors from `OpAlternate`, the engine MUST preserve `IsFixed` and `Distance` attributes if they are consistent across all branches, enabling precise Horizon Snapping even for complex alternations.
-- **Large-Set Efficiency**: The engine MUST support up to 256 bytes in the **`searchAny`** set and utilize a bit-parallel **`searchMask`** for O(1) candidate verification, ensuring that large alternations and character classes are effectively optimized.
+- **Large-Set Efficiency**: The engine MUST support up to 256 bytes in the **`searchAny`** set and utilize a bit-parallel **`searchMask`** (`[4]uint64`) for O(1) candidate verification, ensuring that large alternations and character classes are effectively optimized.
+- **Case-Insensitive Expansion Mandate**: For literals or character classes with the `FoldCase` flag, MAP MUST expand all case variants using `unicode.SimpleFold` into a covering `EqualSet` or `Bitmask`. This ensures zero false negatives during the discovery phase.
 - **Anchor Selection Heuristic**: Anchors MUST be selected based on a heuristic score that prioritizes length, specificity, and fixed-distance status.
 - **Line-Anchored Jump Mandate**: For non-multiline patterns, the engine MUST use **Line-Anchored Jump** to warp the search starting point directly to the beginning of the line where an anchor is found, bypassing redundant DFA transitions.
 - **Merged Newline Discovery**: To maximize throughput, the engine MUST utilize **Merged Newline Detection** within SWAR kernels to identify line boundaries and pattern anchors in a single pass.
@@ -117,6 +118,7 @@ The engine MUST extract the most selective anchors from mandatory AST paths to m
 
 ### 2.12 Priority Normalization & Absolute Tracking
 - **Priority Normalization**: During DFA construction, NFA path priorities within each state MUST be normalized.
+- **Leftmost-First Priority Integrity**: Alternation branches MUST be assigned priorities such that the `Out` branch always has higher priority (lower numeric value) than the `Arg` branch. This is foundational for guaranteeing Go standard library parity.
 - **Absolute Priority Tracking**: The engine MUST track cumulative priority to identify the true leftmost-first match during Phase 1.
 
 ### 2.13 Early Exit Optimization (IsBestMatch)
