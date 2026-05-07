@@ -215,6 +215,7 @@ func NewDFAWithMemoryLimit(ctx context.Context, re *syntax.Regexp, prog *syntax.
 
 			nextRes := getCachedClosure(nextPaths)
 			nextDfaID := addDfaState(nextRes.NextClosure, nextRes.Updates, nextRes.MatchAnchors, d.stateIsSearch[i])
+
 			rawNext := nextDfaID
 			if d.accepting[nextDfaID] {
 				rawNext |= AcceptingStateFlag
@@ -224,7 +225,27 @@ func NewDFAWithMemoryLimit(ctx context.Context, re *syntax.Regexp, prog *syntax.
 				d.hasAnchors = true
 			}
 
+			// WarpStateFlag Detection (Bit 21)
+			// Apply ONLY if all NFA paths reached are InstRuneAny or InstRuneAnyNotNL at Node 0.
+			if byte(b) >= 0x80 {
+				allWarpable := true
+				if len(nextRes.NextClosure) == 0 {
+					allWarpable = false
+				}
+				for _, p := range nextRes.NextClosure {
+					op := prog.Inst[p.ID].Op
+					if (op != syntax.InstRuneAny && op != syntax.InstRuneAnyNotNL) || p.NodeID != 0 {
+						allWarpable = false
+						break
+					}
+				}
+				if allWarpable {
+					rawNext |= WarpStateFlag
+				}
+			}
+
 			if len(nextRes.Updates) > 0 {
+
 				d.tagUpdates = append(d.tagUpdates, TransitionUpdate{BasePriority: minNextPrio, PreUpdates: nextRes.Updates})
 				d.tagUpdateIndices[idx] = uint32(len(d.tagUpdates) - 1)
 				rawNext |= TaggedStateFlag

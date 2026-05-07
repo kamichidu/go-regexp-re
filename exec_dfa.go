@@ -192,7 +192,14 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 					if len(re.searchAny) == 1 {
 						pos = bytes.IndexByte(b[i:], re.searchAny[0])
 					} else {
-						pos = bytes.IndexAny(b[i:], string(re.searchAny))
+						// For sets, use a loop over bytes.IndexByte to find the EARLIEST occurrence.
+						// We don't use IndexAny because it interprets its argument as a UTF-8 string.
+						for _, target := range re.searchAny {
+							p := bytes.IndexByte(b[i:], target)
+							if p >= 0 && (pos < 0 || p < pos) {
+								pos = p
+							}
+						}
 					}
 
 					if pos >= 0 {
@@ -357,7 +364,11 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 				}
 			}
 			state = rawNext
-			scanPos++
+			step := 1
+			if byteVal >= 0x80 && (rawNext&ir.WarpStateFlag) != 0 {
+				step += ir.GetTrailingByteCount(byteVal)
+			}
+			scanPos += step
 			if (state & ir.AcceptingStateFlag) != 0 {
 				sidx := state & ir.StateIDMask
 				req := guards[sidx]
@@ -458,7 +469,14 @@ func extendedSubmatchExecLoop(re *Regexp, in ir.Input, mc *matchContext) (int, i
 				}
 			}
 			state = rawNext
-			i++
+			step := 1
+			if byteVal >= 0x80 && (rawNext&ir.WarpStateFlag) != 0 {
+				step += ir.GetTrailingByteCount(byteVal)
+			}
+			if step > 1 {
+				mc.appendWarp(state&ir.StateIDMask, step-1)
+			}
+			i += step
 			if (state & ir.AcceptingStateFlag) != 0 {
 				sidx := state & ir.StateIDMask
 				req := guards[sidx]

@@ -821,6 +821,8 @@ func toCCWarp(re *syntax.Regexp) (CCWarpInfo, bool) {
 					if !seen[f] {
 						if f < 0x80 {
 							extra = append(extra, uint64(f))
+						} else {
+							return CCWarpInfo{}, false // Cannot use CCWarp for multi-byte runes
 						}
 						seen[f] = true
 					}
@@ -847,6 +849,8 @@ func toCCWarp(re *syntax.Regexp) (CCWarpInfo, bool) {
 						if !seen[f] {
 							if f < 0x80 {
 								extra = append(extra, uint64(f))
+							} else {
+								return CCWarpInfo{}, false // Cannot use CCWarp for multi-byte runes
 							}
 							seen[f] = true
 						}
@@ -878,7 +882,11 @@ func toCCWarp(re *syntax.Regexp) (CCWarpInfo, bool) {
 		var extra []uint64
 		for i := 0; i+1 < len(re.Rune); i += 2 {
 			for r := re.Rune[i]; r <= re.Rune[i+1]; r++ {
-				extra = append(extra, uint64(r))
+				if r < 0x80 {
+					extra = append(extra, uint64(r))
+				} else {
+					return CCWarpInfo{}, false // Cannot use CCWarp for multi-byte runes
+				}
 				if len(extra) > 1000 {
 					return CCWarpInfo{}, false // Too large
 				}
@@ -1329,15 +1337,10 @@ func ValidateFixed(info CCWarpInfo, b []byte) bool {
 		}
 		return true
 	case CCWarpAnyChar:
-		for _, v := range b {
-			if v >= 0x80 {
-				return false
-			}
-		}
 		return true
 	case CCWarpAnyExceptNL:
 		for _, v := range b {
-			if v == '\n' || v >= 0x80 {
+			if v == '\n' {
 				return false
 			}
 		}
