@@ -39,6 +39,7 @@ To maximize throughput, the engine MUST select the most efficient execution loop
     - **Pass 3 & 4: Extraction (TDFA Trace)**: Reconstructs the winning path via backward trace and licks capture tags using bit-parallel updates.
 - **SWAR Character Class Warp (CCWarp)**: A specialized execution strategy for "Pure Self-Loops". Detects universal sets (.*) and performs an $O(1)$ jump to the end of the buffer to match memory bandwidth limits.
 - **Anchor-Aware Guarded SIMD Warp**: Selected for patterns with anchors. Utilizes a separate `anchorTransitions` table and **guarded warp points** to allow SIMD skipping even in the presence of anchors (e.g., `^`, `$`, `\b`).
+- **Localized Guard Verification Mandate**: Anchor verification for accepting states MUST be performed only at the logical position where the anchor was encountered in the NFA. Re-verifying start-anchors (like `^` or `\b`) at the match end position is strictly prohibited as it leads to false negatives.
 - **Early Exit on Match Finality**: To maintain peak efficiency, execution loops MUST adopt an **Early Exit on Mismatch** strategy: once a match is found and the DFA can no longer transition, the loop returns the best match immediately instead of continuing a redundant search.
 - **Explicit Hot-Loop Monomorphization**: To ensure zero-overhead, the engine MUST avoid Go generics (`GCShape` sharing). Instead, it employs manually monomorphized functions (e.g., `fastMatchExecLoop`, `extendedMatchExecLoop`) to ensure the Go compiler can completely eliminate unreachable branches and avoid runtime dictionary lookups.
 
@@ -104,6 +105,7 @@ The engine MUST extract the most selective anchors from mandatory AST paths to m
 - **Anchor Characteristic Preservation**: When combining anchors from `OpAlternate`, the engine MUST preserve `IsFixed` and `Distance` attributes if they are consistent across all branches, enabling precise Horizon Snapping even for complex alternations.
 - **Large-Set Efficiency**: The engine MUST support up to 256 bytes in the **`searchAny`** set and utilize a bit-parallel **`searchMask`** (`[4]uint64`) for O(1) candidate verification, ensuring that large alternations and character classes are effectively optimized.
 - **Case-Insensitive Expansion Mandate**: For literals or character classes with the `FoldCase` flag, MAP MUST expand all case variants using `unicode.SimpleFold` into a covering `EqualSet` or `Bitmask`. This ensures zero false negatives during the discovery phase.
+- **Mixed Anchor Search Mandate**: If any branch of the covering set includes start anchors (`^`, `\A`), the discovery loop MUST NOT skip the beginning of the input (pos 0) or line starts, even if literal-based filters (`searchAny`) suggest a later match. This is critical for patterns like `(^|[ ,;])`.
 - **Anchor Selection Heuristic**: Anchors MUST be selected based on a heuristic score that prioritizes length, specificity, and fixed-distance status.
 - **Line-Anchored Jump Mandate**: For non-multiline patterns, the engine MUST use **Line-Anchored Jump** to warp the search starting point directly to the beginning of the line where an anchor is found, bypassing redundant DFA transitions.
 - **Merged Newline Discovery**: To maximize throughput, the engine MUST utilize **Merged Newline Detection** within SWAR kernels to identify line boundaries and pattern anchors in a single pass.
@@ -206,7 +208,8 @@ To minimize environmental noise and provide a flat evaluation of engine performa
 - **Noise-Interleaved Scaling**: To prevent unrealistic branch prediction saturation and cache-hit bias, scaled payloads MUST interleave target test cases with a representative noise block (typically ~1KB).
 - **Full-Scan Mandate**: To measure the engine's "cruising speed," benchmarks SHOULD use anchored patterns (e.g., `^...$`) or place matches at the end of the input to force a full scan of the payload.
 - **Layered Evaluation**: Utilize `BenchmarkSynthetic` to isolate and evaluate specific optimization layers.
-- **Performance Landscape Auditing**: To understand the structural response of the engine, use the 3D Landscape Model (S, B, L). Performance must be evaluated as a function of **Selectivity**, **Branching Complexity**, and **Locality** to ensure optimizations are effective across the entire pattern space.
+- **Performance Landscape Auditing**: To understand the structural response of the engine, use the 3D Landscape Model (S, B, L). Performance must be evaluated as a function of **Selectivity**, **Branching Complexity**, and **Locality**.
+    - **B (Branching Complexity) Definition**: Refined to distinguish between bitmask-optimized simple alternations (low weight) and complex nested structures/quantifiers (high weight) to accurately reflect state-space pressure.
 - `SearchWarp`: Match start position searching (Pre-filter).
     - `CCWarp`: Character class scanning (SWAR).
     - `PureDFA`: Table-based transition logic (NFA-free).

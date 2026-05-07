@@ -34,12 +34,12 @@ Locality measures how well the workload fits modern CPU execution models (SIMD, 
 - **L = 1.0**: High contiguity (long literal runs) and low entropy. SIMD-accelerated engines (Hyperscan, `regexp-re`) show massive peaks.
 - **L = 0.0**: Random, unpredictable transitions and high entropy data.
 
-== Implementation Details
+=== Implementation Details
 
 The core metrics and benchmarking logic are implemented in `internal/testsuite`.
 
 === Metric Calculation
-- **B Calculation**: Extracted from the AST via `testsuite.ComputeB`. It uses a weighted sum of alternations, quantifiers, and nesting depth, normalized via a sigmoid function to a 0.0-1.0 range.
+- **B Calculation**: Extracted from the AST via `testsuite.ComputeB`. It uses a weighted sum of alternations, quantifiers, and nesting depth, normalized via a sigmoid function. The formula distinguishes between **Simple Alternations** (literals/char classes optimized via bitmasks, low weight) and **Complex Alternations** (nested structures, high weight) to accurately reflect state-space pressure.
 - **L Calculation**: A hybrid of **Pattern Locality** (contiguity ratio) and **Input Locality** (byte-level entropy).
 - **S Calculation**: Measured at runtime based on the match count relative to total input size.
 
