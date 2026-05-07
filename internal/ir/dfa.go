@@ -68,7 +68,6 @@ type SearchStrategy uint8
 const (
 	SearchStrategyNone       SearchStrategy = iota
 	SearchStrategyLiteral                   // bytes.Index (Best for long literals)
-	SearchStrategyIndexAny                  // bytes.IndexAny (Best for small character sets)
 	SearchStrategySearchWarp                // ir.IndexClass/SWAR (Best for complex repetitions)
 	SearchStrategySDFA                      // Searching DFA (Best for complex prefixes like (abc|def))
 )
@@ -79,7 +78,7 @@ type SearchDFA struct {
 	Accepting   []bool  // States that indicate a strong candidate
 	DeadState   uint8
 	StartState  uint8
-	Trigger     string // Characters that can transition from StartState
+	Trigger     CCWarpInfo // SWAR-capable trigger set
 }
 
 type DFA struct {

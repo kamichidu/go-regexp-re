@@ -799,12 +799,39 @@ func buildSearchDFA(prog *syntax.Prog) *SearchDFA {
 		return nil
 	}
 
+	var triggerInfo CCWarpInfo
+	low, high := 256, -1
+	for _, b := range trigger {
+		if int(b) < low {
+			low = int(b)
+		}
+		if int(b) > high {
+			high = int(b)
+		}
+	}
+	if high-low+1 == len(trigger) {
+		triggerInfo = CCWarpInfo{
+			Kernel: CCWarpSingleRange,
+			V0:     uint64(low),
+			V1:     uint64(high),
+		}
+	} else {
+		extra := make([]uint64, len(trigger))
+		for i, b := range trigger {
+			extra[i] = uint64(b)
+		}
+		triggerInfo = CCWarpInfo{
+			Kernel: CCWarpEqualSet,
+			Extra:  extra,
+		}
+	}
+
 	return &SearchDFA{
 		NumStates:   len(states),
 		Transitions: fullTrans,
 		Accepting:   accepting,
 		DeadState:   255,
 		StartState:  0,
-		Trigger:     string(trigger),
+		Trigger:     triggerInfo,
 	}
 }

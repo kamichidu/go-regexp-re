@@ -1633,11 +1633,7 @@ func IndexClass(info CCWarpInfo, b []byte) int {
 			}
 			i++
 		}
-		return -1
 	case CCWarpEqualSet:
-		if info.IndexAny != "" {
-			return bytes.IndexAny(b, info.IndexAny)
-		}
 		for i < len(b) {
 			target := b[i]
 			for _, v := range info.Extra {
@@ -1650,6 +1646,8 @@ func IndexClass(info CCWarpInfo, b []byte) int {
 			}
 			i++
 		}
+		return -1
+
 	case CCWarpNotEqualSet:
 		for i < len(b) {
 			target := b[i]

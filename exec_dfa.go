@@ -130,9 +130,7 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 				sd := d.SearchDFA()
 				foundSDFA := false
 				for i < numBytes {
-					// Use IndexClass for Trigger if it looks like a simple set
-					// For now, keep IndexAny but we know it's a bottleneck.
-					idx := bytes.IndexAny(b[i:], sd.Trigger)
+					idx := ir.IndexClass(sd.Trigger, b[i:])
 					if idx < 0 {
 						break
 					}
