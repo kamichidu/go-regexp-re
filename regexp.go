@@ -125,79 +125,9 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 		lineBounded:    ir.IsLineBounded(s),
 	}
 
-	if res.literalMatcher == nil && !ir.HasComplexAnchors(s) {
-		res.mapAnchors = ir.SelectBestAnchors(s)
-		for i := range res.mapAnchors {
-			if res.lineBounded && res.mapAnchors[i].Distance > 0 {
-				res.mapAnchors[i].Class.IncludeNL = true
-			}
-		}
-
-		if len(res.mapAnchors) > 1 {
-			// Factoring: If all anchors share a common prefix at the same distance,
-			// we can extract it as a mandatory anchor to enable faster prefix search.
-			var common []byte
-			commonDist := -1
-			allSameDist := true
-			first := true
-			hasBeginText, hasBeginLine := true, true
-			hasEndText, hasEndLine := true, true
-
-			for _, a := range res.mapAnchors {
-				if a.HasClass || len(a.Anchor) == 0 || !a.IsFixed {
-					allSameDist = false
-					break
-				}
-				if first {
-					common = append([]byte(nil), a.Anchor...)
-					commonDist = a.Distance
-					hasBeginText = a.HasBeginText
-					hasBeginLine = a.HasBeginLine
-					hasEndText = a.HasEndText
-					hasEndLine = a.HasEndLine
-					first = false
-				} else {
-					if a.Distance != commonDist {
-						allSameDist = false
-						break
-					}
-					n := 0
-					for n < len(common) && n < len(a.Anchor) && common[n] == a.Anchor[n] {
-						n++
-					}
-					common = common[:n]
-					hasBeginText = hasBeginText && a.HasBeginText
-					hasBeginLine = hasBeginLine && a.HasBeginLine
-					hasEndText = hasEndText && a.HasEndText
-					hasEndLine = hasEndLine && a.HasEndLine
-					if len(common) == 0 {
-						allSameDist = false
-						break
-					}
-				}
-			}
-			if allSameDist && len(common) > 1 {
-				res.mapAnchors = append(res.mapAnchors, ir.AnchorInfo{
-					Anchor:       common,
-					Distance:     commonDist,
-					Mandatory:    true,
-					IsFixed:      true,
-					Type:         ir.AnchorPivot,
-					HasBeginText: hasBeginText,
-					HasBeginLine: hasBeginLine,
-					HasEndText:   hasEndText,
-					HasEndLine:   hasEndLine,
-					SkipGaze:     true, // Factored prefix is already verified by bytes.Index
-				})
-			}
-		}
-
-		for i := range res.mapAnchors {
-			a := &res.mapAnchors[i]
-			if !a.HasConstraints && !a.HasBeginText && !a.HasBeginLine && !a.HasEndText && !a.HasEndLine && len(a.SimpleBackward) == 0 {
-				a.SkipGaze = true
-			}
-		}
+	if res.literalMatcher == nil && res.dfa != nil {
+		res.mapAnchors = res.dfa.MapAnchors()
+		res.primaryAnchor = res.dfa.PrimaryAnchor()
 
 		if len(res.mapAnchors) > 0 {
 			// 1. Calculate searchAny from ALL anchors in the covering set
@@ -269,25 +199,7 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 				}
 			}
 
-			// 2. Select the best Mandatory anchor as primaryAnchor.
-			// If no anchor is mandatory for all paths AND fixed-distance,
-			// we MUST NOT use a single primaryAnchor for aggressive jumping.
-			bestIdx := -1
-			bestScore := -1
-			for i := range res.mapAnchors {
-				if res.mapAnchors[i].Mandatory && res.mapAnchors[i].IsFixed {
-					score := res.mapAnchors[i].Score()
-					if score > bestScore {
-						bestScore = score
-						bestIdx = i
-					}
-				}
-			}
-			if bestIdx >= 0 {
-				res.primaryAnchor = &res.mapAnchors[bestIdx]
-			}
-
-			// 3. Select the best Augmented pattern as primaryAugmented.
+			// 2. Select the best Augmented pattern as primaryAugmented.
 		outer:
 			for i := range res.mapAnchors {
 				for j := range res.mapAnchors[i].Augmented {

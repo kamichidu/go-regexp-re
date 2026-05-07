@@ -87,6 +87,8 @@ type DFA struct {
 	hasAnchors              bool
 	ccWarpTable             []CCWarpInfo
 	searchWarp              CCWarpInfo
+	mapAnchors              []AnchorInfo
+	primaryAnchor           *AnchorInfo
 }
 
 func (d *DFA) IsNaked() bool                  { return d.Naked }
@@ -94,6 +96,8 @@ func (d *DFA) NumStates() int                 { return d.numStates }
 func (d *DFA) RecapTables() []GroupRecapTable { return d.recapTables }
 func (d *DFA) CCWarpTable() []CCWarpInfo      { return d.ccWarpTable }
 func (d *DFA) SearchWarp() CCWarpInfo         { return d.searchWarp }
+func (d *DFA) MapAnchors() []AnchorInfo       { return d.mapAnchors }
+func (d *DFA) PrimaryAnchor() *AnchorInfo     { return d.primaryAnchor }
 
 func (d *DFA) StateMinPriority(id uint32) int32 {
 	idx := int(id & StateIDMask)

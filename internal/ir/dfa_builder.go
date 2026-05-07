@@ -37,6 +37,85 @@ func NewDFAWithMemoryLimit(ctx context.Context, re *syntax.Regexp, prog *syntax.
 		Naked:   naked,
 	}
 
+	if !HasComplexAnchors(re) {
+		d.mapAnchors = SelectBestAnchors(re)
+		if len(d.mapAnchors) > 1 {
+			var common []byte
+			commonDist := -1
+			allSameDist := true
+			first := true
+			hasBeginText, hasBeginLine := true, true
+			hasEndText, hasEndLine := true, true
+
+			for _, a := range d.mapAnchors {
+				if a.HasClass || len(a.Anchor) == 0 || !a.IsFixed {
+					allSameDist = false
+					break
+				}
+				if first {
+					common = append([]byte(nil), a.Anchor...)
+					commonDist = a.Distance
+					hasBeginText = a.HasBeginText
+					hasBeginLine = a.HasBeginLine
+					hasEndText = a.HasEndText
+					hasEndLine = a.HasEndLine
+					first = false
+				} else {
+					if a.Distance != commonDist {
+						allSameDist = false
+						break
+					}
+					n := 0
+					for n < len(common) && n < len(a.Anchor) && common[n] == a.Anchor[n] {
+						n++
+					}
+					common = common[:n]
+					hasBeginText = hasBeginText && a.HasBeginText
+					hasBeginLine = hasBeginLine && a.HasBeginLine
+					hasEndText = hasEndText && a.HasEndText
+					hasEndLine = hasEndLine && a.HasEndLine
+					if len(common) == 0 {
+						allSameDist = false
+						break
+					}
+				}
+			}
+			if allSameDist && len(common) > 1 {
+				d.mapAnchors = append(d.mapAnchors, AnchorInfo{
+					Anchor:       common,
+					Distance:     commonDist,
+					Mandatory:    true,
+					IsFixed:      true,
+					Type:         AnchorPivot,
+					HasBeginText: hasBeginText,
+					HasBeginLine: hasBeginLine,
+					HasEndText:   hasEndText,
+					HasEndLine:   hasEndLine,
+					SkipGaze:     true,
+				})
+			}
+		}
+
+		bestIdx := -1
+		maxScore := -1
+		for i := range d.mapAnchors {
+			a := &d.mapAnchors[i]
+			if !a.HasConstraints && !a.HasBeginText && !a.HasBeginLine && !a.HasEndText && !a.HasEndLine && len(a.SimpleBackward) == 0 {
+				a.SkipGaze = true
+			}
+			if a.Mandatory && a.IsFixed {
+				s := a.Score()
+				if s > maxScore {
+					maxScore = s
+					bestIdx = i
+				}
+			}
+		}
+		if bestIdx >= 0 {
+			d.primaryAnchor = &d.mapAnchors[bestIdx]
+		}
+	}
+
 	instructionTries := make([]*Trie, len(prog.Inst))
 	for id, inst := range prog.Inst {
 		if isEpsilon(inst.Op) {
