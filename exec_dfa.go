@@ -357,12 +357,13 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 					break
 				}
 			}
-			if (rawNext & ir.TaggedStateFlag) != 0 {
+			if (rawNext&ir.TaggedStateFlag) != 0 && int(off) < len(uIndices) {
 				uIdx := uIndices[off]
-				if uIdx != 0xFFFFFFFF {
+				if uIdx != 0xFFFFFFFF && int(uIdx) < len(uPrioDeltas) {
 					prio += int(uPrioDeltas[uIdx])
 				}
 			}
+
 			state = rawNext
 			step := 1
 			if byteVal >= 0x80 && (rawNext&ir.WarpStateFlag) != 0 {
