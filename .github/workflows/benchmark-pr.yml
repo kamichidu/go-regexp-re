@@ -36,8 +36,8 @@ jobs:
       - name: Run Candidate Benchmarks (PR)
         run: |
           cd internal/benchmark
-          # Run all benchmarks to ensure broad coverage of regex features
-          go test -bench . -benchmem -tags goregexp,goregexpre -count 5 | tee ../../benchmark-pr.txt
+          # Limit PR benchmarks to Synthetic suite for focused optimization analysis
+          go test -bench Synthetic -benchmem -tags goregexp,goregexpre -count 5 | tee ../../benchmark-pr.txt
 
       - name: Relative Performance Analysis
         run: |

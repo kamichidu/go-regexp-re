@@ -26,7 +26,7 @@ jobs:
           # Run both engines in one go for precise comparison
           go test -bench . -benchmem -tags goregexp,goregexpre -count 5 | tee ../../benchmark-main.txt
 
-      - name: Compare and Detect Regressions
+      - name: Analyze Performance
         run: |
           # 1. Download Latest Main Baseline from gh-pages
           curl --fail -sL https://raw.githubusercontent.com/${{ github.repository }}/gh-pages/benchmarks/baseline/benchmark-main.txt -o benchmark-baseline.txt || touch benchmark-baseline.txt
@@ -50,10 +50,6 @@ jobs:
             go tool benchstat baseline-ratio.txt current-ratio.txt | tee delta.txt >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
           fi
-
-          # 4. Run strict regression check
-          chmod +x _scripts/check-regression.sh
-          ./_scripts/check-regression.sh current-ratio.txt baseline-ratio.txt
 
       - name: Deploy Baseline, History and Visualization to gh-pages
         run: |
@@ -90,6 +86,13 @@ jobs:
           else
             echo "No changes in benchmark results."
           fi
+
+      - name: Strict Regression Guard
+        run: |
+          # Fails the workflow if a significant regression is detected,
+          # but run AFTER deployment to ensure data is preserved.
+          chmod +x _scripts/check-regression.sh
+          ./_scripts/check-regression.sh current-ratio.txt baseline-ratio.txt
       - name: Upload results as artifacts
         uses: actions/upload-artifact@v4
         with:
