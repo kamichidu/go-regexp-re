@@ -116,6 +116,37 @@ func NewDFAWithMemoryLimit(ctx context.Context, re *syntax.Regexp, prog *syntax.
 		}
 	}
 
+	d.searchDFA = buildSearchDFA(prog)
+
+	// Select optimal search strategy
+	if d.primaryAnchor != nil && len(d.primaryAnchor.Anchor) >= 3 && d.primaryAnchor.IsFixed {
+		d.searchStrategy = SearchStrategyLiteral
+	} else if d.searchDFA != nil {
+		// Only use sDFA if it's more complex than a single byte search
+		isComplex := false
+		startState := d.searchDFA.StartState
+		transCount := 0
+		for b := 0; b < 256; b++ {
+			if d.searchDFA.Transitions[(uint16(startState)<<8)|uint16(b)] != d.searchDFA.DeadState {
+				transCount++
+			}
+		}
+		// If it has multiple branches from the start, it's a good candidate for sDFA
+		if transCount > 1 {
+			isComplex = true
+		}
+
+		if isComplex {
+			d.searchStrategy = SearchStrategySDFA
+		} else {
+			d.searchStrategy = SearchStrategyNone
+		}
+	} else if d.searchWarp.Kernel != CCWarpNone && d.searchWarp.Kernel != CCWarpAnyChar && d.searchWarp.Kernel != CCWarpAnyExceptNL {
+		d.searchStrategy = SearchStrategySearchWarp
+	} else {
+		d.searchStrategy = SearchStrategyNone
+	}
+
 	instructionTries := make([]*Trie, len(prog.Inst))
 	for id, inst := range prog.Inst {
 		if isEpsilon(inst.Op) {
@@ -657,4 +688,128 @@ type dfaStateKey struct {
 	hash     uint64
 	matchP   int
 	isSearch bool
+}
+
+func buildSearchDFA(prog *syntax.Prog) *SearchDFA {
+	// Simple BFS-based DFA construction for sDFA.
+	// Limits to 255 states to fit in uint8.
+
+	// If the program is too large or contains non-ASCII, skip sDFA for now.
+	if len(prog.Inst) > 64 {
+		return nil
+	}
+	for _, inst := range prog.Inst {
+		if inst.Op == syntax.InstRune || inst.Op == syntax.InstRune1 {
+			for _, r := range inst.Rune {
+				if r >= 0x80 {
+					return nil
+				}
+			}
+		} else if inst.Op == syntax.InstRuneAny || inst.Op == syntax.InstRuneAnyNotNL {
+			// RuneAny matches non-ASCII, so sDFA might be complex.
+			// But for pre-filter, we could theoretically handle it.
+			// For simplicity, skip if it matches anything above 0x7F.
+			return nil
+		}
+	}
+
+	var computeClosure func(uint32, uint64) uint64
+	computeClosure = func(id uint32, visited uint64) uint64 {
+		if (visited & (1 << id)) != 0 {
+			return 0
+		}
+		visited |= 1 << id
+		set := uint64(1) << id
+		inst := prog.Inst[id]
+		switch inst.Op {
+		case syntax.InstCapture, syntax.InstEmptyWidth, syntax.InstNop:
+			set |= computeClosure(inst.Out, visited)
+		case syntax.InstAlt, syntax.InstAltMatch:
+			set |= computeClosure(inst.Out, visited)
+			set |= computeClosure(inst.Arg, visited)
+		}
+		return set
+	}
+
+	startClosure := computeClosure(uint32(prog.Start), 0)
+
+	states := []uint64{startClosure}
+	stateMap := map[uint64]uint8{startClosure: 0}
+	trans := make([]uint8, 0, 256*256)
+	accepting := []bool{false}
+
+	for i := 0; i < len(states); i++ {
+		curr := states[i]
+
+		// For each byte, find the next NFA set
+		for b := 0; b < 256; b++ {
+			nextSet := uint64(0)
+			for j := 0; j < len(prog.Inst); j++ {
+				if (curr & (uint64(1) << j)) != 0 {
+					inst := prog.Inst[j]
+					if inst.MatchRune(rune(b)) {
+						nextSet |= computeClosure(inst.Out, 0)
+					}
+				}
+			}
+
+			if nextSet == 0 {
+				trans = append(trans, 255) // Dead state
+				continue
+			}
+
+			id, ok := stateMap[nextSet]
+			if !ok {
+				if len(states) < 255 {
+					id = uint8(len(states))
+					stateMap[nextSet] = id
+					states = append(states, nextSet)
+
+					// Check if this set is "accepting" (contains Match)
+					isAcc := false
+					for j := 0; j < len(prog.Inst); j++ {
+						if (nextSet & (uint64(1) << j)) != 0 {
+							if prog.Inst[j].Op == syntax.InstMatch {
+								isAcc = true
+								break
+							}
+						}
+					}
+					accepting = append(accepting, isAcc)
+				} else {
+					// Too many states, abandon sDFA
+					return nil
+				}
+			}
+			trans = append(trans, id)
+		}
+	}
+
+	// Pad transitions to 256*256
+	fullTrans := make([]uint8, 256*256)
+	copy(fullTrans, trans)
+	for i := len(trans); i < len(fullTrans); i++ {
+		fullTrans[i] = 255
+	}
+
+	// Identify Trigger (bytes that transition from StartState)
+	var trigger []byte
+	for b := 0; b < 256; b++ {
+		if fullTrans[b] != 255 {
+			trigger = append(trigger, byte(b))
+		}
+	}
+
+	if len(trigger) == 0 {
+		return nil
+	}
+
+	return &SearchDFA{
+		NumStates:   len(states),
+		Transitions: fullTrans,
+		Accepting:   accepting,
+		DeadState:   255,
+		StartState:  0,
+		Trigger:     trigger,
+	}
 }

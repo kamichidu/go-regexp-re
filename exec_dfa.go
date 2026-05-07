@@ -2,7 +2,6 @@ package regexp
 
 import (
 	"bytes"
-	"fmt"
 
 	"github.com/kamichidu/go-regexp-re/internal/ir"
 	"github.com/kamichidu/go-regexp-re/syntax"
@@ -87,8 +86,11 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 	lastI := -1
 	// i: Progress pointer. Points to the next possible position of interest.
 	for i := 0; i <= numBytes; {
-		if i <= lastI {
-			panic(fmt.Sprintf("infinite loop detected in fastDiscoveryLoop: i=%d lastI=%d pattern=%q prefix=%q searchAny=%v", i, lastI, re.expr, re.prefix, re.searchAny))
+		if lastI != -1 && i <= lastI {
+			i = lastI + 1
+		}
+		if i > numBytes {
+			break
 		}
 		lastI = i
 
@@ -98,9 +100,10 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 
 		var absPos int = -1
 		var bestAnchor *ir.AnchorInfo
+		matchLiteralPos := -1
 
 		// --- Phase 1: Search ---
-		if !anchorStart && (matchState&ir.AcceptingStateFlag) == 0 && (re.primaryAnchor != nil || len(re.searchAny) > 0 || len(re.prefix) > 0 || re.searchWarp.Kernel != ir.CCWarpNone) {
+		if !anchorStart && (matchState&ir.AcceptingStateFlag) == 0 && (re.primaryAnchor != nil || len(re.searchAny) > 0 || len(re.prefix) > 0 || re.searchWarp.Kernel != ir.CCWarpNone || d.SearchDFA() != nil) {
 			// Find the next potential candidate starting from i
 			candidatePos := -1
 			var candidateAnchor *ir.AnchorInfo
@@ -143,91 +146,19 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 					}
 				}
 			}
-			if candidatePos < 0 {
-				if re.primaryAugmented != nil {
-					pos := bytes.Index(b[i:], re.primaryAugmented.Pattern)
-					if pos >= 0 {
-						candidatePos = i + pos + re.primaryAugmented.Offset
-						candidateAnchor = re.primaryAnchor
-					}
-				} else if re.primaryAnchor != nil && re.primaryAnchor.Mandatory && re.primaryAnchor.IsFixed {
-					anchor := re.primaryAnchor
-					if anchor.HasBeginText {
-						if in.AbsPos+i == 0 && anchor.Distance+len(anchor.Anchor) <= numBytes && bytes.HasPrefix(b[anchor.Distance:], anchor.Anchor) {
-							candidatePos = anchor.Distance
-							candidateAnchor = anchor
-						} else {
-							return -1, -1, 1<<30 - 1
-						}
-					} else if anchor.Type == ir.AnchorSuffix && (anchor.HasEndText || anchor.HasEndLine) {
-						boundary := numBytes
-						if !anchor.HasEndText {
-							if nl := bytes.IndexByte(b[i:], '\n'); nl >= 0 {
-								boundary = i + nl
-							}
-						}
-						pos := (boundary - i) - len(anchor.Anchor) - anchor.MinDistToLineEnd
-						if pos >= 0 && bytes.HasPrefix(b[i+pos:], anchor.Anchor) {
-							candidatePos = i + pos
-							candidateAnchor = anchor
-						}
-					} else {
-						var pos int = -1
-						if !anchor.HasClass {
-							pos = bytes.Index(b[i:], anchor.Anchor)
-						} else {
-							if anchor.Class.IndexAny != "" {
-								pos = bytes.IndexAny(b[i:], anchor.Class.IndexAny)
-							} else {
-								pos = ir.IndexClass(anchor.Class, b[i:])
-							}
-						}
-						if pos >= 0 {
-							candidatePos = i + pos
-							candidateAnchor = anchor
-						}
-					}
-				} else if len(re.searchAny) > 0 {
-					var pos int = -1
-					if len(re.searchAny) == 1 {
-						pos = bytes.IndexByte(b[i:], re.searchAny[0])
-					} else {
-						// For sets, use a loop over bytes.IndexByte to find the EARLIEST occurrence.
-						// We don't use IndexAny because it interprets its argument as a UTF-8 string.
-						for _, target := range re.searchAny {
-							p := bytes.IndexByte(b[i:], target)
-							if p >= 0 && (pos < 0 || p < pos) {
-								pos = p
-							}
-						}
-					}
 
+			if candidatePos < 0 {
+				switch d.SearchStrategy() {
+				case ir.SearchStrategyLiteral:
+					pos := bytes.Index(b[i:], re.primaryAnchor.Anchor)
 					if pos >= 0 {
-						trial := i + pos
-						fb := b[trial]
-						// Fast verification using searchMask
-						if (re.searchMask[fb/64] & (1 << (fb % 64))) != 0 {
-							for k := range re.mapAnchors {
-								a := &re.mapAnchors[k]
-								if (!a.HasClass && len(a.Anchor) > 0 && a.Anchor[0] == fb && bytes.HasPrefix(b[trial:], a.Anchor)) || (a.HasClass && ir.ValidateFixed(a.Class, b[trial:trial+1])) {
-									candidatePos = trial
-									candidateAnchor = a
-									break
-								}
-							}
-						}
-						if candidatePos < 0 {
-							// Found a character in searchAny, but not a valid anchor. Skip it.
-							i = trial + 1
-							continue
-						}
+						matchLiteralPos = i + pos
+						candidatePos = matchLiteralPos
+						candidateAnchor = re.primaryAnchor
+					} else {
+						i = numBytes
 					}
-				} else if len(re.prefix) > 0 {
-					pos := bytes.Index(b[i:], re.prefix)
-					if pos >= 0 {
-						candidatePos = i + pos
-					}
-				} else if re.searchWarp.Kernel != ir.CCWarpNone {
+				case ir.SearchStrategySearchWarp:
 					pos := -1
 					if re.searchWarp.IndexAny != "" {
 						pos = bytes.IndexAny(b[i:], re.searchWarp.IndexAny)
@@ -236,6 +167,151 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 					}
 					if pos >= 0 {
 						candidatePos = i + pos
+					} else {
+						return -1, -1, 1<<30 - 1
+					}
+				case ir.SearchStrategySDFA:
+					sd := d.SearchDFA()
+					foundSDFA := false
+					for i < numBytes {
+						idx := bytes.IndexAny(b[i:], string(sd.Trigger))
+						if idx < 0 {
+							break
+						}
+						i += idx
+
+						// Use sDFA to verify prefix
+						state := sd.StartState
+						currI := i
+						found := false
+						for currI < numBytes {
+							state = sd.Transitions[(uint16(state)<<8)|uint16(b[currI])]
+							if state == sd.DeadState {
+								break
+							}
+							if sd.Accepting[state] {
+								found = true
+								break
+							}
+							currI++
+						}
+
+						if found {
+							candidatePos = i
+							foundSDFA = true
+							break
+						}
+						i++ // False positive, skip this byte and search again
+					}
+					if !foundSDFA {
+						return -1, -1, 1<<30 - 1
+					}
+				default:
+					// Fallback to legacy MAP logic or searchAny
+					if re.primaryAugmented != nil {
+						pos := bytes.Index(b[i:], re.primaryAugmented.Pattern)
+						if pos >= 0 {
+							candidatePos = i + pos + re.primaryAugmented.Offset
+							candidateAnchor = re.primaryAnchor
+						} else {
+							i = numBytes // Not found
+						}
+					} else if re.primaryAnchor != nil && re.primaryAnchor.Mandatory && re.primaryAnchor.IsFixed {
+						anchor := re.primaryAnchor
+						if anchor.HasBeginText {
+							if in.AbsPos+i == 0 && anchor.Distance+len(anchor.Anchor) <= numBytes && bytes.HasPrefix(b[anchor.Distance:], anchor.Anchor) {
+								candidatePos = anchor.Distance
+								candidateAnchor = anchor
+							} else {
+								return -1, -1, 1<<30 - 1
+							}
+						} else if anchor.Type == ir.AnchorSuffix && (anchor.HasEndText || anchor.HasEndLine) {
+							boundary := numBytes
+							if !anchor.HasEndText {
+								if nl := bytes.IndexByte(b[i:], '\n'); nl >= 0 {
+									boundary = i + nl
+								}
+							}
+							pos := (boundary - i) - len(anchor.Anchor) - anchor.MinDistToLineEnd
+							if pos >= 0 && bytes.HasPrefix(b[i+pos:], anchor.Anchor) {
+								candidatePos = i + pos
+								candidateAnchor = anchor
+							} else {
+								i++
+							}
+						} else {
+							var pos int = -1
+							if !anchor.HasClass {
+								pos = bytes.Index(b[i:], anchor.Anchor)
+							} else {
+								if anchor.Class.IndexAny != "" {
+									pos = bytes.IndexAny(b[i:], anchor.Class.IndexAny)
+								} else {
+									pos = ir.IndexClass(anchor.Class, b[i:])
+								}
+							}
+							if pos >= 0 {
+								candidatePos = i + pos
+								candidateAnchor = anchor
+							} else {
+								i = numBytes
+							}
+						}
+					} else if len(re.searchAny) > 0 {
+						var pos int = -1
+						if len(re.searchAny) == 1 {
+							pos = bytes.IndexByte(b[i:], re.searchAny[0])
+						} else {
+							for _, target := range re.searchAny {
+								p := bytes.IndexByte(b[i:], target)
+								if p >= 0 && (pos < 0 || p < pos) {
+									pos = p
+								}
+							}
+						}
+
+						if pos >= 0 {
+							trial := i + pos
+							fb := b[trial]
+							if (re.searchMask[fb/64] & (1 << (fb % 64))) != 0 {
+								for k := range re.mapAnchors {
+									a := &re.mapAnchors[k]
+									if (!a.HasClass && len(a.Anchor) > 0 && a.Anchor[0] == fb && bytes.HasPrefix(b[trial:], a.Anchor)) || (a.HasClass && ir.ValidateFixed(a.Class, b[trial:trial+1])) {
+										candidatePos = trial
+										candidateAnchor = a
+										break
+									}
+								}
+							}
+							if candidatePos < 0 {
+								i = trial + 1
+								continue
+							}
+						} else {
+							i = numBytes
+						}
+					} else if len(re.prefix) > 0 {
+						pos := bytes.Index(b[i:], re.prefix)
+						if pos >= 0 {
+							candidatePos = i + pos
+						} else {
+							i = numBytes
+						}
+					} else if re.searchWarp.Kernel != ir.CCWarpNone {
+						pos := -1
+						if re.searchWarp.IndexAny != "" {
+							pos = bytes.IndexAny(b[i:], re.searchWarp.IndexAny)
+						} else {
+							pos = ir.IndexClass(re.searchWarp, b[i:])
+						}
+						if pos >= 0 {
+							candidatePos = i + pos
+						} else {
+							i = numBytes
+						}
+					} else {
+						// True fallback: no search info
+						candidatePos = i
 					}
 				}
 			}
@@ -245,6 +321,11 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 			}
 			absPos = candidatePos
 			bestAnchor = candidateAnchor
+			if matchLiteralPos >= 0 {
+				i = matchLiteralPos + 1
+			} else {
+				i = absPos + 1
+			}
 		} else {
 			absPos = i
 		}

@@ -63,6 +63,25 @@ type NFAPath struct {
 
 const NFAPathSize = int(unsafe.Sizeof(NFAPath{}))
 
+type SearchStrategy uint8
+
+const (
+	SearchStrategyNone       SearchStrategy = iota
+	SearchStrategyLiteral                   // bytes.Index (Best for long literals)
+	SearchStrategyIndexAny                  // bytes.IndexAny (Best for small character sets)
+	SearchStrategySearchWarp                // ir.IndexClass/SWAR (Best for complex repetitions)
+	SearchStrategySDFA                      // Searching DFA (Best for complex prefixes like (abc|def))
+)
+
+type SearchDFA struct {
+	NumStates   int
+	Transitions []uint8 // [numStates * 256]uint8
+	Accepting   []bool  // States that indicate a strong candidate
+	DeadState   uint8
+	StartState  uint8
+	Trigger     []byte // Characters that can transition from StartState
+}
+
 type DFA struct {
 	numStates               int
 	transitions             []uint32
@@ -89,6 +108,8 @@ type DFA struct {
 	searchWarp              CCWarpInfo
 	mapAnchors              []AnchorInfo
 	primaryAnchor           *AnchorInfo
+	searchDFA               *SearchDFA
+	searchStrategy          SearchStrategy
 }
 
 func (d *DFA) IsNaked() bool                  { return d.Naked }
@@ -98,6 +119,8 @@ func (d *DFA) CCWarpTable() []CCWarpInfo      { return d.ccWarpTable }
 func (d *DFA) SearchWarp() CCWarpInfo         { return d.searchWarp }
 func (d *DFA) MapAnchors() []AnchorInfo       { return d.mapAnchors }
 func (d *DFA) PrimaryAnchor() *AnchorInfo     { return d.primaryAnchor }
+func (d *DFA) SearchDFA() *SearchDFA          { return d.searchDFA }
+func (d *DFA) SearchStrategy() SearchStrategy { return d.searchStrategy }
 
 func (d *DFA) StateMinPriority(id uint32) int32 {
 	idx := int(id & StateIDMask)

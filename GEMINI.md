@@ -30,9 +30,11 @@ To maximize throughput, the engine MUST select the most efficient execution loop
 - **Fast Path (Boundary-Only Discovery)**: Selected for `Match` and `FindIndex` calls where capture groups are not required. It utilizes a minimalist execution loop (Pass 0 + Pass 1) with zero history recording and early exit on first match.
 - **Full Path (Multi-Pass Sparse TDFA)**: Selected for `FindSubmatchIndex` calls. It employs the comprehensive 5-pass pipeline to guarantee peak performance and Go parity:
 - **Pass 0 (MAP)**: Primary search phase. Identifies mandatory paths and extracts anchor candidates (**Prefix**, **Pivot**, or **Suffix**).
-        - **Search**: Identifies raw candidate positions using SIMD/SWAR. **Leverages LCP (Longest Common Prefix) Factoring to extract mandatory prefixes from alternations (e.g., 'fo' from '(fo|foo)'), enabling high-speed string scanning even for complex choices.**
-        - **Gaze**: Verifies O(1) constraints (anchors, fixed-distance literals) to reject false candidates early. **Optimized with SkipGaze: Anchors verified by Search (like factored prefixes) or those without surrounding constraints bypass this phase entirely to eliminate redundant CPU cycles.**
-        - **Snap**: Identifies the true match start (Horizon) by reverse-scanning variable-length repetitions.
+    - **Search**: Identifies raw candidate positions using SIMD/SWAR. **Leverages LCP (Longest Common Prefix) Factoring to extract mandatory prefixes from alternations (e.g., 'fo' from '(fo|foo)'), enabling high-speed string scanning even for complex choices.**
+    - **Searching DFA (sDFA)**: A lightweight, uint8-based DFA used as a multi-byte pre-filter. It resolves simple alternations (e.g., `(abc|def)`) and character class sequences (e.g., `[a-z][0-9]`) at O(n) speed to eliminate false positives before activating the full DFA.
+    - **Gaze**: Verifies O(1) constraints (anchors, fixed-distance literals) to reject false candidates early. **Optimized with SkipGaze: Anchors verified by Search (like factored prefixes) or those without surrounding constraints bypass this phase entirely to eliminate redundant CPU cycles.**
+    - **Snap**: Identifies the true match start (Horizon) by reverse-scanning variable-length repetitions.
+
     - **Pass 1: Boundary Discovery (Searching DFA)**: Uses a Safe Searching DFA to identify match end and winning priority in $O(n)$.
     - **Pass 1.5: Leftmost Start Discovery**: Since searching DFAs conflate start positions, the engine performs a manual scan to find the exact leftmost `start`.
     - **Pass 2: Anchored Recording (Precise Forward Scan)**: Re-runs an Anchored DFA over the identified match range to generate a noise-free execution history. History initialization MUST be $O(1)$ relative to total input.

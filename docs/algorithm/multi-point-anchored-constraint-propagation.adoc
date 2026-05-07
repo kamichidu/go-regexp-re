@@ -78,7 +78,13 @@ The propagator only executes checks that are significantly cheaper than a few DF
 - **Structural Boundary Check**: Verify if `P` is preceded/followed by `\n` if the pattern is line-anchored.
 - **Single-Point Literal Check**: If the pattern has other mandatory literal points, verify a single byte or short prefix at a fixed offset from `P`.
 
-=== B. Early Handover Principle
+=== C. Searching DFA (sDFA) - Multi-byte Pre-filtering
+To further bridge the gap between high-speed SIMD search and heavy DFA execution, MAP utilizes a **Searching DFA (sDFA)**.
+- **Mechanism**: A lightweight, `uint8`-based DFA constructed from the NFA prefix (limited to 256 states). It resolves simple alternations (e.g., `abc|def`) or character class sequences (e.g., `[a-z][0-9]`) that cannot be captured by a single `bytes.Index` call.
+- **Execution Flow**: After the Primary Iterator (SIMD/SWAR) identifies a potential starting byte, the sDFA performs a quick $O(n)$ scan of the subsequent few bytes.
+- **High-Confidence Rejection**: If the sDFA reaches a **Dead State**, the candidate is immediately rejected as a false positive without ever invoking the full DFA. Control is handed over to the full DFA only if the sDFA reaches an **Accepting State** (representing a confirmed prefix).
+
+=== D. Early Handover Principle
 To avoid the "validation bottleneck," MAP defers all complex verification to the DFA (Pass 1):
 
 - **No Variable-Length Skips**: Variable-length constraints (`.*`, `a+`) are never validated in Pass 0.
