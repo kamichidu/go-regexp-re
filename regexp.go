@@ -132,6 +132,65 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 				res.mapAnchors[i].Class.IncludeNL = true
 			}
 		}
+
+		if len(res.mapAnchors) > 1 {
+			// Factoring: If all anchors share a common prefix at the same distance,
+			// we can extract it as a mandatory anchor to enable faster prefix search.
+			var common []byte
+			commonDist := -1
+			allSameDist := true
+			first := true
+			hasBeginText, hasBeginLine := true, true
+			hasEndText, hasEndLine := true, true
+
+			for _, a := range res.mapAnchors {
+				if a.HasClass || len(a.Anchor) == 0 || !a.IsFixed {
+					allSameDist = false
+					break
+				}
+				if first {
+					common = append([]byte(nil), a.Anchor...)
+					commonDist = a.Distance
+					hasBeginText = a.HasBeginText
+					hasBeginLine = a.HasBeginLine
+					hasEndText = a.HasEndText
+					hasEndLine = a.HasEndLine
+					first = false
+				} else {
+					if a.Distance != commonDist {
+						allSameDist = false
+						break
+					}
+					n := 0
+					for n < len(common) && n < len(a.Anchor) && common[n] == a.Anchor[n] {
+						n++
+					}
+					common = common[:n]
+					hasBeginText = hasBeginText && a.HasBeginText
+					hasBeginLine = hasBeginLine && a.HasBeginLine
+					hasEndText = hasEndText && a.HasEndText
+					hasEndLine = hasEndLine && a.HasEndLine
+					if len(common) == 0 {
+						allSameDist = false
+						break
+					}
+				}
+			}
+			if allSameDist && len(common) > 1 {
+				res.mapAnchors = append(res.mapAnchors, ir.AnchorInfo{
+					Anchor:       common,
+					Distance:     commonDist,
+					Mandatory:    true,
+					IsFixed:      true,
+					Type:         ir.AnchorPivot,
+					HasBeginText: hasBeginText,
+					HasBeginLine: hasBeginLine,
+					HasEndText:   hasEndText,
+					HasEndLine:   hasEndLine,
+				})
+			}
+		}
+
 		if len(res.mapAnchors) > 0 {
 			// 1. Calculate searchAny from ALL anchors in the covering set
 			var buf []byte
@@ -277,6 +336,27 @@ func calculateLiteralPrefix(re *syntax.Regexp) (string, bool) {
 			}
 		}
 		return prefix, true
+	case syntax.OpAlternate:
+		var prefix string
+		complete := true
+		for i, sub := range re.Sub {
+			p, c := calculateLiteralPrefix(sub)
+			if i == 0 {
+				prefix = p
+				complete = c
+			} else {
+				n := 0
+				for n < len(prefix) && n < len(p) && prefix[n] == p[n] {
+					n++
+				}
+				prefix = prefix[:n]
+				complete = complete && c && len(prefix) == len(p)
+			}
+			if prefix == "" {
+				break
+			}
+		}
+		return prefix, complete
 	}
 	return "", false
 }
