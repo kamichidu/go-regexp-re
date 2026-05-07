@@ -39,15 +39,25 @@ The following benchmarks were conducted on an `amd64` (Go 1.25.1) environment, s
 
 == Analysis of Failure
 
-The proposal was rejected for the following technical reasons:
+The proposal was rejected, and later **strictly prohibited** in all hot loops (including SearchWarp), for the following technical reasons:
 
-1. **DFA Efficiency**: The current DFA implementation uses a highly optimized execution loop (`table[(state << 8) | byte]`) that fits entirely within L1/L2 caches. At 2.4 GB/s, it outperforms the branching and setup logic required by `bytes.IndexAny`.
-2. **`bytes.IndexAny` Overhead**: Unlike `bytes.Index` which uses specialized SIMD instructions (like `PCMPESTRI` or AVX2), `bytes.IndexAny` in Go often employs a bitset lookup mechanism that, while faster than a naive loop, is still slower than a single table-indexed DFA transition.
-3. **High False Positive Rate**: Characters in common classes like `\w` appear frequently in natural text and code. A pre-filter that hits every second or third character provides no "skip" benefit and only adds overhead before entering the actual state machine.
-4. **Unicode Scalability**: For large character sets (like Unicode lead bytes), `bytes.IndexAny` performance degrades significantly, making it unsuitable for a high-performance engine.
+1. **DFA & SWAR Efficiency**: The current DFA loop runs at 2.4 GB/s, and our custom SWAR kernels run at 2.7-3.3 GB/s. `bytes.IndexAny` bottlenecks at ~1.2 GB/s, making it a performance degrader rather than an optimizer.
+2. **`bytes.IndexAny` Overhead**: Unlike `bytes.Index`, `bytes.IndexAny` in Go 1.25.1 still incurs significant overhead from UTF-8 decoding and generic bitset lookups.
+3. **High False Positive Rate**: Characters in common classes like `\w` appear frequently. A pre-filter that hits every few characters adds overhead before entering the DFA.
+
+== 2026 Update: Full Prohibition
+
+In May 2026, the engine's "Search Strategy Dispatch" was updated to completely eliminate `bytes.IndexAny`. Even for SearchWarp (Discovery Phase), the engine now mandates project-specific SWAR kernels (`ir.IndexClass`).
+
+|===
+| Strategy | Throughput (MB/s) | Result
+
+| `bytes.Index` (Literal) | ~25,000 | **Keep**
+| **SWAR (SingleRange)** | **~2,700** | **Preferred**
+| Pure DFA Loop | ~2,400 | **Base**
+| `bytes.IndexAny` (`\w`) | **~1,200** | **Strictly Prohibited**
+|===
 
 == Conclusion
 
-For character classes and `\w`, the engine will continue to rely on its **Fast-Path DFA** and **Bit-Parallel DFA** execution loops for the primary scan.
-
-**Clarification on SearchWarp**: Note that `bytes.IndexAny` is **still utilized** in the **SearchWarp (Discovery Phase)** specifically for small, ASCII-only character sets. In this context, it acts as a high-speed pre-filter to find potential match start candidates before entering the DFA. However, it remains "rejected" as a general-purpose replacement for the core DFA transition loop due to the reasons cited above.
+Standard library `bytes.IndexAny` is formally banned from the `go-regexp-re` hot paths. All character set searches must use `ir.IndexClass` (SWAR).

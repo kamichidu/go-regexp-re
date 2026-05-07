@@ -14,12 +14,11 @@ The engine applies SWAR optimizations in two distinct phases to maximize through
 === 1. SearchWarp (Pre-filtering)
 When the engine is in the initial `searchState` (scanning for a match start), it uses the **SearchWarp** phase to skip "noise" characters. 
 
-- **Hybrid Strategy**: To achieve peak performance, SearchWarp prioritizes Go standard library SIMD-accelerated functions:
+- **Unified SWAR Strategy**: To achieve peak performance, SearchWarp relies exclusively on project-specific SWAR kernels or minimal SIMD-accelerated library functions:
     *   **Single Byte**: Uses `bytes.IndexByte` (up to 15 GB/s).
-    *   **ASCII Search Set**: Uses `bytes.IndexAny` with a pre-calculated ASCII string.
-    *   **Non-ASCII Search Set**: Uses manual `IndexByte` loops to find the earliest occurrence of any byte in the set. This avoids `bytes.IndexAny`'s UTF-8 interpretation of raw bytes, which can lead to false negatives for multi-byte lead bytes.
-    *   **Large/Negated Set**: Falls back to specialized SWAR kernels (e.g., `CCWarpNotSingleRange`) to skip noise 8 bytes at a time.
-- **Goal**: Rapidly skip segments of text that cannot possibly start a match.
+    *   **Character Sets & Ranges**: Uses `ir.IndexClass` (SWAR). Standard library `bytes.IndexAny` is **STRICTLY PROHIBITED** as it has been proven to bottleneck at ~1.2 GB/s due to UTF-8 decoding and bitset overhead.
+    *   **Goal**: Rapidly skip segments of text that cannot possibly start a match.
+- **Performance Advantage**: On ASCII ranges like `[0-9]`, `ir.IndexClass` (SWAR) reaches ~2.7 GB/s, more than double the speed of `bytes.IndexAny` (~1.2 GB/s).
 - **Sharing**: It shares the same kernel definitions as CCWarp but applies **inverted logic**: it skips as long as characters are NOT in the "Start Set".
 
 === 2. CCWarp (Match Fast-Forwarding)
