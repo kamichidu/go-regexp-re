@@ -1179,7 +1179,7 @@ func (a *AnchorInfo) Score() int {
 	if a.IsFixed {
 		score += 50
 	}
-	if a.HasBeginText || a.HasEndText || a.HasEndLine {
+	if a.HasBeginText || a.HasBeginLine || a.HasEndText || a.HasEndLine {
 		score += 20
 	}
 	if a.Type == AnchorSuffix && (a.HasEndText || a.HasEndLine) {
@@ -1654,8 +1654,6 @@ func HasComplexAnchors(re *syntax.Regexp) bool {
 		return false
 	}
 	switch re.Op {
-	case syntax.OpWordBoundary, syntax.OpNoWordBoundary:
-		return true
 	case syntax.OpCapture, syntax.OpRepeat, syntax.OpQuest, syntax.OpPlus, syntax.OpStar:
 		if len(re.Sub) > 0 {
 			return HasComplexAnchors(re.Sub[0])
