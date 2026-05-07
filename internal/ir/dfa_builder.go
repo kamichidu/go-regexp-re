@@ -810,6 +810,6 @@ func buildSearchDFA(prog *syntax.Prog) *SearchDFA {
 		Accepting:   accepting,
 		DeadState:   255,
 		StartState:  0,
-		Trigger:     trigger,
+		Trigger:     string(trigger),
 	}
 }

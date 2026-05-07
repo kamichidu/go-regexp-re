@@ -49,7 +49,7 @@ An advanced 32-bit bit-packing strategy that applies Run-Length Encoding (RLE) d
 An optimization that extracts common prefixes from alternation branches to enable high-speed SIMD scanning for complex choices.
 
 === 13. Searching DFA (sDFA) - Multi-byte Pre-filter
-A lightweight, `uint8`-based DFA that acts as a multi-byte pre-filter in Pass 0. It efficiently resolves simple alternations and character class sequences at $O(n)$ speed, significantly reducing false positives and unnecessary activations of the full DFA machinery.
+A lightweight, `uint8`-based DFA that acts as a multi-byte pre-filter in Pass 0. It efficiently resolves simple alternations and character class sequences. **The engine uses Search Strategy Dispatch to select between Literal (SIMD), SearchWarp (SWAR), and sDFA based on pattern complexity to ensure optimal performance.**
 
 == Design Philosophy
 

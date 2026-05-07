@@ -174,7 +174,7 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 					sd := d.SearchDFA()
 					foundSDFA := false
 					for i < numBytes {
-						idx := bytes.IndexAny(b[i:], string(sd.Trigger))
+						idx := bytes.IndexAny(b[i:], sd.Trigger)
 						if idx < 0 {
 							break
 						}

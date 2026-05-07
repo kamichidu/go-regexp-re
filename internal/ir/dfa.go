@@ -79,7 +79,7 @@ type SearchDFA struct {
 	Accepting   []bool  // States that indicate a strong candidate
 	DeadState   uint8
 	StartState  uint8
-	Trigger     []byte // Characters that can transition from StartState
+	Trigger     string // Characters that can transition from StartState
 }
 
 type DFA struct {
