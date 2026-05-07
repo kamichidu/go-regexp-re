@@ -1078,6 +1078,16 @@ func findCoveringAnchors(re *syntax.Regexp, offset int, atStart bool, hasBeginTe
 				IsFixed: true, Mandatory: true, HasBeginText: hasBeginText, HasBeginLine: hasBeginLine,
 			}}
 		}
+	case syntax.OpBeginText:
+		return []AnchorInfo{{
+			Type: AnchorPivot, Distance: offset,
+			IsFixed: true, Mandatory: true, HasBeginText: true, HasBeginLine: hasBeginLine,
+		}}
+	case syntax.OpBeginLine:
+		return []AnchorInfo{{
+			Type: AnchorPivot, Distance: offset,
+			IsFixed: true, Mandatory: true, HasBeginText: hasBeginText, HasBeginLine: true,
+		}}
 	case syntax.OpRepeat, syntax.OpQuest, syntax.OpStar, syntax.OpPlus:
 		return findCoveringAnchors(re.Sub[0], offset, atStart, hasBeginText, hasBeginLine)
 	case syntax.OpCapture:

@@ -105,7 +105,22 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 			candidatePos := -1
 			var candidateAnchor *ir.AnchorInfo
 
-			if i == 0 && in.AbsPos == 0 && re.primaryAnchor != nil {
+			// Check if any anchor could match at i (e.g. ^ at pos 0)
+			for k := range re.mapAnchors {
+				a := &re.mapAnchors[k]
+				if a.HasBeginText && in.AbsPos+i == 0 {
+					candidatePos = i
+					candidateAnchor = a
+					break
+				}
+				if a.HasBeginLine && (in.AbsPos+i == 0 || (in.AbsPos+i > 0 && in.OriginalB[in.AbsPos+i-1] == '\n')) {
+					candidatePos = i
+					candidateAnchor = a
+					break
+				}
+			}
+
+			if candidatePos < 0 && i == 0 && in.AbsPos == 0 && re.primaryAnchor != nil {
 				for k := range re.primaryAnchor.Augmented {
 					aug := &re.primaryAnchor.Augmented[k]
 					if aug.IsStart && bytes.HasPrefix(b, aug.Pattern) {
@@ -221,7 +236,7 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 		}
 
 		// --- Phase 2: Gaze (Verify O(1) constraints) ---
-		if bestAnchor != nil {
+		if bestAnchor != nil && len(bestAnchor.Anchor) > 0 {
 			rejected := false
 			totalAbsPos := in.AbsPos + absPos
 			if bestAnchor.HasBeginText && (totalAbsPos != 0) {
@@ -285,7 +300,7 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 		if (state & ir.AcceptingStateFlag) != 0 {
 			sidx := state & ir.StateIDMask
 			req := guards[sidx]
-			if req == 0 || (ir.VerifyEnd(in, scanPos, req) && ir.VerifyBegin(in, j, req) && ir.VerifyWord(in, scanPos, req) && ir.VerifyWord(in, j, req)) {
+			if req == 0 || (ir.VerifyEnd(in, scanPos, req) && ir.VerifyBegin(in, scanPos, req) && ir.VerifyWord(in, scanPos, req)) {
 				currentBestEnd = scanPos
 				currentBestPrio = prio + int(d.MatchPriority(sidx))
 			}
@@ -303,7 +318,7 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 					if (state & ir.AcceptingStateFlag) != 0 {
 						sidx := state & ir.StateIDMask
 						req := guards[sidx]
-						if req == 0 || (ir.VerifyEnd(in, scanPos, req) && ir.VerifyBegin(in, j, req) && ir.VerifyWord(in, scanPos, req) && ir.VerifyWord(in, j, req)) {
+						if req == 0 || (ir.VerifyEnd(in, scanPos, req) && ir.VerifyBegin(in, scanPos, req) && ir.VerifyWord(in, scanPos, req)) {
 							currentBestEnd = scanPos
 							currentBestPrio = prio + int(d.MatchPriority(sidx))
 						}
@@ -334,7 +349,7 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 			if (state & ir.AcceptingStateFlag) != 0 {
 				sidx := state & ir.StateIDMask
 				req := guards[sidx]
-				if req == 0 || (ir.VerifyEnd(in, scanPos, req) && ir.VerifyBegin(in, j, req) && ir.VerifyWord(in, scanPos, req) && ir.VerifyWord(in, j, req)) {
+				if req == 0 || (ir.VerifyEnd(in, scanPos, req) && ir.VerifyBegin(in, scanPos, req) && ir.VerifyWord(in, scanPos, req)) {
 					p := prio + int(d.MatchPriority(sidx))
 					if p < currentBestPrio {
 						currentBestEnd = scanPos

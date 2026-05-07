@@ -198,9 +198,11 @@ func NewDFAWithMemoryLimit(ctx context.Context, re *syntax.Regexp, prog *syntax.
 							nextNodeID = 0
 						}
 						nextPaths = append(nextPaths, NFAPath{ID: nextID, NodeID: nextNodeID, Priority: p.Priority, Tags: p.Tags})
-						nextAnchors |= p.Anchors
 						if p.Priority < minNextPrio {
 							minNextPrio = p.Priority
+							nextAnchors = p.Anchors
+						} else if p.Priority == minNextPrio {
+							nextAnchors |= p.Anchors
 						}
 						break
 					}
