@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"github.com/kamichidu/go-regexp-re/syntax"
 	"math/bits"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -795,9 +796,59 @@ func toCCWarp(re *syntax.Regexp) (CCWarpInfo, bool) {
 	switch re.Op {
 	case syntax.OpLiteral:
 		if len(re.Rune) == 1 {
-			return CCWarpInfo{Kernel: CCWarpEqual, V0: uint64(re.Rune[0])}, true
+			r := re.Rune[0]
+			if re.Flags&syntax.FoldCase != 0 {
+				var extra []uint64
+				seen := make(map[rune]bool)
+				f := r
+				for {
+					if !seen[f] {
+						if f < 0x80 {
+							extra = append(extra, uint64(f))
+						}
+						seen[f] = true
+					}
+					f = unicode.SimpleFold(f)
+					if f == r {
+						break
+					}
+				}
+				if len(extra) > 0 {
+					return CCWarpInfo{Kernel: CCWarpEqualSet, Extra: extra}, true
+				}
+				return CCWarpInfo{}, false
+			}
+			return CCWarpInfo{Kernel: CCWarpEqual, V0: uint64(r)}, true
 		}
 	case syntax.OpCharClass:
+		if re.Flags&syntax.FoldCase != 0 {
+			var extra []uint64
+			seen := make(map[rune]bool)
+			for i := 0; i+1 < len(re.Rune); i += 2 {
+				for r := re.Rune[i]; r <= re.Rune[i+1]; r++ {
+					f := r
+					for {
+						if !seen[f] {
+							if f < 0x80 {
+								extra = append(extra, uint64(f))
+							}
+							seen[f] = true
+						}
+						f = unicode.SimpleFold(f)
+						if f == r {
+							break
+						}
+					}
+					if len(extra) > 1000 {
+						return CCWarpInfo{}, false
+					}
+				}
+			}
+			if len(extra) > 0 {
+				return CCWarpInfo{Kernel: CCWarpEqualSet, Extra: extra}, true
+			}
+			return CCWarpInfo{}, false
+		}
 		if len(re.Rune) == 2 {
 			return CCWarpInfo{Kernel: CCWarpSingleRange, V0: uint64(re.Rune[0]), V1: uint64(re.Rune[1])}, true
 		}
@@ -1012,22 +1063,20 @@ func findCoveringAnchors(re *syntax.Regexp, offset int, atStart bool, hasBeginTe
 					IsFixed: true, Mandatory: true, HasBeginText: hasBeginText, HasBeginLine: hasBeginLine,
 				}}
 			}
-		}
-	case syntax.OpCharClass:
-		if re.Flags&syntax.FoldCase == 0 {
-			if len(re.Rune) == 2 && re.Rune[0] == re.Rune[1] {
-				var b [utf8.UTFMax]byte
-				n := utf8.EncodeRune(b[:], re.Rune[0])
-				return []AnchorInfo{{
-					Anchor: b[:n], Type: AnchorPivot, Distance: offset,
-					IsFixed: true, Mandatory: true, HasBeginText: hasBeginText, HasBeginLine: hasBeginLine,
-				}}
-			} else if info, ok := toCCWarp(re); ok {
+		} else {
+			if info, ok := toCCWarp(re); ok {
 				return []AnchorInfo{{
 					Class: info, HasClass: true, Type: AnchorPivot, Distance: offset,
 					IsFixed: true, Mandatory: true, HasBeginText: hasBeginText, HasBeginLine: hasBeginLine,
 				}}
 			}
+		}
+	case syntax.OpCharClass:
+		if info, ok := toCCWarp(re); ok {
+			return []AnchorInfo{{
+				Class: info, HasClass: true, Type: AnchorPivot, Distance: offset,
+				IsFixed: true, Mandatory: true, HasBeginText: hasBeginText, HasBeginLine: hasBeginLine,
+			}}
 		}
 	case syntax.OpRepeat, syntax.OpQuest, syntax.OpStar, syntax.OpPlus:
 		return findCoveringAnchors(re.Sub[0], offset, atStart, hasBeginText, hasBeginLine)

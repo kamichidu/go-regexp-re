@@ -16,12 +16,6 @@ type ClosureResult struct {
 	MatchAnchors syntax.EmptyOp
 }
 
-type dfaStateKey struct {
-	hash          uint64
-	matchPriority int
-	isSearch      bool
-}
-
 func NewDFAWithMemoryLimit(ctx context.Context, re *syntax.Regexp, prog *syntax.Prog, maxMemory int, naked bool) (d *DFA, err error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -51,14 +45,18 @@ func NewDFAWithMemoryLimit(ctx context.Context, re *syntax.Regexp, prog *syntax.
 		t := NewTrie()
 		foldCase := (inst.Arg & 1) != 0
 		if inst.Op == syntax.InstRune {
-			if len(inst.Rune) == 1 && foldCase {
+			if len(inst.Rune) == 1 {
 				r := inst.Rune[0]
-				for {
-					t.AddRuneRange(r, r)
-					r = unicode.SimpleFold(r)
-					if r == inst.Rune[0] {
-						break
+				if foldCase {
+					for {
+						t.AddRuneRange(r, r)
+						r = unicode.SimpleFold(r)
+						if r == inst.Rune[0] {
+							break
+						}
 					}
+				} else {
+					t.AddRuneRange(r, r)
 				}
 			} else {
 				for i := 0; i+1 < len(inst.Rune); i += 2 {
@@ -156,10 +154,7 @@ func NewDFAWithMemoryLimit(ctx context.Context, re *syntax.Regexp, prog *syntax.
 		d.stateMinPriority = append(d.stateMinPriority, minP)
 		d.stateMatchPriority = append(d.stateMatchPriority, matchP)
 		d.stateEntryTags = append(d.stateEntryTags, updates)
-		// A state has an unbeatable match only if its match priority is 0 AND
-		// no other path (including restarts) has a lower priority.
 		d.stateIsBestMatch = append(d.stateIsBestMatch, matchP == 0 && minP == 0)
-
 		d.accepting = append(d.accepting, matchP != 1<<30-1)
 		d.acceptingGuards = append(d.acceptingGuards, matchAnchors)
 		d.numStates++
@@ -189,7 +184,7 @@ func NewDFAWithMemoryLimit(ctx context.Context, re *syntax.Regexp, prog *syntax.
 
 			nextPaths := make([]NFAPath, 0, len(closure))
 			var nextAnchors syntax.EmptyOp
-			minP := int32(1<<30 - 1)
+			minNextPrio := int32(1<<30 - 1)
 			for _, p := range closure {
 				t := instructionTries[p.ID]
 				if t == nil {
@@ -203,11 +198,9 @@ func NewDFAWithMemoryLimit(ctx context.Context, re *syntax.Regexp, prog *syntax.
 							nextNodeID = 0
 						}
 						nextPaths = append(nextPaths, NFAPath{ID: nextID, NodeID: nextNodeID, Priority: p.Priority, Tags: p.Tags})
-						if p.Priority < minP {
-							minP = p.Priority
-							nextAnchors = p.Anchors
-						} else if p.Priority == minP {
-							nextAnchors |= p.Anchors
+						nextAnchors |= p.Anchors
+						if p.Priority < minNextPrio {
+							minNextPrio = p.Priority
 						}
 						break
 					}
@@ -227,13 +220,6 @@ func NewDFAWithMemoryLimit(ctx context.Context, re *syntax.Regexp, prog *syntax.
 			if nextAnchors != 0 {
 				rawNext |= AnchorVerifyFlag | (uint32(nextAnchors) << 22)
 				d.hasAnchors = true
-			}
-
-			minNextPrio := int32(1<<30 - 1)
-			for _, p := range nextPaths {
-				if p.Priority < minNextPrio {
-					minNextPrio = p.Priority
-				}
 			}
 
 			if len(nextRes.Updates) > 0 {
@@ -264,136 +250,15 @@ func NewDFAWithMemoryLimit(ctx context.Context, re *syntax.Regexp, prog *syntax.
 		}
 	}
 
-	// CCWarp Detection
-	d.ccWarpTable = make([]CCWarpInfo, d.numStates)
-	for i := 0; i < d.numStates; i++ {
-		var selfLoops [256]bool
-		count := 0
-		for b := 0; b < 128; b++ {
-			idx := (i << 8) | b
-			if idx >= len(d.transitions) {
-				continue
-			}
-			next := d.transitions[idx]
-			if next == InvalidState {
-				continue
-			}
-			if (next & StateIDMask) != uint32(i) {
-				continue
-			}
-
-			// No tags or anchors on self-loop
-			hasRealTags := false
-			if (next & TaggedStateFlag) != 0 {
-				uIdx := d.tagUpdateIndices[idx]
-				if uIdx != 0xFFFFFFFF {
-					update := d.tagUpdates[uIdx]
-					if update.BasePriority != 0 {
-						hasRealTags = true
-					}
-					for _, u := range update.PreUpdates {
-						if u.PreTags|u.PostTags != 0 {
-							hasRealTags = true
-							break
-						}
-					}
-				}
-			}
-			if !hasRealTags && (next&AnchorVerifyFlag) == 0 {
-				selfLoops[b] = true
-				count++
-			}
-		}
-
-		if count == 0 {
-			continue
-		}
-		if count == 128 {
-			d.ccWarpTable[i] = CCWarpInfo{Kernel: CCWarpAnyChar}
-		} else {
-			low, high := -1, -1
-			isSingleRange := true
-			for b := 0; b < 128; b++ {
-				if selfLoops[b] {
-					if low == -1 {
-						low = b
-					}
-					high = b
-				} else if low != -1 {
-					for j := b + 1; j < 128; j++ {
-						if selfLoops[j] {
-							isSingleRange = false
-							break
-						}
-					}
-					break
-				}
-			}
-			if isSingleRange && low != -1 {
-				d.ccWarpTable[i] = CCWarpInfo{
-					Kernel: CCWarpSingleRange,
-					V0:     uint64(low),
-					V1:     uint64(high),
-				}
-			}
-		}
-
-		// Apply flag to self-loops
-		if d.ccWarpTable[i].Kernel != CCWarpNone {
-			for b := 0; b < 256; b++ {
-				idx := (i << 8) | b
-				if idx < len(d.transitions) && (d.transitions[idx]&StateIDMask) == uint32(i) {
-					d.transitions[idx] |= CCWarpFlag
-				}
-			}
-		}
-	}
-
-	// SearchWarp Pre-filter
-	searchIdx := int(d.searchState & StateIDMask)
-	var firstBytes [2]uint64
-	searchCount := 0
-	for b := 0; b < 128; b++ {
-		idx := (searchIdx << 8) | b
-		if idx < len(d.transitions) && d.transitions[idx] != InvalidState {
-			firstBytes[b>>6] |= 1 << (b & 63)
-			searchCount++
-		}
-	}
-	if searchCount > 0 && searchCount < 64 {
-		low, high := -1, -1
-		isSingleRange := true
-		for b := 0; b < 128; b++ {
-			if (firstBytes[b>>6] & (1 << (b & 63))) != 0 {
-				if low == -1 {
-					low = b
-				}
-				high = b
-			} else if low != -1 {
-				for j := b + 1; j < 128; j++ {
-					if (firstBytes[j>>6] & (1 << (j & 63))) != 0 {
-						isSingleRange = false
-						break
-					}
-				}
-				break
-			}
-		}
-		if isSingleRange && low != -1 {
-			var chars []byte
-			for b := low; b <= high; b++ {
-				chars = append(chars, byte(b))
-			}
-			d.searchWarp = CCWarpInfo{
-				Kernel:   CCWarpSingleRange,
-				V0:       uint64(low),
-				V1:       uint64(high),
-				IndexAny: string(chars),
-			}
-		}
-	}
-
 	return d, nil
+}
+
+func isEpsilon(op syntax.InstOp) bool {
+	switch op {
+	case syntax.InstAlt, syntax.InstAltMatch, syntax.InstCapture, syntax.InstEmptyWidth, syntax.InstNop:
+		return true
+	}
+	return false
 }
 
 func epsilonClosureWithAnchorWall(prog *syntax.Prog, paths []NFAPath) ClosureResult {
@@ -461,6 +326,7 @@ func epsilonClosureWithAnchorWall(prog *syntax.Prog, paths []NFAPath) ClosureRes
 		}
 		switch inst.Op {
 		case syntax.InstAlt, syntax.InstAltMatch:
+			// Process Arg then Out, so Out (higher priority) is processed first (LIFO stack)
 			for _, next := range []struct {
 				id uint32
 				p  int32
@@ -539,45 +405,7 @@ func epsilonClosureWithAnchorWall(prog *syntax.Prog, paths []NFAPath) ClosureRes
 		}
 		return resPaths[i].Priority < resPaths[j].Priority
 	})
-	type updateKey struct {
-		rel, next int32
-		isMatch   bool
-	}
-	dedup := make(map[updateKey]PathTagUpdate)
-	for _, u := range updates {
-		k := updateKey{u.RelativePriority, u.NextPriority, u.IsMatch}
-		existing := dedup[k]
-		existing.RelativePriority, existing.NextPriority, existing.IsMatch = u.RelativePriority, u.NextPriority, u.IsMatch
-		existing.PreTags |= u.PreTags
-		existing.PostTags |= u.PostTags
-		dedup[k] = existing
-	}
-	updates = updates[:0]
-	keys := make([]updateKey, 0, len(dedup))
-	for k := range dedup {
-		keys = append(keys, k)
-	}
-	sort.Slice(keys, func(i, j int) bool {
-		if keys[i].rel != keys[j].rel {
-			return keys[i].rel < keys[j].rel
-		}
-		if keys[i].next != keys[j].next {
-			return keys[i].next < keys[j].next
-		}
-		return !keys[i].isMatch && keys[j].isMatch
-	})
-	for _, k := range keys {
-		updates = append(updates, dedup[k])
-	}
 	return ClosureResult{resPaths, updates, matchAnchors}
-}
-
-func isEpsilon(op syntax.InstOp) bool {
-	switch op {
-	case syntax.InstAlt, syntax.InstAltMatch, syntax.InstCapture, syntax.InstEmptyWidth, syntax.InstNop:
-		return true
-	}
-	return false
 }
 
 func hashSet(closure []NFAPath, naked bool) uint64 {
@@ -592,4 +420,10 @@ func hashSet(closure []NFAPath, naked bool) uint64 {
 		h = (h ^ uint64(p.Anchors)) * 1099511628211
 	}
 	return h
+}
+
+type dfaStateKey struct {
+	hash     uint64
+	matchP   int
+	isSearch bool
 }
