@@ -114,6 +114,8 @@ The engine MUST extract the most selective anchors from mandatory AST paths to m
 - **SIMD/SWAR Discovery**: Use SIMD (`bytes.Index`, `bytes.IndexAny`) for literals and SWAR (`IndexClass`) for character classes.
 - **Separation of Concerns (Search vs. Match)**: MAP is responsible for **Searching** (finding match start candidates). DFA is responsible for **Validation** (Anchored matching from the candidate position).
 - **Forward/Backward Constraint Guard**: Once an anchor candidate is found, validate surrounding character constraints (fixed-length or dynamic warps) using path-specific SWAR kernels before starting the DFA.
+- **Zero-Width Assertion Transparency**: Anchor extraction MUST skip past zero-width assertions (e.g., `^`, `$`, `\b`) to identify the most selective literal anchor in a mandatory path.
+- **Boundary-Aware MAP**: Word boundaries (`\b`, `\B`) are supported by MAP by utilizing the Absolute Coordinate Context for safe verification at candidate positions.
 
 ### 2.11 Pure Go (No CGO)
 - **Zero Overhead**: Native Go only. CGO is strictly prohibited.
@@ -163,7 +165,7 @@ To achieve the $O(n)$ physical throughput goal, the engine MUST implement a hier
 ### 2.21 MAP Correctness & Safety Mandate
 To maintain 100% compatibility, MAP MUST adhere to safety constraints:
 - **Nullable Pattern Protection**: If a pattern can match an empty string (`minLength == 0`), Pass 0 (MAP rejection) MUST be **disabled** to prevent missing matches.
-- **Complex Anchor Fallback**: Context-dependent anchors (e.g., `\b`, multiline `^`/`$`) MUST be handled by the DFA; MAP MUST be disabled if safe validation is impossible.
+- **Contextual Anchor Support**: Context-dependent anchors including line boundaries (`^`, `$`) and word boundaries (`\b`, `\B`) are supported by MAP using Absolute Coordinate Context validation. MAP is only disabled if safe validation is physically impossible for a specific pattern structure.
 - **FindAll Advancement Rule**: The `FindAll` loop MUST skip redundant empty matches at the same position and advance exactly one rune (not one byte) to avoid infinite loops and ensure standard library parity.
 
 #### 2.22 Absolute Coordinate Context Propagation (Mandate)
