@@ -241,8 +241,8 @@ func pass1_BoundaryDiscovery(re *Regexp, in *ir.Input, start int) (end, prio int
 	if (state & ir.AcceptingStateFlag) != 0 {
 		sidx := state & ir.StateIDMask
 		req := guards[sidx]
-		if req == 0 || ir.Verify(in, i, req) {
-			bestEnd = i
+		if req == 0 || ir.Verify(in, start, req) {
+			bestEnd = start
 			bestPriority = currPrio + d.MatchPriority(sidx)
 		}
 	}
@@ -250,7 +250,7 @@ func pass1_BoundaryDiscovery(re *Regexp, in *ir.Input, start int) (end, prio int
 	for i < numBytes {
 		sidx := state & ir.StateIDMask
 
-		// 1. CCWarp (SWAR skip) - Optimization for repeated character classes
+		// 1. CCWarp (SWAR skip)
 		if (state & ir.CCWarpFlag) != 0 {
 			info := &ccWarps[sidx]
 			skipped := ir.Warp(info, b[i:])
@@ -281,15 +281,7 @@ func pass1_BoundaryDiscovery(re *Regexp, in *ir.Input, start int) (end, prio int
 			break
 		}
 
-		// SUPER HOT PATH: No side effects, not accepting, and not a multi-byte UTF-8 lead byte.
-		// This eliminates almost all branch overhead for simple DFA transitions.
-		if (rawNext&(ir.AnchorVerifyFlag|ir.TaggedStateFlag|ir.WarpStateFlag|ir.AcceptingStateFlag)) == 0 && byteVal < 0x80 {
-			state = rawNext
-			i++
-			continue
-		}
-
-		// SLOW PATH: Side effects or complex state
+		// Anchor Verification
 		if (rawNext & ir.AnchorVerifyFlag) != 0 {
 			req := syntax.EmptyOp((rawNext & ir.AnchorMask) >> 22)
 			if req != 0 && !ir.Verify(in, i, req) {
@@ -297,6 +289,7 @@ func pass1_BoundaryDiscovery(re *Regexp, in *ir.Input, start int) (end, prio int
 			}
 		}
 
+		// Priority/Tag Update
 		if (rawNext&ir.TaggedStateFlag) != 0 && int(off) < len(uIndices) {
 			uIdx := uIndices[off]
 			if uIdx != 0xFFFFFFFF && int(uIdx) < len(uPrioDeltas) {
@@ -310,6 +303,7 @@ func pass1_BoundaryDiscovery(re *Regexp, in *ir.Input, start int) (end, prio int
 			i += ir.GetTrailingByteCount(byteVal)
 		}
 
+		// Accepting State check
 		if (state & ir.AcceptingStateFlag) != 0 {
 			nsidx := state & ir.StateIDMask
 			req := guards[nsidx]
@@ -331,7 +325,7 @@ func pass1_BoundaryDiscovery(re *Regexp, in *ir.Input, start int) (end, prio int
 
 // Pass 2: Anchored Recording
 // Re-runs the DFA strictly over [start, end] to record the execution history for submatch extraction.
-func anchoredRecordingLoop(re *Regexp, in *ir.Input, mc *matchContext, start, end int) int {
+func pass2_RecordingLoop(re *Regexp, in *ir.Input, mc *matchContext, start, end int) int {
 	d := re.dfa
 	trans := d.Transitions()
 	uIndices := re.uIndices
@@ -399,6 +393,10 @@ func anchoredRecordingLoop(re *Regexp, in *ir.Input, mc *matchContext, start, en
 	return currPrio + d.MatchPriority(state&ir.StateIDMask)
 }
 
+func anchoredRecordingLoop(re *Regexp, in *ir.Input, mc *matchContext, start, end int) int {
+	return pass2_RecordingLoop(re, in, mc, start, end)
+}
+
 func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 	numBytes := len(in.B)
 	for i := 0; i <= numBytes; {
@@ -412,8 +410,6 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 			return start, end, prio
 		}
 
-		// Optimized restart: If the anchor is Mandatory and Fixed, we can skip past it.
-		// Otherwise, we must increment by 1 to ensure leftmost-longest.
 		if anchor != nil && anchor.Mandatory && anchor.IsFixed {
 			i = literalPos + 1
 		} else {
@@ -423,23 +419,107 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 	return -1, -1, 1<<30 - 1
 }
 
+// fastMatchExecLoop: Optimized Pass 1 loop for strategyFast.
+// Assumes NO internal anchors and NO priority shifts (TaggedStateFlag).
 func fastMatchExecLoop(re *Regexp, in *ir.Input) (int, int, int) {
-	numBytes := len(in.B)
-	for i := 0; i <= numBytes; {
-		start, literalPos, anchor := pass0_DiscoveryLoop(re, in, i)
+	d := re.dfa
+	trans := d.Transitions()
+	guards := d.AcceptingGuards()
+	b := in.B
+	numBytes := len(b)
+	matchState := re.matchState
+	ccWarps := d.CCWarpTable()
+
+	// Bounds check hints
+	if len(trans) > 0 {
+		_ = trans[len(trans)-1]
+	}
+	if len(guards) > 0 {
+		_ = guards[len(guards)-1]
+	}
+	if len(b) > 0 {
+		_ = b[len(b)-1]
+	}
+
+	for restartBase := 0; restartBase <= numBytes; {
+		start, literalPos, anchor := pass0_DiscoveryLoop(re, in, restartBase)
 		if start < 0 {
 			break
 		}
 
-		end, prio := pass1_BoundaryDiscovery(re, in, start)
-		if end >= 0 {
-			return start, end, prio
+		state := matchState
+		i := start
+		bestEnd := -1
+
+		// Initial accepting check
+		if (state & ir.AcceptingStateFlag) != 0 {
+			sidx := state & ir.StateIDMask
+			req := guards[sidx]
+			if req == 0 || ir.Verify(in, start, req) {
+				bestEnd = start
+			}
+		}
+
+		for i < numBytes {
+			sidx := state & ir.StateIDMask
+			if (state & ir.CCWarpFlag) != 0 {
+				info := &ccWarps[sidx]
+				skipped := ir.Warp(info, b[i:])
+				if skipped > 0 {
+					i += skipped
+					if (state & ir.AcceptingStateFlag) != 0 {
+						req := guards[sidx]
+						if req == 0 || ir.Verify(in, i, req) {
+							bestEnd = i
+						}
+					}
+					if i >= numBytes {
+						break
+					}
+				}
+			}
+
+			byteVal := b[i]
+			off := (int(sidx) << 8) | int(byteVal)
+			rawNext := trans[off]
+			if rawNext == ir.InvalidState {
+				break
+			}
+
+			// strategyFast: Even here we must check AnchorVerifyFlag for initial anchors
+			if (rawNext & ir.AnchorVerifyFlag) != 0 {
+				req := syntax.EmptyOp((rawNext & ir.AnchorMask) >> 22)
+				if req != 0 && !ir.Verify(in, i, req) {
+					break
+				}
+			}
+
+			state = rawNext
+			i++
+			if byteVal >= 0x80 && (state&ir.WarpStateFlag) != 0 {
+				i += ir.GetTrailingByteCount(byteVal)
+			}
+
+			if (state & ir.AcceptingStateFlag) != 0 {
+				nsidx := state & ir.StateIDMask
+				req := guards[nsidx]
+				if req == 0 || ir.Verify(in, i, req) {
+					bestEnd = i
+				}
+				if bestEnd >= 0 && d.IsBestMatch(state) {
+					break
+				}
+			}
+		}
+
+		if bestEnd >= 0 {
+			return start, bestEnd, 0
 		}
 
 		if anchor != nil && anchor.Mandatory && anchor.IsFixed {
-			i = literalPos + 1
+			restartBase = literalPos + 1
 		} else {
-			i++
+			restartBase++
 		}
 	}
 	return -1, -1, 0
