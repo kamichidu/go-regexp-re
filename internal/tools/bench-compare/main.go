@@ -39,15 +39,6 @@ func (e *EngineData) Avg() Result {
 // Groups: 1:Full Name, 2:NsPerOp, 3:MBs
 var benchLineRe = regexp.MustCompile(`^Benchmark([^\s]+)\s+\d+\s+([\d\.]+)\s+ns/op(?:\s+([\d\.]+)\s+MB/s)?`)
 
-var engines = []string{
-	"GoRegexp",
-	"GoRegexpRe",
-	"Coregex",
-	"Hyperscan-CGO",
-	"PCRE2-CGO",
-	"RE2-CGO",
-}
-
 func main() {
 	var input io.Reader = os.Stdin
 	if len(os.Args) > 1 {
@@ -66,12 +57,18 @@ func main() {
 	}
 }
 
+func escapeMarkdown(s string) string {
+	return strings.ReplaceAll(s, "|", "\\|")
+}
+
 func run(r io.Reader) error {
 	scanner := bufio.NewScanner(r)
 
 	// testKey -> engine -> EngineData
 	data := make(map[string]map[string]*EngineData)
 	var testKeys []string
+	var engines []string
+	engineSeen := make(map[string]bool)
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -87,33 +84,27 @@ func run(r io.Reader) error {
 			mbs, _ = strconv.ParseFloat(m[3], 64)
 		}
 
-		// Identify engine and testKey
-		var engine, testKey string
-		foundEngine := false
-		for _, e := range engines {
-			// Look for /Engine/ or /Engine-GOMAXPROCS
-			if strings.Contains(fullName, "/"+e+"/") {
-				engine = e
-				testKey = strings.Replace(fullName, "/"+e+"/", "/", 1)
-				foundEngine = true
-				break
-			}
-			if strings.HasSuffix(fullName, "/"+e) || strings.Contains(fullName, "/"+e+"-") {
-				engine = e
-				// Remove engine and anything after it (like -2)
-				re := regexp.MustCompile("/" + regexp.QuoteMeta(e) + "(?:-\\d+)?$")
-				testKey = re.ReplaceAllString(fullName, "")
-				foundEngine = true
-				break
-			}
-		}
-
-		if !foundEngine {
+		// Identify engine and testKey from fullName like "StandardSuite/Engine/TestCase"
+		// or "Landscape/Engine#01/TestCase"
+		parts := strings.Split(fullName, "/")
+		if len(parts) < 3 {
 			continue
 		}
 
+		// Engine name is in parts[1], but might have #NN suffix
+		engine := parts[1]
+		engine = regexp.MustCompile(`#\d+$`).ReplaceAllString(engine, "")
+
+		// testKey is parts[0] + rest
+		testKey := parts[0] + "/" + strings.Join(parts[2:], "/")
+
 		// Strip GOMAXPROCS suffix from testKey if it exists at the very end
 		testKey = regexp.MustCompile(`-\d+$`).ReplaceAllString(testKey, "")
+
+		if !engineSeen[engine] {
+			engineSeen[engine] = true
+			engines = append(engines, engine)
+		}
 
 		if data[testKey] == nil {
 			data[testKey] = make(map[string]*EngineData)
@@ -126,6 +117,24 @@ func run(r io.Reader) error {
 	}
 
 	sort.Strings(testKeys)
+	// Sort engines for consistent columns: GoRegexp and GoRegexpRe first, then others alphabetically
+	sort.Slice(engines, func(i, j int) bool {
+		priority := func(name string) int {
+			switch name {
+			case "GoRegexp":
+				return 0
+			case "GoRegexpRe":
+				return 1
+			default:
+				return 2
+			}
+		}
+		pi, pj := priority(engines[i]), priority(engines[j])
+		if pi != pj {
+			return pi < pj
+		}
+		return engines[i] < engines[j]
+	})
 
 	// 1. Output Table
 	fmt.Println("## Benchmark Comparison (Average ns/op)")
@@ -141,7 +150,7 @@ func run(r io.Reader) error {
 	fmt.Println()
 
 	for _, tk := range testKeys {
-		fmt.Printf("| %s |", tk)
+		fmt.Printf("| %s |", escapeMarkdown(tk))
 		for _, e := range engines {
 			if ed, ok := data[tk][e]; ok {
 				avg := ed.Avg()
@@ -166,7 +175,7 @@ func run(r io.Reader) error {
 	fmt.Println()
 
 	for _, tk := range testKeys {
-		fmt.Printf("| %s |", tk)
+		fmt.Printf("| %s |", escapeMarkdown(tk))
 		for _, e := range engines {
 			if ed, ok := data[tk][e]; ok {
 				avg := ed.Avg()
