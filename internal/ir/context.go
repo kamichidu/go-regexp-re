@@ -57,6 +57,53 @@ func VerifyWord(in *Input, i int, req syntax.EmptyOp) bool {
 	return (req & syntax.EmptyNoWordBoundary) != 0
 }
 
+// Verify checks for all anchors in req using absolute context.
+func Verify(in *Input, i int, req syntax.EmptyOp) bool {
+	if req == 0 {
+		return true
+	}
+	if (req & (syntax.EmptyBeginText | syntax.EmptyBeginLine)) != 0 {
+		absPos := in.AbsPos + i
+		if absPos == 0 {
+			// Matches BeginText and BeginLine
+		} else if (req&syntax.EmptyBeginLine) != 0 && in.OriginalB[absPos-1] == '\n' {
+			// Matches BeginLine
+		} else {
+			return false
+		}
+	}
+	if (req & (syntax.EmptyEndText | syntax.EmptyEndLine)) != 0 {
+		absPos := in.AbsPos + i
+		if absPos == in.TotalBytes {
+			// Matches EndText and EndLine
+		} else if (req&syntax.EmptyEndLine) != 0 && in.OriginalB[absPos] == '\n' {
+			// Matches EndLine
+		} else {
+			return false
+		}
+	}
+	if (req & (syntax.EmptyWordBoundary | syntax.EmptyNoWordBoundary)) != 0 {
+		absPos := in.AbsPos + i
+		var wordLeft, wordRight bool
+		if absPos > 0 && in.OriginalB[absPos-1] < 0x80 && syntax.IsWordChar(rune(in.OriginalB[absPos-1])) {
+			wordLeft = true
+		}
+		if absPos < in.TotalBytes && in.OriginalB[absPos] < 0x80 && syntax.IsWordChar(rune(in.OriginalB[absPos])) {
+			wordRight = true
+		}
+		if wordLeft != wordRight {
+			if (req & syntax.EmptyWordBoundary) == 0 {
+				return false
+			}
+		} else {
+			if (req & syntax.EmptyNoWordBoundary) == 0 {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func GetTrailingByteCount(lead byte) int {
 	if lead < 0xC2 {
 		return 0
