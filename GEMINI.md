@@ -33,6 +33,9 @@ To maximize throughput, the engine MUST select the most efficient execution loop
     - **Search**: Identifies raw candidate positions using SIMD/SWAR. **Leverages LCP (Longest Common Prefix) Factoring to extract mandatory prefixes from alternations (e.g., 'fo' from '(fo|foo)'), enabling high-speed string scanning even for complex choices.**
     - **Search Strategy Dispatch**: The engine statically selects the most efficient pre-filter during compilation: **Literal (SIMD) > SearchWarp (SWAR) > sDFA**.
 - **Searching DFA (sDFA)**: A 2-stage pre-filter combining a SIMD-accelerated trigger set (`Trigger`) and a uint8 DFA. It resolves complex prefixes (e.g., `(abc|def)`) at O(n) to eliminate false positives.
+- **Architectural Separation Mandate (sDFA vs. Primary)**: sDFA MUST be constructed via an independent builder (`buildSearchDFA`) and execution logic, completely decoupled from the Primary DFA's subset construction.
+- **State Identity Integrity**: Search-specific flags (e.g., `isSearch`) MUST NOT be injected into the Primary DFA's state key. The Primary DFA MUST maintain a unified, anchor-consistent state identity to prevent incorrect matching and state explosion.
+- **2-Stage Discovery Strategy**: To maximize throughput, SearchStrategySDFA MUST utilize a SIMD-based `IndexClass` to locate trigger candidates before engaging the sDFA for sequence verification.
 
     - **Gaze**: Verifies O(1) constraints (anchors, fixed-distance literals) to reject false candidates early. **Optimized with SkipGaze: Anchors verified by Search (like factored prefixes) or those without surrounding constraints bypass this phase entirely to eliminate redundant CPU cycles.**
     - **Snap**: Identifies the true match start (Horizon) by reverse-scanning variable-length repetitions.

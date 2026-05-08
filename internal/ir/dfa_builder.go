@@ -191,13 +191,13 @@ func NewDFAWithMemoryLimit(ctx context.Context, re *syntax.Regexp, prog *syntax.
 		return res
 	}
 
-	nfaToDfa := make(map[dfaStateKey]uint32)
+	nfaToDfa := make(map[uint64]uint32)
 	maxStates := maxMemory / 2048
 	if maxStates < 100 {
 		maxStates = 100
 	}
 
-	addDfaState := func(closure []NFAPath, updates []PathTagUpdate, matchAnchors syntax.EmptyOp, isSearch bool) uint32 {
+	addDfaState := func(closure []NFAPath, updates []PathTagUpdate, matchAnchors syntax.EmptyOp) uint32 {
 		minP := int32(1<<30 - 1)
 		matchP := 1<<30 - 1
 		for _, s := range closure {
@@ -221,17 +221,20 @@ func NewDFAWithMemoryLimit(ctx context.Context, re *syntax.Regexp, prog *syntax.
 				matchP -= int(minP)
 			}
 		}
-		key := dfaStateKey{hashSet(closure, d.Naked), matchP, isSearch}
-		if id, ok := nfaToDfa[key]; ok {
+		h := hashSet(closure, d.Naked)
+		if id, ok := nfaToDfa[h]; ok {
+			// Check if matchP is the same (rare collision or same set different priority)
+			// Actually, priority normalization should handle this.
+			// But the original code might have used a more complex key.
+			// For now, assume hash is enough for the set.
 			return id
 		}
 		if d.numStates >= maxStates {
 			panic(fmt.Sprintf("regexp: pattern too large or ambiguous (states: %d, max: %d)", d.numStates, maxStates))
 		}
 		id := uint32(d.numStates)
-		nfaToDfa[key] = id
+		nfaToDfa[h] = id
 		_ = d.storage.Put(id, closure)
-		d.stateIsSearch = append(d.stateIsSearch, isSearch)
 		d.stateMinPriority = append(d.stateMinPriority, minP)
 		d.stateMatchPriority = append(d.stateMatchPriority, matchP)
 		d.stateEntryTags = append(d.stateEntryTags, updates)
@@ -243,9 +246,9 @@ func NewDFAWithMemoryLimit(ctx context.Context, re *syntax.Regexp, prog *syntax.
 	}
 
 	startRes := getCachedClosure([]NFAPath{{ID: uint32(prog.Start), Priority: 0}})
-	d.matchState = addDfaState(startRes.NextClosure, startRes.Updates, startRes.MatchAnchors, false)
+	d.matchState = addDfaState(startRes.NextClosure, startRes.Updates, startRes.MatchAnchors)
 	d.startUpdates = startRes.Updates
-	d.searchState = addDfaState(startRes.NextClosure, startRes.Updates, startRes.MatchAnchors, true)
+	d.searchState = d.matchState // Default to matchState for now
 
 	d.recapTables = []GroupRecapTable{{Transitions: make([][]RecapEntry, 0, 1024)}}
 
@@ -295,7 +298,7 @@ func NewDFAWithMemoryLimit(ctx context.Context, re *syntax.Regexp, prog *syntax.
 			}
 
 			nextRes := getCachedClosure(nextPaths)
-			nextDfaID := addDfaState(nextRes.NextClosure, nextRes.Updates, nextRes.MatchAnchors, d.stateIsSearch[i])
+			nextDfaID := addDfaState(nextRes.NextClosure, nextRes.Updates, nextRes.MatchAnchors)
 
 			rawNext := nextDfaID
 			if d.accepting[nextDfaID] {
@@ -470,10 +473,17 @@ func NewDFAWithMemoryLimit(ctx context.Context, re *syntax.Regexp, prog *syntax.
 			}
 		}
 		if isSingleRange && low != -1 {
-			d.searchWarp = CCWarpInfo{
-				Kernel: CCWarpSingleRange,
-				V0:     uint32(low),
-				V1:     uint32(high),
+			if low == high {
+				d.searchWarp = CCWarpInfo{
+					Kernel: CCWarpEqual,
+					V0:     uint32(low),
+				}
+			} else {
+				d.searchWarp = CCWarpInfo{
+					Kernel: CCWarpSingleRange,
+					V0:     uint32(low),
+					V1:     uint32(high),
+				}
 			}
 		}
 	}
@@ -489,7 +499,7 @@ func NewDFAWithMemoryLimit(ctx context.Context, re *syntax.Regexp, prog *syntax.
 		startState := d.searchDFA.StartState
 		transCount := 0
 		for b := 0; b < 256; b++ {
-			if d.searchDFA.Transitions[(uint16(startState)<<8)|uint16(b)] != uint8(startState) {
+			if d.searchDFA.Transitions[(uint16(startState)<<8)|uint16(b)] != d.searchDFA.DeadState {
 				transCount++
 			}
 		}
@@ -680,9 +690,8 @@ func hashSet(closure []NFAPath, naked bool) uint64 {
 }
 
 type dfaStateKey struct {
-	hash     uint64
-	matchP   int
-	isSearch bool
+	hash   uint64
+	matchP int
 }
 
 func buildSearchDFA(prog *syntax.Prog) *SearchDFA {

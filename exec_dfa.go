@@ -82,7 +82,6 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 	numBytes := len(b)
 	matchState := re.matchState
 	anchorStart := re.anchorStart
-	ccWarps := d.CCWarpTable()
 	strategy := d.SearchStrategy()
 
 	lastI := -1
@@ -129,18 +128,19 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 			case ir.SearchStrategySDFA:
 				sd := d.SearchDFA()
 				foundSDFA := false
-				for i < numBytes {
-					idx := ir.IndexClass(&sd.Trigger, b[i:])
+				currI := i
+				for currI < numBytes {
+					idx := ir.IndexClass(&sd.Trigger, b[currI:])
 					if idx < 0 {
 						break
 					}
-					i += idx
+					currI += idx
 
 					state := sd.StartState
-					currI := i
+					tempI := currI
 					found := false
-					for currI < numBytes {
-						state = sd.Transitions[(uint16(state)<<8)|uint16(b[currI])]
+					for tempI < numBytes {
+						state = sd.Transitions[(uint16(state)<<8)|uint16(b[tempI])]
 						if state == sd.DeadState {
 							break
 						}
@@ -148,16 +148,16 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 							found = true
 							break
 						}
-						currI++
+						tempI++
 					}
 
 					if found {
-						matchLiteralPos = i
-						candidatePos = i
+						matchLiteralPos = currI
+						candidatePos = currI
 						foundSDFA = true
 						break
 					}
-					i++
+					currI++
 				}
 				if !foundSDFA {
 					return -1, -1, 1<<30 - 1
@@ -354,6 +354,7 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 			}
 		}
 
+		ccWarps := d.CCWarpTable()
 		for scanPos < numBytes {
 			byteVal := b[scanPos]
 			if (state & ir.CCWarpFlag) != 0 {
@@ -423,12 +424,19 @@ func fastDiscoveryLoop(re *Regexp, in *ir.Input) (int, int, int) {
 		if currentBestEnd >= 0 {
 			return j, currentBestEnd, currentBestPrio
 		}
-		i = matchLiteralPos + 1
+
+		if matchLiteralPos >= 0 {
+			i = matchLiteralPos + 1
+		} else {
+			i = absPos + 1
+		}
 	}
 	return -1, -1, 1<<30 - 1
 }
 
-func fastMatchExecLoop(re *Regexp, in *ir.Input) (int, int, int) { return fastDiscoveryLoop(re, in) }
+func fastMatchExecLoop(re *Regexp, in *ir.Input) (int, int, int) {
+	return fastDiscoveryLoop(re, in)
+}
 
 func extendedSubmatchExecLoop(re *Regexp, in ir.Input, mc *matchContext) (int, int, int) {
 	d := re.dfa

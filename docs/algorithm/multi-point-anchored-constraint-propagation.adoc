@@ -80,9 +80,11 @@ The propagator only executes checks that are significantly cheaper than a few DF
 
 === C. Searching DFA (sDFA) - Multi-byte Pre-filtering
 To further bridge the gap between high-speed SIMD search and heavy DFA execution, MAP utilizes a **Searching DFA (sDFA)**.
-- **Mechanism**: A lightweight, `uint8`-based DFA constructed from the NFA prefix (limited to 256 states). It resolves simple alternations (e.g., `abc|def`) or character class sequences (e.g., `[a-z][0-9]`) that cannot be captured by a single `bytes.Index` call.
-- **Execution Flow**: After the Primary Iterator (SIMD/SWAR) identifies a potential starting byte, the sDFA performs a quick $O(n)$ scan of the subsequent few bytes.
-- **High-Confidence Rejection**: If the sDFA reaches a **Dead State**, the candidate is immediately rejected as a false positive without ever invoking the full DFA. Control is handed over to the full DFA only if the sDFA reaches an **Accepting State** (representing a confirmed prefix).
+- **Mechanism**: A lightweight, `uint8`-based DFA constructed via an independent builder (limited to 255 states). It resolves complex prefixes like `abc|def` that cannot be captured by a single `bytes.Index` call.
+- **2-Stage Hybrid Execution**:
+    1.  **SIMD Trigger Search**: The engine first scans for the earliest possible starting byte of any sDFA branch using a SIMD-accelerated `IndexClass` (utilizing the sDFA's `Trigger` set).
+    2.  **DFA Verification**: Once a trigger is found, the engine runs the sDFA strictly over the following bytes. If the sDFA confirms the sequence (reaches an **Accepting State**), the candidate is promoted to the Primary DFA.
+- **High-Confidence Rejection**: If the sDFA reaches a **Dead State**, the candidate is immediately rejected, and the engine resumes the SIMD skip from the next byte. This keeps the Primary DFA's state space clean and ensures that heavy state machine activation only occurs for high-probability candidates.
 
 === D. Early Handover Principle
 To avoid the "validation bottleneck," MAP defers all complex verification to the DFA (Pass 1):
