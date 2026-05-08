@@ -48,7 +48,7 @@ An advanced 32-bit bit-packing strategy that applies Run-Length Encoding (RLE) d
 === 12. xref:algorithm/multi-point-anchored-constraint-propagation.adoc[LCP Factoring (Alternation Optimization)]
 An optimization that extracts common prefixes from alternation branches to enable high-speed SIMD scanning for complex choices.
 
-=== 13. Searching DFA (sDFA) - Multi-byte Pre-filter
+=== 13. xref:algorithm/searching-dfa.adoc[Searching DFA (sDFA) - Multi-byte Pre-filter]
 A lightweight, `uint8`-based DFA that acts as a 2-stage multi-byte pre-filter in Pass 0. It combines a SIMD-accelerated trigger set and a DFA scan to resolve complex prefixes (e.g., `(abc|def)`). **The engine statically selects the most efficient pre-filter during compilation: Literal (SIMD) > SearchWarp (SWAR) > sDFA.**
 
 == Design Philosophy
