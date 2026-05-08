@@ -29,13 +29,24 @@ To maximize throughput, the engine MUST select the most efficient execution loop
 - **0-Pass (Literal Bypass)**: Selected for pure constant strings and anchored literals. Bypasses all DFA construction. Uses pointer-passing and direct bytes.Equal/Index to achieve 0-allocation parity with standard library.
 - **Fast Path (Boundary-Only Discovery)**: Selected for `Match` and `FindIndex` calls where capture groups are not required. It utilizes a minimalist execution loop (Pass 0 + Pass 1) with zero history recording and early exit on first match.
 - **Full Path (Multi-Pass Sparse TDFA)**: Selected for `FindSubmatchIndex` calls. It employs the comprehensive 5-pass pipeline to guarantee peak performance and Go parity:
-    - **Pass 0 (MAP)**: Primary search phase. Identifies mandatory paths and extracts anchor candidates (**Prefix**, **Pivot**, or **Suffix**).
+- **Pass 0 (MAP)**: Primary search phase. Identifies mandatory paths and extracts anchor candidates (**Prefix**, **Pivot**, or **Suffix**).
+    - **Search**: Identifies raw candidate positions using SIMD/SWAR. **Leverages LCP (Longest Common Prefix) Factoring to extract mandatory prefixes from alternations (e.g., 'fo' from '(fo|foo)'), enabling high-speed string scanning even for complex choices.**
+    - **Search Strategy Dispatch**: The engine statically selects the most efficient pre-filter during compilation: **Literal (SIMD) > SearchWarp (SWAR) > sDFA**. **For 'NFAWorstCase' patterns like '(a+)+b', SearchWarp (SWAR) is preferred over sDFA to maximize SIMD throughput.**
+- **Searching DFA (sDFA)**: A 2-stage pre-filter combining a SIMD-accelerated trigger set (`Trigger`) and a uint8 DFA. It resolves complex prefixes (e.g., `(abc|def)`) at O(n) to eliminate false positives. **sDFA is strictly limited to 255 states and ASCII-only patterns to maintain minimal construction overhead.**
+- **Architectural Separation Mandate (sDFA vs. Primary)**: sDFA MUST be constructed via an independent builder (`buildSearchDFA`) and execution logic, completely decoupled from the Primary DFA's subset construction.
+- **State Identity Integrity**: Search-specific flags (e.g., `isSearch`) MUST NOT be injected into the Primary DFA's state key. The Primary DFA MUST maintain a unified, anchor-consistent state identity to prevent incorrect matching and state explosion.
+- **2-Stage Discovery Strategy**: To maximize throughput, SearchStrategySDFA MUST utilize a SIMD-based `IndexClass` to locate trigger candidates before engaging the sDFA for sequence verification.
+
+    - **Gaze**: Verifies O(1) constraints (anchors, fixed-distance literals) to reject false candidates early. **Optimized with SkipGaze: Anchors verified by Search (like factored prefixes) or those without surrounding constraints bypass this phase entirely to eliminate redundant CPU cycles.**
+    - **Snap**: Identifies the true match start (Horizon) by reverse-scanning variable-length repetitions.
+
     - **Pass 1: Boundary Discovery (Searching DFA)**: Uses a Safe Searching DFA to identify match end and winning priority in $O(n)$.
     - **Pass 1.5: Leftmost Start Discovery**: Since searching DFAs conflate start positions, the engine performs a manual scan to find the exact leftmost `start`.
     - **Pass 2: Anchored Recording (Precise Forward Scan)**: Re-runs an Anchored DFA over the identified match range to generate a noise-free execution history. History initialization MUST be $O(1)$ relative to total input.
     - **Pass 3 & 4: Extraction (TDFA Trace)**: Reconstructs the winning path via backward trace and licks capture tags using bit-parallel updates.
 - **SWAR Character Class Warp (CCWarp)**: A specialized execution strategy for "Pure Self-Loops". Detects universal sets (.*) and performs an $O(1)$ jump to the end of the buffer to match memory bandwidth limits.
 - **Anchor-Aware Guarded SIMD Warp**: Selected for patterns with anchors. Utilizes a separate `anchorTransitions` table and **guarded warp points** to allow SIMD skipping even in the presence of anchors (e.g., `^`, `$`, `\b`).
+- **Localized Guard Verification Mandate**: Anchor verification for accepting states MUST be performed only at the logical position where the anchor was encountered in the NFA. Re-verifying start-anchors (like `^` or `\b`) at the match end position is strictly prohibited as it leads to false negatives.
 - **Early Exit on Match Finality**: To maintain peak efficiency, execution loops MUST adopt an **Early Exit on Mismatch** strategy: once a match is found and the DFA can no longer transition, the loop returns the best match immediately instead of continuing a redundant search.
 - **Explicit Hot-Loop Monomorphization**: To ensure zero-overhead, the engine MUST avoid Go generics (`GCShape` sharing). Instead, it employs manually monomorphized functions (e.g., `fastMatchExecLoop`, `extendedMatchExecLoop`) to ensure the Go compiler can completely eliminate unreachable branches and avoid runtime dictionary lookups.
 
@@ -96,7 +107,15 @@ To minimize compilation overhead, the engine MUST use an **Architectural Shortcu
 
 ### 2.10 Multi-Point Anchor & Constraint Optimization (Pass 0 - MAP)
 The engine MUST extract the most selective anchors from mandatory AST paths to minimize DFA activations.
+- **Unified MAP/DFA Construction**: To eliminate redundant AST traversals and minimize compilation latency, MAP analysis and anchor extraction MUST be integrated directly into the `ir.DFA` construction process. The resulting DFA MUST carry the optimized anchor set as metadata.
+- **LCP Factoring Mandate**: For patterns with alternations, the engine MUST identify and factor out the Longest Common Prefix (LCP) across all mandatory paths at the same fixed distance. This LCP MUST be promoted to a **Virtual Mandatory Anchor**, enabling SIMD-based string scanning (`bytes.Index`) for complex choices like `(abc|abd)`.
+- **SkipGaze Optimization**: If an anchor is fully verified by the Search phase (e.g., a factored literal) and carries no additional boundary or backward constraints, the compiler MUST mark it as **SkipGaze**. The execution loop MUST bypass Phase 2 (Gaze) for such anchors to eliminate redundant CPU cycles.
 - **Multi-Entry Point Discovery**: The engine MUST traverse **`OpAlternate`** to identify all possible entry points and categorize anchors into **Prefix** (start-anchored), **Pivot** (middle-anchored), or **Suffix** (end-anchored) candidates for EACH mandatory path (**Covering Set**).
+- **Mandatory Set Safety**: MAP utilizes the union of anchors from all alternate branches as a covering set. If any branch lacks an anchor, MAP MUST be disabled for that covering level to ensure correctness.
+- **Anchor Characteristic Preservation**: When combining anchors from `OpAlternate`, the engine MUST preserve `IsFixed` and `Distance` attributes if they are consistent across all branches, enabling precise Horizon Snapping even for complex alternations.
+- **Large-Set Efficiency**: The engine MUST support up to 256 bytes in the **`searchAny`** set and utilize a bit-parallel **`searchMask`** (`[4]uint64`) for O(1) candidate verification, ensuring that large alternations and character classes are effectively optimized.
+- **Case-Insensitive Expansion Mandate**: For literals or character classes with the `FoldCase` flag, MAP MUST expand all case variants using `unicode.SimpleFold` into a covering `EqualSet` or `Bitmask`. This ensures zero false negatives during the discovery phase.
+- **Mixed Anchor Search Mandate**: If any branch of the covering set includes start anchors (`^`, `\A`), the discovery loop MUST NOT skip the beginning of the input (pos 0) or line starts, even if literal-based filters (`searchAny`) suggest a later match. This is critical for patterns like `(^|[ ,;])`.
 - **Anchor Selection Heuristic**: Anchors MUST be selected based on a heuristic score that prioritizes length, specificity, and fixed-distance status.
 - **Line-Anchored Jump Mandate**: For non-multiline patterns, the engine MUST use **Line-Anchored Jump** to warp the search starting point directly to the beginning of the line where an anchor is found, bypassing redundant DFA transitions.
 - **Merged Newline Discovery**: To maximize throughput, the engine MUST utilize **Merged Newline Detection** within SWAR kernels to identify line boundaries and pattern anchors in a single pass.
@@ -105,12 +124,16 @@ The engine MUST extract the most selective anchors from mandatory AST paths to m
 - **SIMD/SWAR Discovery**: Use SIMD (`bytes.Index`, `bytes.IndexAny`) for literals and SWAR (`IndexClass`) for character classes.
 - **Separation of Concerns (Search vs. Match)**: MAP is responsible for **Searching** (finding match start candidates). DFA is responsible for **Validation** (Anchored matching from the candidate position).
 - **Forward/Backward Constraint Guard**: Once an anchor candidate is found, validate surrounding character constraints (fixed-length or dynamic warps) using path-specific SWAR kernels before starting the DFA.
+- **Zero-Width Assertion Transparency**: Anchor extraction MUST skip past zero-width assertions (e.g., `^`, `$`, `\b`) to identify the most selective literal anchor in a mandatory path.
+- **Boundary-Aware MAP**: Word boundaries (`\b`, `\B`) are supported by MAP by utilizing the Absolute Coordinate Context for safe verification at candidate positions.
+- **Nullable-Safe Anchor Accumulation**: Anchor extraction MUST accumulate candidates from nullable elements in a concatenation (e.g., `(^|[ ,;])`). Such anchors MUST be marked as non-mandatory to ensure they act as search hints without incorrectly blocking matches.
 
 ### 2.11 Pure Go (No CGO)
 - **Zero Overhead**: Native Go only. CGO is strictly prohibited.
 
 ### 2.12 Priority Normalization & Absolute Tracking
 - **Priority Normalization**: During DFA construction, NFA path priorities within each state MUST be normalized.
+- **Leftmost-First Priority Integrity**: Alternation branches MUST be assigned priorities such that the `Out` branch always has higher priority (lower numeric value) than the `Arg` branch. This is foundational for guaranteeing Go standard library parity.
 - **Absolute Priority Tracking**: The engine MUST track cumulative priority to identify the true leftmost-first match during Phase 1.
 
 ### 2.13 Early Exit Optimization (IsBestMatch)
@@ -145,15 +168,19 @@ To achieve the $O(n)$ physical throughput goal, the engine MUST implement a hier
 - **Hierarchical Kernel Selection**: The engine MUST automatically select the most efficient kernel based on the character set complexity (Equal -> Range -> Set -> Bitmask).
 - **Sub-cube Decomposition**: For disjoint character sets (e.g., `[aeiou]`), the engine MUST employ Sub-cube Decomposition (pairing characters with Hamming distance 1) to enable parallel 8-byte matching with minimal XOR+OR chains.
 - **Register Pressure Management**: Hot loops MUST favor slim implementation (e.g., `for` loops) over manual unrolling if unrolling causes register spilling to the stack. Performance MUST be verified by inspecting compiler-generated assembly or micro-benchmarks.
-- **Cache-line Optimization**: Core transition data structures (e.g., `CCWarpInfo`) MUST be kept small (ideally **32 bytes**) to maximize L1/L2 cache hit rates. Non-critical or large data MUST be offloaded to heap-allocated slices.
-- **Two-Phase Warping & Inverted Logic**: The engine MUST distinguish between **SearchWarp** (finding match start) and **CCWarp** (continuing match). SearchWarp MUST skip noise (characters NOT in the start set) using **Inverted Kernel Logic**. To achieve 10 GB/s+ throughput, SearchWarp MUST prioritize SIMD-accelerated library functions (`bytes.IndexByte`, `bytes.IndexAny`) before falling back to custom SWAR kernels.
+- **Cache-line Optimization**: Core transition data structures (e.g., `CCWarpInfo`) MUST be kept small (strictly **32 bytes**) to maximize L1/L2 cache hit rates. Non-critical or large data MUST be offloaded to heap-allocated slices.
+- **Pointer-Passing for SWAR Kernels**: To avoid 32-byte struct copy overhead and ensure zero-allocation in hot loops, `CCWarpInfo` MUST be passed by pointer (`*CCWarpInfo`) to all kernel functions (Warp, IndexClass, etc.).
+- **Two-Phase Warping & Inverted Logic**: The engine MUST distinguish between **SearchWarp** (finding match start) and **CCWarp** (continuing match). SearchWarp MUST skip noise (characters NOT in the start set) using **Inverted Kernel Logic**.
+    - **Physical Throughput Guarantee**: To achieve 10 GB/s+ throughput, SearchWarp MUST prioritize SIMD-accelerated library functions OR project-specific SWAR kernels.
+    - **`bytes.IndexAny` Prohibition**: The use of `bytes.IndexAny` is **STRICTLY PROHIBITED** in hot loops. It has been proven to bottleneck at ~1.2 GB/s, which is slower than the DFA transition table.
+    - **SWAR Mandatory**: All character class discovery MUST use `ir.IndexClass` (SWAR) or `bytes.IndexByte` (SIMD). Standard library `IndexAny` must be avoided to prevent UTF-8 decoding overhead and bitset-lookup latency.
 - **Correctness via Self-Loop Restriction**: SWAR Warp MUST be strictly restricted to "Pure Self-Loops"—states that lead back to the same ID without updating capture tags—to prevent submatch boundary corruption.
 - **Physical Throughput Baseline**: The engine MUST aim for a baseline throughput of 3-5 GB/s for simple repetitions (`a+`, `.*`, `[0-9]+`) and 0.5-1 GB/s for disjoint sets on modern x86/ARM hardware.
 
 ### 2.21 MAP Correctness & Safety Mandate
 To maintain 100% compatibility, MAP MUST adhere to safety constraints:
 - **Nullable Pattern Protection**: If a pattern can match an empty string (`minLength == 0`), Pass 0 (MAP rejection) MUST be **disabled** to prevent missing matches.
-- **Complex Anchor Fallback**: Context-dependent anchors (e.g., `\b`, multiline `^`/`$`) MUST be handled by the DFA; MAP MUST be disabled if safe validation is impossible.
+- **Contextual Anchor Support**: Context-dependent anchors including line boundaries (`^`, `$`) and word boundaries (`\b`, `\B`) are supported by MAP using Absolute Coordinate Context validation. MAP is only disabled if safe validation is physically impossible for a specific pattern structure.
 - **FindAll Advancement Rule**: The `FindAll` loop MUST skip redundant empty matches at the same position and advance exactly one rune (not one byte) to avoid infinite loops and ensure standard library parity.
 
 #### 2.22 Absolute Coordinate Context Propagation (Mandate)
@@ -161,7 +188,7 @@ To ensure 100% accurate anchor verification and submatch extraction regardless o
 - **Virtual Slicing (Allocation Exclusion)**: `ir.Input` MUST hold the full, original byte slice (`OriginalB`) to act as a zero-allocation alternative to repeated slice truncations.
 - **Relative-Coordinate Hot Loops**: Internal execution loops MUST maintain a **Relative Coordinate System**. Loop variables (`i`), priority (`prio`), and internal capture indices MUST be 0-based relative to the start of the current virtual slice (`in.AbsPos`). This ensures that absolute coordinate addition is excluded from the $O(1)$ hot path.
 - **Zero-Ambiguity Contextual Anchors**: `VerifyBegin`, `VerifyEnd`, and `VerifyWord (\b)` MUST use `(in.AbsPos + i)` to index into `in.OriginalB`. This allows accurate boundary assessment even when the virtual slice starts in the middle of a word or line.
-- **Pointer-Passing for Input Context**: To avoid the 48-byte struct copy overhead (`runtime.duffcopy`) in hot loops, the `ir.Input` structure MUST be passed by pointer (`*ir.Input`) to all anchor verification and execution helper functions.
+- **Unified Discovery/Propagator Integration**: Pass 0 (MAP) MUST utilize the same absolute context to perform Search/Gaze/Snap operations, ensuring that identified candidates are globally valid before starting the DFA.
 - **Exit-Only Absolute Conversion**: Conversion from relative to absolute coordinates (e.g., `regs[i] += in.AbsPos`) MUST be performed **exactly once** at the public API boundary before returning results to the caller.
 - **Encapsulation**: This absolute coordinate system is an internal architectural detail. Public APIs MUST continue to provide standard, buffer-relative indices (0-based from the provided slice) to maintain 100% compatibility with Go's `regexp` package.
 
@@ -198,7 +225,8 @@ To minimize environmental noise and provide a flat evaluation of engine performa
 - **Noise-Interleaved Scaling**: To prevent unrealistic branch prediction saturation and cache-hit bias, scaled payloads MUST interleave target test cases with a representative noise block (typically ~1KB).
 - **Full-Scan Mandate**: To measure the engine's "cruising speed," benchmarks SHOULD use anchored patterns (e.g., `^...$`) or place matches at the end of the input to force a full scan of the payload.
 - **Layered Evaluation**: Utilize `BenchmarkSynthetic` to isolate and evaluate specific optimization layers.
-- **Performance Landscape Auditing**: To understand the structural response of the engine, use the 3D Landscape Model (S, B, L). Performance must be evaluated as a function of **Selectivity**, **Branching Complexity**, and **Locality** to ensure optimizations are effective across the entire pattern space.
+- **Performance Landscape Auditing**: To understand the structural response of the engine, use the 3D Landscape Model (S, B, L). Performance must be evaluated as a function of **Selectivity**, **Branching Complexity**, and **Locality**.
+    - **B (Branching Complexity) Definition**: Refined to distinguish between bitmask-optimized simple alternations (low weight) and complex nested structures/quantifiers (high weight) to accurately reflect state-space pressure.
 - `SearchWarp`: Match start position searching (Pre-filter).
     - `CCWarp`: Character class scanning (SWAR).
     - `PureDFA`: Table-based transition logic (NFA-free).

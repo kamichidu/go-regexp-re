@@ -19,8 +19,6 @@ func (re *Regexp) bindMatchStrategy() {
 		return
 	}
 
-	// If the pattern has no capturing groups and no complex priority shifts,
-	// we can use the fastest match loop.
 	if re.numSubexp == 0 && (re.dfa == nil || !re.dfa.HasAnchors()) {
 		re.strategy = strategyFast
 	} else {
@@ -50,7 +48,7 @@ func (re *Regexp) findIndexAt(b []byte, pos int, totalBytes int, originalB []byt
 	if start >= 0 {
 		return start + pos, end + pos, prio
 	}
-	return -1, -1, 0
+	return -1, -1, 1<<30 - 1
 }
 
 func (re *Regexp) findSubmatchIndexAt(b []byte, pos int, totalBytes int, originalB []byte) []int {
@@ -64,36 +62,32 @@ func (re *Regexp) findSubmatchIndexAt(b []byte, pos int, totalBytes int, origina
 	}
 
 	if re.strategy == strategyLiteral {
-		mc := matchContextPool.Get().(*matchContext)
-		defer matchContextPool.Put(mc)
-		mc.prepare(len(b), re.numSubexp, pos)
-
-		if !re.literalMatcher.FindSubmatchIndexInto(&in, mc.regs) {
-			return nil
-		}
-		// Adjust to absolute
-		for i := range mc.regs {
-			if mc.regs[i] >= 0 {
-				mc.regs[i] += pos
+		regs := make([]int, (re.numSubexp+1)*2)
+		if ok := re.literalMatcher.FindSubmatchIndexInto(&in, regs); ok {
+			// Convert to absolute
+			for i := range regs {
+				if regs[i] >= 0 {
+					regs[i] += pos
+				}
 			}
+			return regs
 		}
-		res := make([]int, len(mc.regs))
-		copy(res, mc.regs)
-		return res
+		return nil
 	}
 
 	mc := matchContextPool.Get().(*matchContext)
 	defer matchContextPool.Put(mc)
-	mc.prepare(len(b), re.numSubexp, pos)
 
-	// Pass 0 & 1: Discovery
-	matchStart, matchEnd, prio := fastDiscoveryLoop(re, &in)
+	matchStart, matchEnd, prio := re.submatch(&in, mc)
 	if matchStart < 0 {
 		return nil
 	}
 
-	// Pass 2: Anchored Recording
-	prio = anchoredRecordingLoop(re, &in, mc, matchStart, matchEnd)
+	// Prepare context for submatch extraction
+	mc.prepare(len(b), re.numSubexp, pos)
+
+	// Pass 2: Recording
+	anchoredRecordingLoop(re, &in, mc, matchStart, matchEnd)
 
 	// Pass 3 & 4: Extraction
 	regs := mc.regs
@@ -109,6 +103,6 @@ func (re *Regexp) match(in *ir.Input) (int, int, int) {
 	return fastMatchExecLoop(re, in)
 }
 
-func (re *Regexp) submatch(in ir.Input, mc *matchContext) (int, int, int) {
+func (re *Regexp) submatch(in *ir.Input, mc *matchContext) (int, int, int) {
 	return extendedSubmatchExecLoop(re, in, mc)
 }

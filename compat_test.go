@@ -225,6 +225,12 @@ func TestLiteralPrefix(t *testing.T) {
 	if prefix2 != "abc" || complete2 != true {
 		t.Errorf("LiteralPrefix() = %q, %v; want %q, %v", prefix2, complete2, "abc", true)
 	}
+
+	re3 := MustCompile(`fo|foo`)
+	prefix3, complete3 := re3.LiteralPrefix()
+	if prefix3 != "fo" || complete3 != false {
+		t.Errorf("LiteralPrefix() = %q, %v; want %q, %v", prefix3, complete3, "fo", false)
+	}
 }
 
 func TestMarshal(t *testing.T) {

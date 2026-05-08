@@ -5,37 +5,50 @@
 
 Multi-Point Anchored Constraint Propagation (MAP) is an advanced execution strategy for `go-regexp-re` that acts as **Pass 0**. By extracting and evaluating multiple anchor points from mandatory AST paths, the engine can skip vast amounts of "non-matching" data using SIMD-accelerated instructions and SWAR-based validation before ever invoking the heavy DFA machinery.
 
-MAP is designed to handle complex patterns with multiple entry points (e.g., `(^|[abc])literal`) and provides a zero-false-negative guarantee through strict safety mandates.
+MAP handles complex patterns with multiple entry points (e.g., `(^|[abc])literal`) by accumulating both mandatory and **optional** anchors (marked as non-mandatory candidates) into its search set, providing a zero-false-negative guarantee.
 
 == 1. Multi-Entry Point Anchor Discovery
 
-The engine analyzes the optimized AST to identify the most "selective" literal or character class for each mandatory path.
+The engine analyzes the optimized AST to identify the most "selective" literal or character class for each mandatory path. MAP treats both content (literals) and structural boundaries (`^`, `$`) as primary discovery sources.
 
 |===
 | Anchor Type | Location | Discovery Tool | Propagation Direction
-| *Prefix* | Pattern Start | `bytes.HasPrefix` / `IndexByte` | Forward only.
+| *Prefix* | Pattern Start | `bytes.HasPrefix` / `Index` | Forward only.
 | *Pivot* | Middle of Pattern | `bytes.Index` or `IndexClass` | Bi-directional.
-| *Suffix* | Pattern End | `bytes.LastIndex` | Backward only.
+| *Suffix* | Pattern End | `bytes.Index` (Augmented) | Backward only.
+| *Boundary* | Structural End | `bytes.IndexByte('\n')` | Distance-based.
 |===
 
-=== A. Support for Alternation (Covering Set)
+=== A. Augmented Anchors (Boundary-Content Integration)
+To maximize SIMD efficiency, MAP "augments" literal anchors with adjacent structural constraints during compilation. This merges two separate checks into a single `bytes.Index` call.
+
+- **Line-Start Augmentation**: `(?m)^Rare` becomes the search pattern `"\nRare"`. The engine also performs a one-time check at buffer index 0 for `"Rare"`.
+- **Line-End Augmentation**: `(?m)Rare$` becomes the search pattern `"Rare\n"`. The engine also performs a one-time check at buffer EOF for `"Rare"`.
+- **Fused Suffix Search**: For patterns like `HTTP/1.1$`, the engine prioritizes searching for `"1\n"` (in multiline) or `"1"` at `EOF-1` (in single-line) rather than searching for the prefix `"HTTP/1"`.
+
+=== B. LCP Factoring (Alternation Optimization)
+To optimize alternations with common prefixes, MAP employs **Longest Common Prefix (LCP) Factoring**.
+- **Mechanism**: If all branches of an alternation share a common literal prefix at the same fixed distance (e.g., `fo` in `(fo|foo)`), the engine factors out this prefix and promotes it to a **Virtual Mandatory Anchor**.
+- **Performance Impact**: This transforms a low-selectivity single-byte search (`IndexByte('f')`) into a high-selectivity string search (`bytes.Index("fo")`), significantly reducing DFA activations and false positives.
+
+=== C. Anchor Selection Criteria (Structural Density)
+The engine selects a single **Primary Iterator** based on the "Structural Density" of the augmented patterns:
+- **Literal Score**: 10 points per character.
+- **Boundary Bonus**: +20 for `^`/`$` (Text boundaries), +15 for `(?m)^`/`(?m)$` (Line boundaries).
+- **Specificity Score**: Higher for rare classes or multi-literal sequences.
+
+=== C. Support for Alternation (Covering Set)
 MAP identifies a **Covering Set** of anchors that represent all possible execution paths. If a pattern has alternations (e.g., `apple|banana`), the engine ensures that at least one selective anchor is tracked for every branch.
 - **Multi-Index Discovery**: Uses `bytes.IndexAny` to find the first byte of any anchor in the covering set.
 - **Exhaustive Coverage**: If a branch has no selective anchor, MAP may be partially disabled or fall back to a less selective common anchor to maintain 100% safety.
-
-=== B. Anchor Selection Criteria (Heuristic Score)
-Not all anchors are equal. The engine selects anchors based on a heuristic score:
-- **Literal Anchor (Weight: 10/char)**: Triggers SIMD `bytes.Index`.
-- **Class Anchor (Weight: 8 for Equal, 5 for Range)**: Triggers SWAR `IndexClass`.
-- **Fixed-Distance Bonus (+50)**: Anchors with a constant distance from match start are highly preferred as they allow precise `restartBase` jumps.
-- **Mandatory Requirement**: Only anchors proven to be **Mandatory** for a specific path are used to trigger skips.
+- **Nullable-Safe Accumulation**: For concatenations starting with nullable elements (e.g., `(a*)b`), MAP extracts anchors from both the optional prefix (`a`) and the subsequent mandatory element (`b`).
 ...
 == 8. Advanced Geographical Optimizations
 
 To further reduce DFA activations, MAP employs "Geographical" awareness based on the pattern's line-bounded nature.
 
 === A. Line-Anchored Jump (Warp to Line Start)
-For **Line-Bounded** patterns (non-multiline `.`), any match must exist entirely within a single line. 
+For **Line-Bounded** patterns (non-multiline `.`), any match must exist entirely within a single line.
 - When an anchor is discovered, the engine uses `bytes.LastIndexByte` (or merged scan) to find the beginning of the current line.
 - The search starting point (`restartBase`) is warped directly to this line start, bypassing all DFA transitions for the line's prefix.
 
@@ -49,18 +62,47 @@ To eliminate the overhead of a second scan, the `IndexClass` SWAR kernels are **
 
 To ensure 100% compatibility with standard regular expression semantics, MAP adheres to strict safety rules:
 
-- **Nullable Pattern Protection**: If any path in the pattern can match an empty string (`minLength == 0`), MAP is **disabled** to prevent incorrect rejection of empty matches.
+- **Nullable Pattern Protection**: If an entire path in the pattern can match an empty string (`minLength == 0`), MAP is **disabled** to prevent incorrect rejection. For nullable *sub-elements* in a concatenation, anchors are extracted but marked as **Mandatory: false** to ensure they act as search hints without blocking potential matches.
 - **Capture Transparency**: Anchor extraction uses **Capture Stripping** to ignore `OpCapture` boundaries, merging adjacent literals into longer, more efficient anchors (e.g., `abc(def)ghi` -> `abcdefghi`).
 - **Anchor Context Awareness**: Anchors tied to `^` (BeginText) are validated only at index 0, while Pivot anchors search the entire buffer.
 
-== 3. Constraint Propagation Model
+== 3. Lightweight Unified Propagator (Pass 0)
 
-Once an anchor is discovered at position `P`, the engine does not immediately start the DFA. Instead, it applies **Constraints** that must hold true:
+Once the Primary Iterator identifies a candidate position `P`, the engine enters the **Lightweight Unified Propagator** phase. The goal of Pass 0 is not exhaustive validation, but **high-confidence rejection of false positives** using constant-time (O(1)) operations.
 
-- **Forward Constraints**: Character classes or bytes that MUST appear at offset `P+k`. Supports **Dynamic Warp** for repetitions.
-- **Backward Constraints**: Character classes or bytes that MUST appear at offset `P-k`.
+=== A. O(1) Pruning Constraints
+The propagator only executes checks that are significantly cheaper than a few DFA steps:
 
-These constraints are "folded" during compilation into 64-bit masks or arithmetic range checks.
+- **SkipGaze Optimization**: To eliminate redundant verification, the compiler identifies anchors that are "Self-Verifying"—meaning their content is fully guaranteed by the Search phase (SIMD/SWAR) and they possess no surrounding boundary or distance constraints. Such anchors bypass the Gaze phase entirely.
+- **Boundary Distance Verification**: If anchored to `$`, verify if the remaining buffer length is within the expected range `[MinDist, MaxDist]`.
+- **Structural Boundary Check**: Verify if `P` is preceded/followed by `\n` if the pattern is line-anchored.
+- **Single-Point Literal Check**: If the pattern has other mandatory literal points, verify a single byte or short prefix at a fixed offset from `P`.
+
+=== C. Searching DFA (sDFA) - Multi-byte Pre-filtering
+To further bridge the gap between high-speed SIMD search and heavy DFA execution, MAP utilizes a **Searching DFA (sDFA)**.
+- **Mechanism**: A lightweight, `uint8`-based DFA constructed via an independent builder (limited to 255 states). It resolves complex prefixes like `abc|def` that cannot be captured by a single `bytes.Index` call.
+- **2-Stage Hybrid Execution**:
+    1.  **SIMD Trigger Search**: The engine first scans for the earliest possible starting byte of any sDFA branch using a SIMD-accelerated `IndexClass` (utilizing the sDFA's `Trigger` set).
+    2.  **DFA Verification**: Once a trigger is found, the engine runs the sDFA strictly over the following bytes. If the sDFA confirms the sequence (reaches an **Accepting State**), the candidate is promoted to the Primary DFA.
+- **High-Confidence Rejection**: If the sDFA reaches a **Dead State**, the candidate is immediately rejected, and the engine resumes the SIMD skip from the next byte. This keeps the Primary DFA's state space clean and ensures that heavy state machine activation only occurs for high-probability candidates.
+
+=== D. Early Handover Principle
+To avoid the "validation bottleneck," MAP defers all complex verification to the DFA (Pass 1):
+
+- **No Variable-Length Skips**: Variable-length constraints (`.*`, `a+`) are never validated in Pass 0.
+- **No Multi-Byte Loops**: Large literal sequences or complex character classes are left for the DFA's optimized transition loop.
+- **Early DFA Activation**: If O(1) structural requirements are met, the engine immediately hands over control to the DFA. Since the DFA is a highly optimized state machine, it will naturally reject mismatches within its first few cycles with minimal overhead.
+
+This balanced approach ensures that Pass 0 remains a fast filter rather than a secondary execution engine.
+
+=== B. Candidate Snapping (Backward Propagation)
+When an anchor is discovered at position `P`, the engine must determine the correct starting position (`restartBase`) for the DFA to ensure **leftmost-longest** match semantics.
+
+- **Fixed Distance Snapping**: If the anchor is at a constant offset `D` from the match start, `restartBase` is set to `P - D`.
+- **Variable Distance Snapping (WarpBack)**: For patterns like `a*b` hit at `b`, the engine uses **WarpBack** (a reverse SIMD/SWAR scan) to find the leftmost extent of the preceding character class (`a*`).
+- **Boundary Snapping**: If the pattern is anchored to a line start (`(?m)^`), the snap logic finds the nearest preceding newline (`\n`) to determine the potential start of the match.
+
+This snapping ensures that the DFA (Pass 1) begins at the earliest possible point that could result in a match containing the discovered anchor, maintaining full compatibility with Go's `regexp` behavior.
 
 == 4. SWAR-Integrated Validation
 

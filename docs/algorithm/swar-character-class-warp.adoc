@@ -14,16 +14,17 @@ The engine applies SWAR optimizations in two distinct phases to maximize through
 === 1. SearchWarp (Pre-filtering)
 When the engine is in the initial `searchState` (scanning for a match start), it uses the **SearchWarp** phase to skip "noise" characters. 
 
-- **Hybrid Strategy**: To achieve peak performance, SearchWarp prioritizes Go standard library SIMD-accelerated functions:
-    *   **Single Character**: Uses `bytes.IndexByte` (up to 15 GB/s).
-    *   **Small Set/Range**: Uses `bytes.IndexAny` with a pre-calculated character string.
-    *   **Large/Negated Set**: Falls back to specialized SWAR kernels (e.g., `CCWarpNotSingleRange`) to skip noise 8 bytes at a time.
-- **Goal**: Rapidly skip segments of text that cannot possibly start a match.
+- **Unified SWAR Strategy**: To achieve peak performance, SearchWarp relies exclusively on project-specific SWAR kernels or minimal SIMD-accelerated library functions:
+    *   **Single Byte**: Uses `bytes.IndexByte` (up to 15 GB/s).
+    *   **Character Sets & Ranges**: Uses `ir.IndexClass` (SWAR). Standard library `bytes.IndexAny` is **STRICTLY PROHIBITED** as it has been proven to bottleneck at ~1.2 GB/s due to UTF-8 decoding and bitset overhead.
+    *   **Goal**: Rapidly skip segments of text that cannot possibly start a match.
+- **Performance Advantage**: On ASCII ranges like `[0-9]`, `ir.IndexClass` (SWAR) reaches ~2.7 GB/s, more than double the speed of `bytes.IndexAny` (~1.2 GB/s).
 - **Sharing**: It shares the same kernel definitions as CCWarp but applies **inverted logic**: it skips as long as characters are NOT in the "Start Set".
 
 === 2. CCWarp (Match Fast-Forwarding)
 Once a match has begun and the DFA enters a self-looping state (like the `+` in `[0-9]+`), it switches to the **CCWarp** phase.
 - **Goal**: Consume as many matching characters as possible without leaving the current DFA state.
+- **ASCII-Only Restriction**: CCWarp pre-filters (Equal, Range, Set) are strictly restricted to ASCII runes. Multi-byte runes are excluded from these fast-paths to prevent "filter pollution" where truncated lead-bytes could cause incorrect skipping of valid multi-byte sequences.
 - **Performance**: This phase allows the engine to "swallow" the bulk of the match at memory-bandwidth speeds.
 
 == The Core Principle: Bitwise Parallelism
@@ -73,9 +74,15 @@ Earlier versions used manual loop unrolling (8x) to maximize throughput. However
 
 === 4. Cache Locality Optimization
 To prevent performance degradation in complex regex patterns with many states, the core transition data is optimized for the L1 cache.
-- **Slim CCWarpInfo**: The structure is kept to **32 bytes**.
-- **Heap Fallback**: Large data sets (like 128-bit masks) are offloaded to an `Extra` slice (heap-allocated once).
+- **Strict 32-byte CCWarpInfo**: The structure is designed to fit exactly within a half cache line (32 bytes on most modern CPUs) including alignment.
+    *   `Kernel (uint8)` + `Flags (uint8)` + `Padding (2B)` = 4 bytes
+    *   `V0 (uint32)` + `V1 (uint32)` = 8 bytes
+    *   `Extra (*[]uint64)` = 8 bytes
+    *   `Padding ([8]byte)` = 8 bytes
+    *   **Total = 32 bytes**
+- **Heap Fallback**: Large data sets (like 128-bit masks) are offloaded to the `Extra` slice (heap-allocated once during compilation). Using a pointer instead of a slice header reduces the struct size by 16 bytes.
 - **Impact**: This ensures that even DFA tables with hundreds of states can fit within the L2 cache, minimizing memory latency during state transitions.
+- **Pointer-Passing**: Kernel functions always take a pointer to `CCWarpInfo` to eliminate the 32-byte stack copy per call, which is critical for maintaining zero-allocation in the `Capturing/Email` benchmark.
 
 === 5. Integration with the Execution Pipeline
 CCWarp is tightly integrated into the Multi-Pass execution pipeline:

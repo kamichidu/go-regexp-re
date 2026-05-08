@@ -27,7 +27,7 @@ const (
 	StateIDMask        uint32 = 0x000FFFFF
 )
 
-type CCWarpKernel int
+type CCWarpKernel uint8
 
 const (
 	CCWarpNone CCWarpKernel = iota
@@ -44,12 +44,18 @@ const (
 )
 
 type CCWarpInfo struct {
-	Kernel    CCWarpKernel
-	V0, V1    uint64   // Fast access for common kernels (Equal, Range, etc.)
-	Extra     []uint64 // Fallback for large sets (EqualSet, Bitmask)
-	IndexAny  string   // Fast path for SearchWarp
-	IncludeNL bool     // If true, also search for \n
+	Kernel uint8  // CCWarpKernel
+	Flags  uint8  // Bit 0: IncludeNL
+	_      uint16 // Padding
+	V0     uint32 // Fast access for common kernels (Equal, Range, etc.)
+	V1     uint32 // Fast access for common kernels (Equal, Range, etc.)
+	Extra  *[]uint64
+	_      [8]byte // Padding to exactly 32 bytes
 }
+
+const (
+	CCWarpFlagIncludeNL uint8 = 1 << 0
+)
 
 const MaxDFAMemory = 64 * 1024 * 1024
 const SearchRestartPenalty = 1024
@@ -62,6 +68,24 @@ type NFAPath struct {
 }
 
 const NFAPathSize = int(unsafe.Sizeof(NFAPath{}))
+
+type SearchStrategy uint8
+
+const (
+	SearchStrategyNone       SearchStrategy = iota
+	SearchStrategyLiteral                   // bytes.Index (Best for long literals)
+	SearchStrategySearchWarp                // ir.IndexClass/SWAR (Best for complex repetitions)
+	SearchStrategySDFA                      // Searching DFA (Best for complex prefixes like (abc|def))
+)
+
+type SearchDFA struct {
+	NumStates   int
+	Transitions []uint8 // [numStates * 256]uint8
+	Accepting   []bool  // States that indicate a strong candidate
+	DeadState   uint8
+	StartState  uint8
+	Trigger     CCWarpInfo // SWAR-capable trigger set
+}
 
 type DFA struct {
 	numStates               int
@@ -87,6 +111,10 @@ type DFA struct {
 	hasAnchors              bool
 	ccWarpTable             []CCWarpInfo
 	searchWarp              CCWarpInfo
+	mapAnchors              []AnchorInfo
+	primaryAnchor           *AnchorInfo
+	searchDFA               *SearchDFA
+	searchStrategy          SearchStrategy
 }
 
 func (d *DFA) IsNaked() bool                  { return d.Naked }
@@ -94,6 +122,10 @@ func (d *DFA) NumStates() int                 { return d.numStates }
 func (d *DFA) RecapTables() []GroupRecapTable { return d.recapTables }
 func (d *DFA) CCWarpTable() []CCWarpInfo      { return d.ccWarpTable }
 func (d *DFA) SearchWarp() CCWarpInfo         { return d.searchWarp }
+func (d *DFA) MapAnchors() []AnchorInfo       { return d.mapAnchors }
+func (d *DFA) PrimaryAnchor() *AnchorInfo     { return d.primaryAnchor }
+func (d *DFA) SearchDFA() *SearchDFA          { return d.searchDFA }
+func (d *DFA) SearchStrategy() SearchStrategy { return d.searchStrategy }
 
 func (d *DFA) StateMinPriority(id uint32) int32 {
 	idx := int(id & StateIDMask)

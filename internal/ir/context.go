@@ -14,6 +14,10 @@ type Input struct {
 	SearchEnd   int    // Relative end position in B
 }
 
+func isWordChar(b byte) bool {
+	return 'A' <= b && b <= 'Z' || 'a' <= b && b <= 'z' || '0' <= b && b <= '9' || b == '_'
+}
+
 // VerifyBegin checks for ^ and \A anchors using absolute context.
 func VerifyBegin(in *Input, i int, req syntax.EmptyOp) bool {
 	if (req & (syntax.EmptyBeginText | syntax.EmptyBeginLine)) == 0 {
@@ -45,16 +49,39 @@ func VerifyWord(in *Input, i int, req syntax.EmptyOp) bool {
 	}
 	absPos := in.AbsPos + i
 	var wordLeft, wordRight bool
-	if absPos > 0 && in.OriginalB[absPos-1] < 0x80 && syntax.IsWordChar(rune(in.OriginalB[absPos-1])) {
+	if absPos > 0 && isWordChar(in.OriginalB[absPos-1]) {
 		wordLeft = true
 	}
-	if absPos < in.TotalBytes && in.OriginalB[absPos] < 0x80 && syntax.IsWordChar(rune(in.OriginalB[absPos])) {
+	if absPos < in.TotalBytes && isWordChar(in.OriginalB[absPos]) {
 		wordRight = true
 	}
 	if wordLeft != wordRight {
 		return (req & syntax.EmptyWordBoundary) != 0
 	}
 	return (req & syntax.EmptyNoWordBoundary) != 0
+}
+
+// Verify checks for all anchors in req using absolute context.
+func Verify(in *Input, i int, req syntax.EmptyOp) bool {
+	if req == 0 {
+		return true
+	}
+	if (req & (syntax.EmptyBeginText | syntax.EmptyBeginLine)) != 0 {
+		if !VerifyBegin(in, i, req) {
+			return false
+		}
+	}
+	if (req & (syntax.EmptyEndText | syntax.EmptyEndLine)) != 0 {
+		if !VerifyEnd(in, i, req) {
+			return false
+		}
+	}
+	if (req & (syntax.EmptyWordBoundary | syntax.EmptyNoWordBoundary)) != 0 {
+		if !VerifyWord(in, i, req) {
+			return false
+		}
+	}
+	return true
 }
 
 func GetTrailingByteCount(lead byte) int {

@@ -2,37 +2,34 @@ package regexp
 
 import (
 	"context"
-	"unsafe"
-
 	"github.com/kamichidu/go-regexp-re/internal/ir"
 	"github.com/kamichidu/go-regexp-re/syntax"
+	"unicode/utf8"
 )
 
-// UnsupportedError represents a valid regular expression pattern that is not
-// currently supported by the DFA engine due to structural limitations.
-type UnsupportedError = syntax.UnsupportedError
-
 type Regexp struct {
-	expr           string
-	numSubexp      int
-	prefix         []byte
-	complete       bool
-	anchorStart    bool
-	hasAnchors     bool
-	prog           *syntax.Prog
-	dfa            *ir.DFA
-	literalMatcher *ir.LiteralMatcher
-	subexpNames    []string
-	strategy       matchStrategy
-	searchState    uint32
-	matchState     uint32
-	uIndices       []uint32
-	uPrioDeltas    []int32
-	searchWarp     ir.CCWarpInfo
-	mapAnchors     []ir.AnchorInfo
-	primaryAnchor  *ir.AnchorInfo
-	searchAny      string
-	lineBounded    bool
+	expr             string
+	numSubexp        int
+	prefix           []byte
+	complete         bool
+	anchorStart      bool
+	hasAnchors       bool
+	prog             *syntax.Prog
+	dfa              *ir.DFA
+	literalMatcher   *ir.LiteralMatcher
+	subexpNames      []string
+	strategy         matchStrategy
+	searchState      uint32
+	matchState       uint32
+	uIndices         []uint32
+	uPrioDeltas      []int32
+	searchWarp       ir.CCWarpInfo
+	mapAnchors       []ir.AnchorInfo
+	primaryAnchor    *ir.AnchorInfo
+	searchAny        []byte
+	searchMask       [4]uint64
+	lineBounded      bool
+	primaryAugmented *ir.AugmentedPattern
 }
 
 type CompileOptions struct {
@@ -128,16 +125,12 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 		lineBounded:    ir.IsLineBounded(s),
 	}
 
-	if res.literalMatcher == nil && !ir.HasComplexAnchors(s) {
-		res.mapAnchors = ir.SelectBestAnchors(s)
-		for i := range res.mapAnchors {
-			if res.lineBounded && res.mapAnchors[i].Distance > 0 {
-				res.mapAnchors[i].Class.IncludeNL = true
-			}
-		}
-		if len(res.mapAnchors) == 1 {
-			res.primaryAnchor = &res.mapAnchors[0]
-		} else if len(res.mapAnchors) > 1 {
+	if res.literalMatcher == nil && res.dfa != nil {
+		res.mapAnchors = res.dfa.MapAnchors()
+		res.primaryAnchor = res.dfa.PrimaryAnchor()
+
+		if len(res.mapAnchors) > 0 {
+			// 1. Calculate searchAny from ALL anchors in the covering set
 			var buf []byte
 			seen := make(map[byte]bool)
 			allCovered := true
@@ -154,7 +147,7 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 						break
 					}
 				} else {
-					switch a.Class.Kernel {
+					switch ir.CCWarpKernel(a.Class.Kernel) {
 					case ir.CCWarpEqual:
 						b := byte(a.Class.V0)
 						if !seen[b] {
@@ -163,8 +156,20 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 						}
 					case ir.CCWarpSingleRange:
 						low, high := byte(a.Class.V0), byte(a.Class.V1)
-						if high-low < 8 {
+						if high-low < 255 {
 							for b := low; b <= high; b++ {
+								if !seen[b] {
+									buf = append(buf, b)
+									seen[b] = true
+								}
+							}
+						} else {
+							allCovered = false
+						}
+					case ir.CCWarpEqualSet:
+						if a.Class.Extra != nil && len(*a.Class.Extra) < 256 {
+							for _, v := range *a.Class.Extra {
+								b := byte(v)
 								if !seen[b] {
 									buf = append(buf, b)
 									seen[b] = true
@@ -188,33 +193,54 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 						seen['\n'] = true
 					}
 				}
-				res.searchAny = string(buf)
+				res.searchAny = buf
+				for _, b := range buf {
+					res.searchMask[b/64] |= 1 << (b % 64)
+				}
+			}
+
+			// 2. Select the best Augmented pattern as primaryAugmented.
+		outer:
+			for i := range res.mapAnchors {
+				for j := range res.mapAnchors[i].Augmented {
+					aug := &res.mapAnchors[i].Augmented[j]
+					if !aug.IsStart && !aug.IsEnd {
+						res.primaryAugmented = aug
+						break outer
+					}
+				}
 			}
 		}
 	}
 
 	if opts.forceStrategy != strategyNone {
 		res.strategy = opts.forceStrategy
+	} else if res.literalMatcher != nil {
+		res.strategy = strategyLiteral
+	} else if res.hasAnchors || res.numSubexp > 0 {
+		res.strategy = strategyExtended
+	} else if res.dfa != nil {
+		res.strategy = strategyFast
 	} else {
-		res.bindMatchStrategy()
+		res.strategy = strategyNone
 	}
+
 	return res, nil
 }
 
 func calculateLiteralPrefix(re *syntax.Regexp) (string, bool) {
+	if re == nil {
+		return "", false
+	}
 	switch re.Op {
-	default:
-		return "", false
 	case syntax.OpLiteral:
-		if re.Flags&syntax.FoldCase != 0 {
-			return "", false
+		var buf []byte
+		for _, r := range re.Rune {
+			var b [utf8.UTFMax]byte
+			n := utf8.EncodeRune(b[:], r)
+			buf = append(buf, b[:n]...)
 		}
-		return string(re.Rune), true
-	case syntax.OpCharClass:
-		if (re.Flags&syntax.FoldCase == 0) && len(re.Rune) == 2 && re.Rune[0] == re.Rune[1] {
-			return string(re.Rune[0]), true
-		}
-		return "", false
+		return string(buf), true
 	case syntax.OpCapture:
 		return calculateLiteralPrefix(re.Sub[0])
 	case syntax.OpConcat:
@@ -225,12 +251,34 @@ func calculateLiteralPrefix(re *syntax.Regexp) (string, bool) {
 			if !c {
 				return prefix, false
 			}
-			if i == len(re.Sub)-1 {
-				return prefix, true
+			if i == 0 && (sub.Op == syntax.OpBeginText || sub.Op == syntax.OpBeginLine) {
+				continue
 			}
 		}
 		return prefix, true
+	case syntax.OpAlternate:
+		var prefix string
+		complete := true
+		for i, sub := range re.Sub {
+			p, c := calculateLiteralPrefix(sub)
+			if i == 0 {
+				prefix = p
+				complete = c
+			} else {
+				n := 0
+				for n < len(prefix) && n < len(p) && prefix[n] == p[n] {
+					n++
+				}
+				prefix = prefix[:n]
+				complete = complete && c && len(prefix) == len(p)
+			}
+			if prefix == "" {
+				break
+			}
+		}
+		return prefix, complete
 	}
+	return "", false
 }
 
 func hasAnchors(prog *syntax.Prog) bool {
@@ -240,17 +288,6 @@ func hasAnchors(prog *syntax.Prog) bool {
 		}
 	}
 	return false
-}
-
-func (re *Regexp) Match(b []byte) bool {
-	start, _, _ := re.findIndexAt(b, 0, len(b), b)
-	return start >= 0
-}
-
-func (re *Regexp) MatchString(s string) bool {
-	b := unsafe.Slice(unsafe.StringData(s), len(s))
-	start, _, _ := re.findIndexAt(b, 0, len(b), b)
-	return start >= 0
 }
 
 func (re *Regexp) FindSubmatchIndex(b []byte) []int {
@@ -266,6 +303,10 @@ func MustCompile(expr string) *Regexp {
 }
 
 func (re *Regexp) String() string { return re.expr }
+
+// UnsupportedError represents a regular expression pattern that is not
+// supported by the current DFA-based engine.
+type UnsupportedError = syntax.UnsupportedError
 
 func (re *Regexp) LiteralPrefix() (prefix string, complete bool) {
 	return string(re.prefix), re.complete

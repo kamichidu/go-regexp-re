@@ -3,10 +3,10 @@ package testsuite
 import (
 	"bufio"
 	"fmt"
+	"github.com/kamichidu/go-regexp-re/syntax"
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"github.com/kamichidu/go-regexp-re/syntax"
 	"log"
 	"os"
 	"os/exec"
@@ -693,7 +693,7 @@ func BenchmarkStandardSuite(b *testing.B) {
 				baseBuf.WriteString(" ")
 			}
 			input := ScaleWithNoise(baseBuf.String(), 1*1024*1024)
-			
+
 			// Compute S from scaling ratio (intended)
 			s_val := float64(baseBuf.Len()) / (float64(baseBuf.Len()) + 1024.0)
 
@@ -702,7 +702,7 @@ func BenchmarkStandardSuite(b *testing.B) {
 			if len(displayName) > 30 {
 				displayName = displayName[:27] + "..."
 			}
-			
+
 			benchName := fmt.Sprintf("%s/%s", cat, displayName)
 			RecordSBL("StandardSuite/"+benchName, s_val, b_val, l_val)
 
@@ -766,7 +766,6 @@ func BenchmarkLargeAlternation(b *testing.B) {
 					re.MatchString(payload)
 				}
 			})
-
 
 			// Clear reference and reclaim memory before the next count
 			re = nil
@@ -910,9 +909,11 @@ func BenchmarkAnchors(b *testing.B) {
 	}
 
 	patterns := []string{
-		"^127.0.0.1", // Line start
-		"HTTP/1.1$",  // Line end
-		"\\bGET\\b",  // Word boundary
+		"^127.0.0.1",     // Line start
+		"(?m)^127.0.0.1", // Line start (multiline)
+		"HTTP/1.1$",      // Line end
+		"(?m)HTTP/1.1$",  // Line end (multiline)
+		"\\bGET\\b",      // Word boundary
 	}
 
 	runOnEngines(b, func(b *testing.B, engine Engine) {
@@ -928,7 +929,7 @@ func BenchmarkAnchors(b *testing.B) {
 			b_val := ComputeB(ast)
 			l_val := ComputeL(ast)
 			// Selectivity (heuristic for anchors)
-			s_val := 0.05 
+			s_val := 0.05
 
 			benchName := fmt.Sprintf("pat=%s", pattern)
 			RecordSBL("Anchors/"+benchName, s_val, b_val, l_val)

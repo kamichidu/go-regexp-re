@@ -69,7 +69,9 @@ func hasEmptyAlternative(re *syntax.Regexp) bool {
 
 func matchesEmpty(re *syntax.Regexp) bool {
 	switch re.Op {
-	case syntax.OpEmptyMatch, syntax.OpStar, syntax.OpQuest:
+	case syntax.OpEmptyMatch, syntax.OpStar, syntax.OpQuest,
+		syntax.OpBeginLine, syntax.OpEndLine, syntax.OpBeginText, syntax.OpEndText,
+		syntax.OpWordBoundary, syntax.OpNoWordBoundary:
 		return true
 	case syntax.OpRepeat:
 		return re.Min == 0

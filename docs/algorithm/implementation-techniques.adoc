@@ -95,6 +95,11 @@ While `bytes.Index` provides SIMD-accelerated prefix scanning, many regex patter
 * **Mechanism**: At the start of a match attempt, if the current DFA state is the `searchState`, the engine uses SWAR kernels to skip blocks of 8 bytes that do not contain any byte from the Start Set.
 * **Safety**: This technique is automatically disabled for broad patterns (like `.*`) where the Start Set is too large, avoiding unnecessary overhead.
 
+=== 9. High-Precision Progress Tracking (matchLiteralPos)
+To handle anchored patterns and leftmost-longest semantics correctly during the Discovery phase (Pass 0), the engine maintains dual-coordinate tracking.
+* **Mechanism**: The `fastDiscoveryLoop` separates the `candidatePos` (the start of the potential match) from the `matchLiteralPos` (the position where the mandatory anchor/literal was actually found).
+* **Benefit**: This allows the engine to correctly handle **Suffix Anchors** (literals that appear at a fixed distance after the match start). For example, in `a.b`, 'b' is the literal anchor. If 'b' is found at `i`, the match start is `i-2`. Progress tracking (`i = matchLiteralPos + 1`) ensures that every potential candidate is evaluated without skipping, while `candidatePos` ensures that the DFA/Snap phase is initialized with the correct logical start position for accurate boundary verification.
+
 == Summary of Performance Gains
 
 These techniques ensure that the "theoretical" $O(n)$ performance of the DFA becomes a "physical" reality, minimizing the "constant factor" cost to just a handful of CPU cycles per byte.

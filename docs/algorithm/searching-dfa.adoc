@@ -1,0 +1,36 @@
+= Searching DFA (sDFA) - Multi-byte Pre-filter
+:sectnums:
+
+== Overview
+
+The **Searching DFA (sDFA)** is a lightweight, secondary DFA used in **Pass 0 (MAP)** to resolve complex prefixes that cannot be handled by simple literal SIMD (`bytes.Index`) or single-character SWAR (`ir.IndexClass`).
+
+It acts as a multi-byte pre-filter that reduces false positives for patterns involving alternations (e.g., `(abc|def)`) or character class sequences (e.g., `[a-z][0-9]`), ensuring that the primary execution pipeline is only triggered for high-probability candidates.
+
+== Architectural Constraints
+
+To maintain minimal compilation overhead and zero-allocation execution, the sDFA is strictly constrained:
+
+- **State Limit**: The transition table is limited to **255 states**. This allows state IDs to be stored as `uint8`, minimizing the memory footprint of the transition table.
+- **ASCII-Only**: Currently, sDFA only supports ASCII-only (U+0000 to U+007F) patterns. Patterns containing non-ASCII runes or UTF-8 wildcards (`.`) are bypassed and fall back to other pre-filters or the full DFA.
+- **NFA Complexity Limit**: The construction process only processes up to **64 NFA states**. This ensures that sDFA construction remains fast and doesn't become a bottleneck during regex compilation.
+- **Best-Effort Optimization**: If construction exceeds these limits or encounters unsupported instructions, `buildSearchDFA` returns `nil`. The engine then silently bypasses the sDFA pre-filter, ensuring that it never blocks valid matches.
+
+== Search Strategy Dispatch
+
+The engine statically selects the most efficient pre-filter during compilation to prevent performance regressions:
+
+1.  **Literal (SIMD)**: If the pattern has a single mandatory prefix, use `bytes.Index`.
+2.  **SearchWarp (SWAR)**: For single-character triggers or `NFAWorstCase` (`(a+)+b`), SWAR is preferred as it is faster than a DFA scan for simple inputs.
+3.  **sDFA**: Used for complex/multiple prefixes and sequences that require multi-byte state tracking.
+
+== Implementation Details
+
+- **Zero-Allocation Trigger**: The trigger character set (used to initiate the sDFA scan) is stored as a `string` to avoid repeated `[]byte` to `string` conversions in hot loops.
+- **Trigger Detection**: The discovery loop uses `bytes.IndexAny` or `bytes.IndexByte` to find the first character of any potential sDFA match.
+- **Deterministic Scan**: Once a trigger is found, the sDFA performs a forward scan. It returns `true` as soon as it reaches an accepting state, signaling that the primary DFA should be activated.
+- **Error Handling**: If the sDFA encounters a byte that leads to a "dead" state, it immediately terminates the scan and returns control to the discovery loop.
+
+== Performance Impact
+
+By resolving alternations and sequences in Pass 0, the sDFA eliminates thousands of redundant primary DFA activations for common "noise" data. This is particularly effective for large alternations where `bytes.IndexAny` would otherwise trigger too many false positives.

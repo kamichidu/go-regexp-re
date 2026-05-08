@@ -46,9 +46,10 @@ func ComputeB(re *syntax.Regexp) float64 {
 	}
 
 	var stats struct {
-		Alts   int
-		Quants int
-		Depth  int
+		SimpleAlts  int
+		ComplexAlts int
+		Quants      int
+		Depth       int
 	}
 
 	var walk func(*syntax.Regexp, int)
@@ -59,7 +60,18 @@ func ComputeB(re *syntax.Regexp) float64 {
 
 		switch r.Op {
 		case syntax.OpAlternate:
-			stats.Alts += len(r.Sub) - 1
+			isSimple := true
+			for _, sub := range r.Sub {
+				if sub.Op != syntax.OpLiteral && sub.Op != syntax.OpCharClass && sub.Op != syntax.OpAnyChar && sub.Op != syntax.OpAnyCharNotNL {
+					isSimple = false
+					break
+				}
+			}
+			if isSimple {
+				stats.SimpleAlts += len(r.Sub) - 1
+			} else {
+				stats.ComplexAlts += len(r.Sub) - 1
+			}
 		case syntax.OpStar, syntax.OpPlus, syntax.OpQuest, syntax.OpRepeat:
 			stats.Quants++
 		}
@@ -70,11 +82,14 @@ func ComputeB(re *syntax.Regexp) float64 {
 	}
 	walk(re, 0)
 
-	// Formula based on @memo proposal
-	rawB := float64(stats.Alts)*1.0 + float64(stats.Quants)*0.7 + float64(stats.Depth)*0.3
+	// Improved Formula based on @memo proposal
+	// Simple alts are optimized via searchAny bitmask, so they have lower weight.
+	// Complex alts and quants have higher impact on DFA state explosion.
+	rawB := float64(stats.SimpleAlts)*0.1 + float64(stats.ComplexAlts)*1.2 + float64(stats.Quants)*1.0 + float64(stats.Depth)*0.5
 
 	// Sigmoid normalization to 0.0-1.0
-	return 1.0 / (1.0 + math.Exp(-rawB/5.0))
+	// Adjusted denominator to keep common patterns in a reasonable range.
+	return 1.0 / (1.0 + math.Exp(-rawB/10.0))
 }
 
 // ComputeL calculates the Locality (L) traits from a regex AST.

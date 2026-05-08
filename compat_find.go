@@ -35,6 +35,20 @@ func (re *Regexp) FindStringIndex(s string) []int {
 	return re.FindIndex(b)
 }
 
+func (re *Regexp) FindSubmatch(b []byte) [][]byte {
+	loc := re.FindSubmatchIndex(b)
+	if loc == nil {
+		return nil
+	}
+	result := make([][]byte, len(loc)/2)
+	for i := range result {
+		if loc[2*i] >= 0 {
+			result[i] = b[loc[2*i]:loc[2*i+1]]
+		}
+	}
+	return result
+}
+
 func (re *Regexp) FindStringSubmatch(s string) []string {
 	indices := re.FindStringSubmatchIndex(s)
 	if indices == nil {
@@ -162,7 +176,10 @@ func (re *Regexp) all(b []byte, n int, deliver func([]int)) {
 		// 'end' is now absolute, so 'end - pos' is the relative advancement
 		advance := end - pos
 		if advance <= 0 {
-			advance = 1 + ir.GetTrailingByteCount(b[pos])
+			advance = 1
+			if pos < totalBytes {
+				advance = 1 + ir.GetTrailingByteCount(b[pos])
+			}
 		}
 		pos += advance
 		if pos > totalBytes {
@@ -189,7 +206,10 @@ func (re *Regexp) allSubmatch(b []byte, n int, deliver func([]int)) {
 		// 'loc[1]' is now absolute
 		advance := loc[1] - pos
 		if advance <= 0 {
-			advance = 1 + ir.GetTrailingByteCount(b[pos])
+			advance = 1
+			if pos < totalBytes {
+				advance = 1 + ir.GetTrailingByteCount(b[pos])
+			}
 		}
 		pos += advance
 		if pos > totalBytes {
