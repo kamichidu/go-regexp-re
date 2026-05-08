@@ -445,10 +445,10 @@ func fastMatchExecLoop(re *Regexp, in *ir.Input) (int, int, int) {
 	return -1, -1, 0
 }
 
-func extendedMatchExecLoop(re *Regexp, in ir.Input) (int, int, int) {
-	return fastDiscoveryLoop(re, &in)
+func extendedMatchExecLoop(re *Regexp, in *ir.Input) (int, int, int) {
+	return fastDiscoveryLoop(re, in)
 }
 
-func extendedSubmatchExecLoop(re *Regexp, in ir.Input, mc *matchContext) (int, int, int) {
-	return fastDiscoveryLoop(re, &in)
+func extendedSubmatchExecLoop(re *Regexp, in *ir.Input, mc *matchContext) (int, int, int) {
+	return fastDiscoveryLoop(re, in)
 }

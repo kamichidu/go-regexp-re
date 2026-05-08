@@ -109,6 +109,6 @@ func (re *Regexp) match(in *ir.Input) (int, int, int) {
 	return fastMatchExecLoop(re, in)
 }
 
-func (re *Regexp) submatch(in ir.Input, mc *matchContext) (int, int, int) {
+func (re *Regexp) submatch(in *ir.Input, mc *matchContext) (int, int, int) {
 	return extendedSubmatchExecLoop(re, in, mc)
 }
