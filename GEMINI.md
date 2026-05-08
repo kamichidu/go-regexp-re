@@ -31,7 +31,8 @@ To maximize throughput, the engine MUST select the most efficient execution loop
 - **Full Path (Multi-Pass Sparse TDFA)**: Selected for `FindSubmatchIndex` calls. It employs the comprehensive 5-pass pipeline to guarantee peak performance and Go parity:
 - **Pass 0 (MAP)**: Primary search phase. Identifies mandatory paths and extracts anchor candidates (**Prefix**, **Pivot**, or **Suffix**).
     - **Search**: Identifies raw candidate positions using SIMD/SWAR. **Leverages LCP (Longest Common Prefix) Factoring to extract mandatory prefixes from alternations (e.g., 'fo' from '(fo|foo)'), enabling high-speed string scanning even for complex choices.**
-    - **Searching DFA (sDFA)**: A lightweight, uint8-based DFA used as a multi-byte pre-filter. It resolves simple alternations (e.g., `(abc|def)`) and character class sequences (e.g., `[a-z][0-9]`) at O(n) speed to eliminate false positives. **Optimized with Search Strategy Dispatch: The engine statically selects the most efficient pre-filter (Literal, SearchWarp, or sDFA) during compilation to prevent performance regressions.**
+    - **Search Strategy Dispatch**: The engine statically selects the most efficient pre-filter during compilation: **Literal (SIMD) > SearchWarp (SWAR) > sDFA**.
+- **Searching DFA (sDFA)**: A 2-stage pre-filter combining a SIMD-accelerated trigger set (`Trigger`) and a uint8 DFA. It resolves complex prefixes (e.g., `(abc|def)`) at O(n) to eliminate false positives.
 
     - **Gaze**: Verifies O(1) constraints (anchors, fixed-distance literals) to reject false candidates early. **Optimized with SkipGaze: Anchors verified by Search (like factored prefixes) or those without surrounding constraints bypass this phase entirely to eliminate redundant CPU cycles.**
     - **Snap**: Identifies the true match start (Horizon) by reverse-scanning variable-length repetitions.

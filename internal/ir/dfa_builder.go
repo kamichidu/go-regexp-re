@@ -118,35 +118,6 @@ func NewDFAWithMemoryLimit(ctx context.Context, re *syntax.Regexp, prog *syntax.
 
 	d.searchDFA = buildSearchDFA(prog)
 
-	// Select optimal search strategy
-	if d.primaryAnchor != nil && len(d.primaryAnchor.Anchor) >= 3 && d.primaryAnchor.IsFixed {
-		d.searchStrategy = SearchStrategyLiteral
-	} else if d.searchWarp.Kernel != CCWarpNone {
-		d.searchStrategy = SearchStrategySearchWarp
-	} else if d.searchDFA != nil {
-		// Only use sDFA if it's more complex than a single byte search
-		isComplex := false
-		startState := d.searchDFA.StartState
-		transCount := 0
-		for b := 0; b < 256; b++ {
-			if d.searchDFA.Transitions[(uint16(startState)<<8)|uint16(b)] != d.searchDFA.DeadState {
-				transCount++
-			}
-		}
-		// If it has multiple branches from the start, it's a good candidate for sDFA
-		if transCount > 1 {
-			isComplex = true
-		}
-
-		if isComplex {
-			d.searchStrategy = SearchStrategySDFA
-		} else {
-			d.searchStrategy = SearchStrategyNone
-		}
-	} else {
-		d.searchStrategy = SearchStrategyNone
-	}
-
 	instructionTries := make([]*Trie, len(prog.Inst))
 	for id, inst := range prog.Inst {
 		if isEpsilon(inst.Op) {
@@ -505,6 +476,35 @@ func NewDFAWithMemoryLimit(ctx context.Context, re *syntax.Regexp, prog *syntax.
 				V1:     uint32(high),
 			}
 		}
+	}
+
+	// Select optimal search strategy
+	if d.primaryAnchor != nil && len(d.primaryAnchor.Anchor) >= 3 && d.primaryAnchor.IsFixed {
+		d.searchStrategy = SearchStrategyLiteral
+	} else if d.searchWarp.Kernel != CCWarpNone {
+		d.searchStrategy = SearchStrategySearchWarp
+	} else if d.searchDFA != nil {
+		// Only use sDFA if it's more complex than a single byte search
+		isComplex := false
+		startState := d.searchDFA.StartState
+		transCount := 0
+		for b := 0; b < 256; b++ {
+			if d.searchDFA.Transitions[(uint16(startState)<<8)|uint16(b)] != uint8(startState) {
+				transCount++
+			}
+		}
+		// If it has multiple branches from the start, or more than one state, it's a good candidate for sDFA
+		if transCount > 1 || d.searchDFA.NumStates > 1 {
+			isComplex = true
+		}
+
+		if isComplex {
+			d.searchStrategy = SearchStrategySDFA
+		} else {
+			d.searchStrategy = SearchStrategyNone
+		}
+	} else {
+		d.searchStrategy = SearchStrategyNone
 	}
 
 	return d, nil
