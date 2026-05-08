@@ -66,7 +66,7 @@ func Verify(in *Input, i int, req syntax.EmptyOp) bool {
 		absPos := in.AbsPos + i
 		if absPos == 0 {
 			// Matches BeginText and BeginLine
-		} else if (req&syntax.EmptyBeginLine) != 0 && in.OriginalB[absPos-1] == '\n' {
+		} else if (req&syntax.EmptyBeginLine) != 0 && absPos > 0 && in.OriginalB[absPos-1] == '\n' {
 			// Matches BeginLine
 		} else {
 			return false
@@ -76,8 +76,8 @@ func Verify(in *Input, i int, req syntax.EmptyOp) bool {
 		absPos := in.AbsPos + i
 		if absPos == in.TotalBytes {
 			// Matches EndText and EndLine
-		} else if (req&syntax.EmptyEndLine) != 0 && in.OriginalB[absPos] == '\n' {
-			// Matches EndLine
+		} else if (req&syntax.EmptyEndLine) != 0 && absPos < in.TotalBytes && in.OriginalB[absPos] == '\n' {
+			// Matches BeginLine
 		} else {
 			return false
 		}
