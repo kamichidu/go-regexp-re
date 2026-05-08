@@ -402,7 +402,7 @@ func NewDFAWithMemoryLimit(ctx context.Context, re *syntax.Regexp, prog *syntax.
 			continue
 		}
 		if count == 128 {
-			d.ccWarpTable[i] = CCWarpInfo{Kernel: CCWarpAnyChar}
+			d.ccWarpTable[i] = CCWarpInfo{Kernel: uint8(CCWarpAnyChar)}
 		} else {
 			low, high := -1, -1
 			isSingleRange := true
@@ -424,7 +424,7 @@ func NewDFAWithMemoryLimit(ctx context.Context, re *syntax.Regexp, prog *syntax.
 			}
 			if isSingleRange && low != -1 {
 				d.ccWarpTable[i] = CCWarpInfo{
-					Kernel: CCWarpSingleRange,
+					Kernel: uint8(CCWarpSingleRange),
 					V0:     uint32(low),
 					V1:     uint32(high),
 				}
@@ -432,7 +432,7 @@ func NewDFAWithMemoryLimit(ctx context.Context, re *syntax.Regexp, prog *syntax.
 		}
 
 		// Apply flag to self-loops
-		if d.ccWarpTable[i].Kernel != CCWarpNone {
+		if CCWarpKernel(d.ccWarpTable[i].Kernel) != CCWarpNone {
 			for b := 0; b < 256; b++ {
 				idx := (i << 8) | b
 				if idx < len(d.transitions) && (d.transitions[idx]&StateIDMask) == uint32(i) {
@@ -475,12 +475,12 @@ func NewDFAWithMemoryLimit(ctx context.Context, re *syntax.Regexp, prog *syntax.
 		if isSingleRange && low != -1 {
 			if low == high {
 				d.searchWarp = CCWarpInfo{
-					Kernel: CCWarpEqual,
+					Kernel: uint8(CCWarpEqual),
 					V0:     uint32(low),
 				}
 			} else {
 				d.searchWarp = CCWarpInfo{
-					Kernel: CCWarpSingleRange,
+					Kernel: uint8(CCWarpSingleRange),
 					V0:     uint32(low),
 					V1:     uint32(high),
 				}
@@ -491,7 +491,7 @@ func NewDFAWithMemoryLimit(ctx context.Context, re *syntax.Regexp, prog *syntax.
 	// Select optimal search strategy
 	if d.primaryAnchor != nil && len(d.primaryAnchor.Anchor) >= 3 && d.primaryAnchor.IsFixed {
 		d.searchStrategy = SearchStrategyLiteral
-	} else if d.searchWarp.Kernel != CCWarpNone {
+	} else if CCWarpKernel(d.searchWarp.Kernel) != CCWarpNone {
 		d.searchStrategy = SearchStrategySearchWarp
 	} else if d.searchDFA != nil {
 		// Only use sDFA if it's more complex than a single byte search
@@ -820,7 +820,7 @@ func buildSearchDFA(prog *syntax.Prog) *SearchDFA {
 	}
 	if high-low+1 == len(trigger) {
 		triggerInfo = CCWarpInfo{
-			Kernel: CCWarpSingleRange,
+			Kernel: uint8(CCWarpSingleRange),
 			V0:     uint32(low),
 			V1:     uint32(high),
 		}
@@ -830,8 +830,8 @@ func buildSearchDFA(prog *syntax.Prog) *SearchDFA {
 			extra[i] = uint64(b)
 		}
 		triggerInfo = CCWarpInfo{
-			Kernel: CCWarpEqualSet,
-			Extra:  extra,
+			Kernel: uint8(CCWarpEqualSet),
+			Extra:  &extra,
 		}
 	}
 

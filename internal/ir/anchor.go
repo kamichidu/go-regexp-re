@@ -433,7 +433,7 @@ func ExtractConstraints(re *syntax.Regexp, anchor *AnchorInfo) {
 	}
 
 	for _, c := range anchor.Backward {
-		if !c.IsRepeat && c.Length == 1 && c.Info.Kernel == CCWarpEqual {
+		if !c.IsRepeat && c.Length == 1 && CCWarpKernel(c.Info.Kernel) == CCWarpEqual {
 			anchor.SimpleBackward = append(anchor.SimpleBackward, c)
 		}
 	}
@@ -469,16 +469,20 @@ func extractDistToLineEnd(re *syntax.Regexp, anchor *AnchorInfo) (int, int, bool
 	for i, sub := range re.Sub {
 		if currentOffset == anchor.Distance {
 			if anchor.HasClass {
-				if info, ok := toCCWarp(sub); ok && info.Kernel == anchor.Class.Kernel {
+				if info, ok := toCCWarp(sub); ok && CCWarpKernel(info.Kernel) == CCWarpKernel(anchor.Class.Kernel) {
 					match := true
-					if info.Kernel == CCWarpEqualSet || info.Kernel == CCWarpNotEqualSet {
-						if len(info.Extra) != len(anchor.Class.Extra) {
+					if CCWarpKernel(info.Kernel) == CCWarpEqualSet || CCWarpKernel(info.Kernel) == CCWarpNotEqualSet {
+						if (info.Extra == nil) != (anchor.Class.Extra == nil) {
 							match = false
-						} else {
-							for k := range info.Extra {
-								if info.Extra[k] != anchor.Class.Extra[k] {
-									match = false
-									break
+						} else if info.Extra != nil {
+							if len(*info.Extra) != len(*anchor.Class.Extra) {
+								match = false
+							} else {
+								for k := range *info.Extra {
+									if (*info.Extra)[k] != (*anchor.Class.Extra)[k] {
+										match = false
+										break
+									}
 								}
 							}
 						}
@@ -559,16 +563,20 @@ func extractDistToEnd(re *syntax.Regexp, anchor *AnchorInfo) (int, int, bool) {
 	for i, sub := range re.Sub {
 		if currentOffset == anchor.Distance {
 			if anchor.HasClass {
-				if info, ok := toCCWarp(sub); ok && info.Kernel == anchor.Class.Kernel {
+				if info, ok := toCCWarp(sub); ok && CCWarpKernel(info.Kernel) == CCWarpKernel(anchor.Class.Kernel) {
 					match := true
-					if info.Kernel == CCWarpEqualSet || info.Kernel == CCWarpNotEqualSet {
-						if len(info.Extra) != len(anchor.Class.Extra) {
+					if CCWarpKernel(info.Kernel) == CCWarpEqualSet || CCWarpKernel(info.Kernel) == CCWarpNotEqualSet {
+						if (info.Extra == nil) != (anchor.Class.Extra == nil) {
 							match = false
-						} else {
-							for k := range info.Extra {
-								if info.Extra[k] != anchor.Class.Extra[k] {
-									match = false
-									break
+						} else if info.Extra != nil {
+							if len(*info.Extra) != len(*anchor.Class.Extra) {
+								match = false
+							} else {
+								for k := range *info.Extra {
+									if (*info.Extra)[k] != (*anchor.Class.Extra)[k] {
+										match = false
+										break
+									}
 								}
 							}
 						}
@@ -638,16 +646,20 @@ func extractConstraints(re *syntax.Regexp, anchor *AnchorInfo) {
 	for i, sub := range re.Sub {
 		if currentOffset == anchor.Distance {
 			if anchor.HasClass {
-				if info, ok := toCCWarp(sub); ok && info.Kernel == anchor.Class.Kernel {
+				if info, ok := toCCWarp(sub); ok && CCWarpKernel(info.Kernel) == CCWarpKernel(anchor.Class.Kernel) {
 					match := true
-					if info.Kernel == CCWarpEqualSet || info.Kernel == CCWarpNotEqualSet {
-						if len(info.Extra) != len(anchor.Class.Extra) {
+					if CCWarpKernel(info.Kernel) == CCWarpEqualSet || CCWarpKernel(info.Kernel) == CCWarpNotEqualSet {
+						if (info.Extra == nil) != (anchor.Class.Extra == nil) {
 							match = false
-						} else {
-							for k := range info.Extra {
-								if info.Extra[k] != anchor.Class.Extra[k] {
-									match = false
-									break
+						} else if info.Extra != nil {
+							if len(*info.Extra) != len(*anchor.Class.Extra) {
+								match = false
+							} else {
+								for k := range *info.Extra {
+									if (*info.Extra)[k] != (*anchor.Class.Extra)[k] {
+										match = false
+										break
+									}
 								}
 							}
 						}
@@ -693,7 +705,7 @@ func extractConstraints(re *syntax.Regexp, anchor *AnchorInfo) {
 				rd := utf8.RuneLen(r)
 				anchor.Backward = append(anchor.Backward, Constraint{
 					Offset: backOffset - rd, Length: rd,
-					Info: CCWarpInfo{Kernel: CCWarpEqual, V0: uint32(r)},
+					Info: CCWarpInfo{Kernel: uint8(CCWarpEqual), V0: uint32(r)},
 				})
 				backOffset -= rd
 			}
@@ -715,7 +727,7 @@ func extractConstraints(re *syntax.Regexp, anchor *AnchorInfo) {
 			} else if maxLength(sub) > 0 {
 				anchor.Backward = append(anchor.Backward, Constraint{
 					Offset: backOffset, Length: 0, IsRepeat: true,
-					Info: CCWarpInfo{Kernel: CCWarpAnyChar},
+					Info: CCWarpInfo{Kernel: uint8(CCWarpAnyChar)},
 				})
 				break
 			}
@@ -747,7 +759,7 @@ func extractConstraints(re *syntax.Regexp, anchor *AnchorInfo) {
 				rd := utf8.RuneLen(r)
 				anchor.Forward = append(anchor.Forward, Constraint{
 					Offset: forwardOffset, Length: rd,
-					Info: CCWarpInfo{Kernel: CCWarpEqual, V0: uint32(r)},
+					Info: CCWarpInfo{Kernel: uint8(CCWarpEqual), V0: uint32(r)},
 				})
 				forwardOffset += rd
 			}
@@ -769,7 +781,7 @@ func extractConstraints(re *syntax.Regexp, anchor *AnchorInfo) {
 			} else if maxLength(sub) > 0 {
 				anchor.Forward = append(anchor.Forward, Constraint{
 					Offset: forwardOffset, Length: 0, IsRepeat: true,
-					Info: CCWarpInfo{Kernel: CCWarpAnyChar},
+					Info: CCWarpInfo{Kernel: uint8(CCWarpAnyChar)},
 				})
 				break
 			}
@@ -833,11 +845,11 @@ func toCCWarp(re *syntax.Regexp) (CCWarpInfo, bool) {
 					}
 				}
 				if len(extra) > 0 {
-					return CCWarpInfo{Kernel: CCWarpEqualSet, Extra: extra}, true
+					return CCWarpInfo{Kernel: uint8(CCWarpEqualSet), Extra: &extra}, true
 				}
 				return CCWarpInfo{}, false
 			}
-			return CCWarpInfo{Kernel: CCWarpEqual, V0: uint32(r)}, true
+			return CCWarpInfo{Kernel: uint8(CCWarpEqual), V0: uint32(r)}, true
 		}
 	case syntax.OpCharClass:
 		if re.Flags&syntax.FoldCase != 0 {
@@ -866,18 +878,18 @@ func toCCWarp(re *syntax.Regexp) (CCWarpInfo, bool) {
 				}
 			}
 			if len(extra) > 0 {
-				return CCWarpInfo{Kernel: CCWarpEqualSet, Extra: extra}, true
+				return CCWarpInfo{Kernel: uint8(CCWarpEqualSet), Extra: &extra}, true
 			}
 			return CCWarpInfo{}, false
 		}
 		if len(re.Rune) == 2 {
-			return CCWarpInfo{Kernel: CCWarpSingleRange, V0: uint32(re.Rune[0]), V1: uint32(re.Rune[1])}, true
+			return CCWarpInfo{Kernel: uint8(CCWarpSingleRange), V0: uint32(re.Rune[0]), V1: uint32(re.Rune[1])}, true
 		}
 		if len(re.Rune) == 4 && re.Rune[0] == 0 && re.Rune[3] == 0x10FFFF {
 			// Negated single range or char
 			low, high := re.Rune[1]+1, re.Rune[2]-1
 			if low <= high {
-				return CCWarpInfo{Kernel: CCWarpNotSingleRange, V0: uint32(low), V1: uint32(high)}, true
+				return CCWarpInfo{Kernel: uint8(CCWarpNotSingleRange), V0: uint32(low), V1: uint32(high)}, true
 			}
 		}
 		var extra []uint64
@@ -894,12 +906,12 @@ func toCCWarp(re *syntax.Regexp) (CCWarpInfo, bool) {
 			}
 		}
 		if len(extra) > 0 {
-			return CCWarpInfo{Kernel: CCWarpEqualSet, Extra: extra}, true
+			return CCWarpInfo{Kernel: uint8(CCWarpEqualSet), Extra: &extra}, true
 		}
 	case syntax.OpAnyCharNotNL:
-		return CCWarpInfo{Kernel: CCWarpAnyExceptNL}, true
+		return CCWarpInfo{Kernel: uint8(CCWarpAnyExceptNL)}, true
 	case syntax.OpAnyChar:
-		return CCWarpInfo{Kernel: CCWarpAnyChar}, true
+		return CCWarpInfo{Kernel: uint8(CCWarpAnyChar)}, true
 	case syntax.OpRepeat, syntax.OpPlus, syntax.OpStar:
 		if info, ok := toCCWarp(re.Sub[0]); ok {
 			return info, true
@@ -919,7 +931,7 @@ func toCCWarp(re *syntax.Regexp) (CCWarpInfo, bool) {
 				allSimple = false
 				break
 			}
-			switch info.Kernel {
+			switch CCWarpKernel(info.Kernel) {
 			case CCWarpEqual:
 				v64 := uint64(info.V0)
 				if !seen[v64] {
@@ -927,7 +939,7 @@ func toCCWarp(re *syntax.Regexp) (CCWarpInfo, bool) {
 					seen[v64] = true
 				}
 			case CCWarpEqualSet:
-				for _, v := range info.Extra {
+				for _, v := range *info.Extra {
 					if !seen[v] {
 						combined = append(combined, v)
 						seen[v] = true
@@ -949,7 +961,7 @@ func toCCWarp(re *syntax.Regexp) (CCWarpInfo, bool) {
 			}
 		}
 		if allSimple && len(combined) > 0 {
-			return CCWarpInfo{Kernel: CCWarpEqualSet, Extra: combined}, true
+			return CCWarpInfo{Kernel: uint8(CCWarpEqualSet), Extra: &combined}, true
 		}
 	}
 	return CCWarpInfo{}, false
@@ -1247,7 +1259,7 @@ func (a *AnchorInfo) Validate(b []byte, p int, matchStart int) (int, int, bool) 
 			if end < matchStart {
 				continue
 			}
-			switch c.Info.Kernel {
+			switch CCWarpKernel(c.Info.Kernel) {
 			case CCWarpAnyExceptNL:
 				if idx := bytes.IndexByte(b[matchStart:end], '\n'); idx >= 0 {
 					return p, matchStart + idx + 1, false
@@ -1313,7 +1325,7 @@ func ValidateFixed(info *CCWarpInfo, b []byte) bool {
 	if len(b) == 0 {
 		return true
 	}
-	switch info.Kernel {
+	switch CCWarpKernel(info.Kernel) {
 	case CCWarpEqual:
 		target := byte(info.V0)
 		for _, v := range b {
@@ -1356,9 +1368,12 @@ func ValidateFixed(info *CCWarpInfo, b []byte) bool {
 		}
 		return true
 	case CCWarpEqualSet:
+		if info.Extra == nil {
+			return false
+		}
 		for _, target := range b {
 			found := false
-			for _, v := range info.Extra {
+			for _, v := range *info.Extra {
 				if byte(v) == target {
 					found = true
 					break
@@ -1370,8 +1385,11 @@ func ValidateFixed(info *CCWarpInfo, b []byte) bool {
 		}
 		return true
 	case CCWarpNotEqualSet:
+		if info.Extra == nil {
+			return true
+		}
 		for _, target := range b {
-			for _, v := range info.Extra {
+			for _, v := range *info.Extra {
 				if byte(v) == target {
 					return false
 				}
@@ -1384,12 +1402,12 @@ func ValidateFixed(info *CCWarpInfo, b []byte) bool {
 
 func Warp(info *CCWarpInfo, b []byte) int {
 	i := 0
-	switch info.Kernel {
+	switch CCWarpKernel(info.Kernel) {
 	case CCWarpAnyChar:
 		n := len(b)
 		for i+8 <= n {
 			v := binary.LittleEndian.Uint64(b[i:])
-			if v&0x8080808080808080 != 0 {
+			if (v & 0x8080808080808080) != 0 {
 				break
 			}
 			i += 8
@@ -1406,7 +1424,7 @@ func Warp(info *CCWarpInfo, b []byte) int {
 		}
 		for i+8 <= limit {
 			v := binary.LittleEndian.Uint64(b[i:])
-			if v&0x8080808080808080 != 0 {
+			if (v & 0x8080808080808080) != 0 {
 				break
 			}
 			i += 8
@@ -1439,7 +1457,10 @@ func Warp(info *CCWarpInfo, b []byte) int {
 		low64, high64 := splat(uint64(low)), splat(uint64(high))
 		for i+8 <= len(b) {
 			v := binary.LittleEndian.Uint64(b[i:])
-			outside := ((v - low64) & ^v) | ((high64 - v) & ^high64)
+			if (v & 0x8080808080808080) != 0 {
+				break
+			}
+			outside := (v - low64) | (high64 - v)
 			if (outside & 0x8080808080808080) != 0 {
 				break
 			}
@@ -1457,10 +1478,13 @@ func Warp(info *CCWarpInfo, b []byte) int {
 			i++
 		}
 	case CCWarpEqualSet:
+		if info.Extra == nil {
+			return 0
+		}
 		for i < len(b) {
 			target := b[i]
 			found := false
-			for _, v := range info.Extra {
+			for _, v := range *info.Extra {
 				if byte(v) == target {
 					found = true
 					break
@@ -1472,10 +1496,13 @@ func Warp(info *CCWarpInfo, b []byte) int {
 			i++
 		}
 	case CCWarpNotEqualSet:
+		if info.Extra == nil {
+			return len(b)
+		}
 		for i < len(b) {
 			target := b[i]
 			found := false
-			for _, v := range info.Extra {
+			for _, v := range *info.Extra {
 				if byte(v) == target {
 					found = true
 					break
@@ -1493,7 +1520,7 @@ func Warp(info *CCWarpInfo, b []byte) int {
 func WarpBack(info *CCWarpInfo, b []byte) int {
 	i := 0
 	n := len(b)
-	switch info.Kernel {
+	switch CCWarpKernel(info.Kernel) {
 	case CCWarpAnyChar:
 		return n
 	case CCWarpAnyExceptNL:
@@ -1531,10 +1558,13 @@ func WarpBack(info *CCWarpInfo, b []byte) int {
 			i++
 		}
 	case CCWarpEqualSet:
+		if info.Extra == nil {
+			return 0
+		}
 		for i < n {
 			target := b[n-1-i]
 			found := false
-			for _, v := range info.Extra {
+			for _, v := range *info.Extra {
 				if byte(v) == target {
 					found = true
 					break
@@ -1546,10 +1576,13 @@ func WarpBack(info *CCWarpInfo, b []byte) int {
 			i++
 		}
 	case CCWarpNotEqualSet:
+		if info.Extra == nil {
+			return n
+		}
 		for i < n {
 			target := b[n-1-i]
 			found := false
-			for _, v := range info.Extra {
+			for _, v := range *info.Extra {
 				if byte(v) == target {
 					found = true
 					break
@@ -1566,7 +1599,8 @@ func WarpBack(info *CCWarpInfo, b []byte) int {
 
 func IndexClass(info *CCWarpInfo, b []byte) int {
 	i := 0
-	switch info.Kernel {
+	includeNL := (info.Flags & CCWarpFlagIncludeNL) != 0
+	switch CCWarpKernel(info.Kernel) {
 	case CCWarpAnyChar:
 		if len(b) > 0 {
 			return 0
@@ -1581,7 +1615,7 @@ func IndexClass(info *CCWarpInfo, b []byte) int {
 		}
 		return -1
 	case CCWarpEqual:
-		if info.IncludeNL {
+		if includeNL {
 			target := byte(info.V0)
 			for i < len(b) {
 				if b[i] == target || b[i] == '\n' {
@@ -1595,7 +1629,7 @@ func IndexClass(info *CCWarpInfo, b []byte) int {
 	case CCWarpNotEqual:
 		target := byte(info.V0)
 		for i < len(b) {
-			if b[i] != target || (info.IncludeNL && b[i] == '\n') {
+			if b[i] != target || (includeNL && b[i] == '\n') {
 				return i
 			}
 			i++
@@ -1605,15 +1639,18 @@ func IndexClass(info *CCWarpInfo, b []byte) int {
 		low, high := byte(info.V0), byte(info.V1)
 		low64, high64 := splat(uint64(low)), splat(uint64(high))
 		var nl64 uint64
-		if info.IncludeNL {
+		if includeNL {
 			nl64 = splat(uint64('\n'))
 		}
 		for i+8 <= len(b) {
 			v := binary.LittleEndian.Uint64(b[i:])
-			outside := ((v - low64) & ^v) | ((high64 - v) & ^high64)
-			inside := ^outside & 0x8080808080808080
-			if info.IncludeNL {
-				matchNL := ^((v ^ nl64 + 0x7f7f7f7f7f7f7f7f) | v ^ nl64) & 0x8080808080808080
+			if (v & 0x8080808080808080) != 0 {
+				break
+			}
+			inside := ^((v - low64) | (high64 - v)) & 0x8080808080808080
+			if includeNL {
+				x := v ^ nl64
+				matchNL := ^((x + 0x7f7f7f7f7f7f7f7f) | x) & 0x8080808080808080
 				inside |= matchNL
 			}
 			if inside != 0 {
@@ -1622,27 +1659,30 @@ func IndexClass(info *CCWarpInfo, b []byte) int {
 			i += 8
 		}
 		for ; i < len(b); i++ {
-			if (b[i] >= low && b[i] <= high) || (info.IncludeNL && b[i] == '\n') {
+			if (b[i] >= low && b[i] <= high) || (includeNL && b[i] == '\n') {
 				return i
 			}
 		}
 	case CCWarpNotSingleRange:
 		low, high := byte(info.V0), byte(info.V1)
 		for i < len(b) {
-			if b[i] < low || b[i] > high || (info.IncludeNL && b[i] == '\n') {
+			if b[i] < low || b[i] > high || (includeNL && b[i] == '\n') {
 				return i
 			}
 			i++
 		}
 	case CCWarpEqualSet:
+		if info.Extra == nil {
+			return -1
+		}
 		for i < len(b) {
 			target := b[i]
-			for _, v := range info.Extra {
+			for _, v := range *info.Extra {
 				if byte(v) == target {
 					return i
 				}
 			}
-			if info.IncludeNL && target == '\n' {
+			if includeNL && target == '\n' {
 				return i
 			}
 			i++
@@ -1650,16 +1690,19 @@ func IndexClass(info *CCWarpInfo, b []byte) int {
 		return -1
 
 	case CCWarpNotEqualSet:
+		if info.Extra == nil {
+			return 0
+		}
 		for i < len(b) {
 			target := b[i]
 			found := false
-			for _, v := range info.Extra {
+			for _, v := range *info.Extra {
 				if byte(v) == target {
 					found = true
 					break
 				}
 			}
-			if !found || (info.IncludeNL && target == '\n') {
+			if !found || (includeNL && target == '\n') {
 				return i
 			}
 			i++

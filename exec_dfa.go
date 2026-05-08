@@ -76,10 +76,9 @@ func pass0_DiscoveryLoop(re *Regexp, in *ir.Input, searchStart int) (restartBase
 			}
 		}
 
-		// 2. Line-start check at current index (especially for index 0)
-		if candidatePos < 0 && anchor != nil && anchor.HasBeginLine {
-			absPos := in.AbsPos + i
-			if (absPos == 0 || (absPos > 0 && in.OriginalB[absPos-1] == '\n')) && bytes.HasPrefix(b[i:], anchor.Anchor) {
+		// 2. Line-start check (only for the very first candidate position)
+		if candidatePos < 0 && anchor != nil && anchor.HasBeginLine && in.AbsPos+i == 0 {
+			if bytes.HasPrefix(b[i:], anchor.Anchor) {
 				mLiteralPos = i
 				candidatePos = i
 				candidateAnchor = anchor

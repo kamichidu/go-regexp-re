@@ -14,6 +14,10 @@ type Input struct {
 	SearchEnd   int    // Relative end position in B
 }
 
+func isWordChar(b byte) bool {
+	return 'A' <= b && b <= 'Z' || 'a' <= b && b <= 'z' || '0' <= b && b <= '9' || b == '_'
+}
+
 // VerifyBegin checks for ^ and \A anchors using absolute context.
 func VerifyBegin(in *Input, i int, req syntax.EmptyOp) bool {
 	if (req & (syntax.EmptyBeginText | syntax.EmptyBeginLine)) == 0 {
@@ -45,10 +49,10 @@ func VerifyWord(in *Input, i int, req syntax.EmptyOp) bool {
 	}
 	absPos := in.AbsPos + i
 	var wordLeft, wordRight bool
-	if absPos > 0 && in.OriginalB[absPos-1] < 0x80 && syntax.IsWordChar(rune(in.OriginalB[absPos-1])) {
+	if absPos > 0 && isWordChar(in.OriginalB[absPos-1]) {
 		wordLeft = true
 	}
-	if absPos < in.TotalBytes && in.OriginalB[absPos] < 0x80 && syntax.IsWordChar(rune(in.OriginalB[absPos])) {
+	if absPos < in.TotalBytes && isWordChar(in.OriginalB[absPos]) {
 		wordRight = true
 	}
 	if wordLeft != wordRight {
@@ -63,42 +67,18 @@ func Verify(in *Input, i int, req syntax.EmptyOp) bool {
 		return true
 	}
 	if (req & (syntax.EmptyBeginText | syntax.EmptyBeginLine)) != 0 {
-		absPos := in.AbsPos + i
-		if absPos == 0 {
-			// Matches BeginText and BeginLine
-		} else if (req&syntax.EmptyBeginLine) != 0 && absPos > 0 && in.OriginalB[absPos-1] == '\n' {
-			// Matches BeginLine
-		} else {
+		if !VerifyBegin(in, i, req) {
 			return false
 		}
 	}
 	if (req & (syntax.EmptyEndText | syntax.EmptyEndLine)) != 0 {
-		absPos := in.AbsPos + i
-		if absPos == in.TotalBytes {
-			// Matches EndText and EndLine
-		} else if (req&syntax.EmptyEndLine) != 0 && absPos < in.TotalBytes && in.OriginalB[absPos] == '\n' {
-			// Matches BeginLine
-		} else {
+		if !VerifyEnd(in, i, req) {
 			return false
 		}
 	}
 	if (req & (syntax.EmptyWordBoundary | syntax.EmptyNoWordBoundary)) != 0 {
-		absPos := in.AbsPos + i
-		var wordLeft, wordRight bool
-		if absPos > 0 && in.OriginalB[absPos-1] < 0x80 && syntax.IsWordChar(rune(in.OriginalB[absPos-1])) {
-			wordLeft = true
-		}
-		if absPos < in.TotalBytes && in.OriginalB[absPos] < 0x80 && syntax.IsWordChar(rune(in.OriginalB[absPos])) {
-			wordRight = true
-		}
-		if wordLeft != wordRight {
-			if (req & syntax.EmptyWordBoundary) == 0 {
-				return false
-			}
-		} else {
-			if (req & syntax.EmptyNoWordBoundary) == 0 {
-				return false
-			}
+		if !VerifyWord(in, i, req) {
+			return false
 		}
 	}
 	return true

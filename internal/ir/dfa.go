@@ -44,11 +44,18 @@ const (
 )
 
 type CCWarpInfo struct {
-	Kernel    CCWarpKernel
-	IncludeNL bool     // If true, also search for \n
-	V0, V1    uint32   // Fast access for common kernels (Equal, Range, etc.)
-	Extra     []uint64 // Fallback for large sets (EqualSet, Bitmask)
+	Kernel uint8  // CCWarpKernel
+	Flags  uint8  // Bit 0: IncludeNL
+	_      uint16 // Padding
+	V0     uint32 // Fast access for common kernels (Equal, Range, etc.)
+	V1     uint32 // Fast access for common kernels (Equal, Range, etc.)
+	Extra  *[]uint64
+	_      [8]byte // Padding to exactly 32 bytes
 }
+
+const (
+	CCWarpFlagIncludeNL uint8 = 1 << 0
+)
 
 const MaxDFAMemory = 64 * 1024 * 1024
 const SearchRestartPenalty = 1024

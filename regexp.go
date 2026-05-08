@@ -147,7 +147,7 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 						break
 					}
 				} else {
-					switch a.Class.Kernel {
+					switch ir.CCWarpKernel(a.Class.Kernel) {
 					case ir.CCWarpEqual:
 						b := byte(a.Class.V0)
 						if !seen[b] {
@@ -167,8 +167,8 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 							allCovered = false
 						}
 					case ir.CCWarpEqualSet:
-						if len(a.Class.Extra) < 256 {
-							for _, v := range a.Class.Extra {
+						if a.Class.Extra != nil && len(*a.Class.Extra) < 256 {
+							for _, v := range *a.Class.Extra {
 								b := byte(v)
 								if !seen[b] {
 									buf = append(buf, b)
