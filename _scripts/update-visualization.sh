@@ -17,7 +17,7 @@ for txt in "$HISTORY_DIR"/*.txt; do
     if [ ! -f "$json" ]; then
         echo "Processing $txt..."
         # Note: landscape-gen expects paths relative to project root
-        go run internal/tools/landscape-gen/main.go "$txt" "$json" || echo "Warning: failed to process $txt"
+        go run ./internal/tools/landscape-gen "$txt" "$json" || echo "Warning: failed to process $txt"
     fi
 done
 
@@ -29,4 +29,4 @@ if [ -f "$LATEST_JSON" ]; then
 fi
 
 # 3. Update data/history.json (Trends index)
-go run internal/tools/history-gen/main.go "$HISTORY_DIR" "$DATA_DIR/history.json"
+go run ./internal/tools/history-gen "$HISTORY_DIR" "$DATA_DIR/history.json"
