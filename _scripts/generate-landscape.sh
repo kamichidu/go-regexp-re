@@ -15,6 +15,6 @@ OUTPUT_FILE=$2
 cd "$(dirname "$0")/.."
 
 # Run the Go tool to convert text to JSON using internal SBL definitions
-go run internal/tools/landscape-gen/main.go "$INPUT_FILE" "$OUTPUT_FILE"
+go run ./internal/tools/landscape-gen "$INPUT_FILE" "$OUTPUT_FILE"
 
 echo "Successfully generated $OUTPUT_FILE from $INPUT_FILE"
