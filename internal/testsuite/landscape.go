@@ -14,28 +14,29 @@ func BenchmarkLandscape(b *testing.B) {
 	bValues := []int{1, 10, 50}
 	lValues := []float64{0.1, 0.9}
 
-	for _, s := range sValues {
-		for _, bv := range bValues {
-			for _, l := range lValues {
-				pattern := generatePattern(bv)
-				input := generateInput(1*1024*1024, s, l)
+	runOnEngines(b, func(b *testing.B, engine Engine) {
+		defer engine.ClearCache()
+		for _, s := range sValues {
+			for _, bv := range bValues {
+				for _, l := range lValues {
+					pattern := generatePattern(bv)
+					input := generateInput(1*1024*1024, s, l)
 
-				ast, err := syntax.Parse(pattern, syntax.Perl)
-				if err != nil {
-					continue
-				}
+					ast, err := syntax.Parse(pattern, syntax.Perl)
+					if err != nil {
+						continue
+					}
 
-				// Compute actual SBL metrics
-				b_val := ComputeB(ast)
-				l_val := ComputeL(ast)
+					// Compute actual SBL metrics
+					b_val := ComputeB(ast)
+					l_val := ComputeL(ast)
 
-				benchName := fmt.Sprintf("S=%.2f/B=%d/L=%.2f", s, bv, l)
-				RecordSBL("Landscape/"+benchName, s, b_val, l_val)
+					benchName := fmt.Sprintf("S=%.2f/B=%d/L=%.2f", s, bv, l)
+					RecordSBL("Landscape/"+benchName, s, b_val, l_val)
 
-				runOnEngines(b, func(b *testing.B, engine Engine) {
 					re, err := engine.Compile(pattern)
 					if err != nil {
-						return
+						continue
 					}
 					b.Run(benchName, func(b *testing.B) {
 						b.SetBytes(int64(len(input)))
@@ -44,11 +45,10 @@ func BenchmarkLandscape(b *testing.B) {
 							re.MatchString(input)
 						}
 					})
-
-				})
+				}
 			}
 		}
-	}
+	})
 }
 
 func generatePattern(complexity int) string {

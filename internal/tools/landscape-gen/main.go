@@ -59,7 +59,7 @@ func main() {
 	}
 
 	// Regex for standard benchmarks (Suite/Engine/SubName)
-	reBench := regexp.MustCompile(`Benchmark(\w+)/(\w+)/(.+)-\d+\s+\d+\s+[\d.]+ ns/op\s+([\d.]+) MB/s`)
+	reBench := regexp.MustCompile(`Benchmark(\w+)/([^/]+)/(.+)-\d+\s+\d+\s+[\d.]+ ns/op\s+([\d.]+) MB/s`)
 
 	sums := make(map[Key]float64)
 	counts := make(map[Key]int)
