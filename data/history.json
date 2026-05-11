@@ -86,5 +86,13 @@
     "min_speedup": 0.11598473781750789,
     "max_speedup": 510085.22355493694,
     "file": "benchmark-20260509-013320-ef9ed46.json"
+  },
+  {
+    "date": "2026-05-11 16:13:15",
+    "sha": "30ca1e5",
+    "avg_speedup": 4.07951327932774,
+    "min_speedup": 0.07783778644685305,
+    "max_speedup": 656200.5965419111,
+    "file": "benchmark-20260511-161315-30ca1e5.json"
   }
 ]
