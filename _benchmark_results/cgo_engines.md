@@ -1,104 +1,104 @@
 ## Benchmark Comparison (Average ns/op)
-| Test Case | GoRegexp | GoRegexpRe | Coregex | Hyperscan-CGO | PCRE2-CGO | RE2-CGO |
-|---|---|---|---|---|---|---|
-| Anchors/pat=(?m)HTTP/1.1$ | 3256194.00 | 104028511.80 | 1438345.00 | 2113064.60 | 1051089.00 | 3506816.60 |
-| Anchors/pat=(?m)^127.0.0.1 | 40250573.40 | 21562819.00 | 377378.00 | 1253336.80 | 4917335.00 | 17411766.20 |
-| Anchors/pat=HTTP/1.1$ | 3308236.40 | 26.54 | 39.40 | 1111895.60 | 1045368.60 | 439865.40 |
-| Anchors/pat=\bGET\b | 1507.60 | 66.94 | 199.54 | 1024986.40 | 1897.80 | 437640.00 |
-| Anchors/pat=^127.0.0.1 | 41.08 | 26.33 | 5.87 | 1000758.40 | 1647.00 | 494716.00 |
-| Capturing/Email | 2599.00 | 1314.20 | 5151.20 | 491767.00 | 2756.60 | 194721.00 |
-| Capturing/URI | 576.38 | 85.38 | 4104703.20 | 450131.60 | 1929.00 | 195466.60 |
-| Landscape/S=0.01/B=1/L=0.10 | 233135.60 | 236796.80 | 4257454.00 | 490711.00 | 21252.80 | 1321999.20 |
-| Landscape/S=0.01/B=1/L=0.90 | 71955.20 | 69866.40 | 4250041.00 | 475542.00 | 21375.80 | 1063299.20 |
-| Landscape/S=0.01/B=10/L=0.10 | 233576.20 | 236136.80 | 159133.20 | 516226.60 | 2018705.00 | 1315021.20 |
-| Landscape/S=0.01/B=10/L=0.90 | 70508.60 | 69750.60 | 158896.40 | 507376.80 | 1889919.80 | 1089523.60 |
-| Landscape/S=0.01/B=50/L=0.10 | 233731.20 | 235500.20 | 119742.60 | 496953.80 | 7643102.60 | 1382416.20 |
-| Landscape/S=0.01/B=50/L=0.90 | 70365.00 | 69556.60 | 119607.60 | 480967.80 | 7614993.00 | 1068804.80 |
-| Landscape/S=0.10/B=1/L=0.10 | 1125893.80 | 1150937.00 | 4244477.20 | 522455.20 | 22234.60 | 4243139.00 |
-| Landscape/S=0.10/B=1/L=0.90 | 121734.80 | 121768.60 | 4242949.80 | 513398.00 | 22883.00 | 2326765.20 |
-| Landscape/S=0.10/B=10/L=0.10 | 1427024.20 | 1474928.20 | 284533.20 | 508429.00 | 17584624.40 | 4235124.60 |
-| Landscape/S=0.10/B=10/L=0.90 | 121592.20 | 124635.40 | 160295.40 | 519224.00 | 17600654.20 | 2102006.40 |
-| Landscape/S=0.10/B=50/L=0.10 | 1120282.40 | 1151452.80 | 119910.80 | 523271.80 | 72309450.60 | 4279544.40 |
-| Landscape/S=0.10/B=50/L=0.90 | 122076.00 | 122072.20 | 119968.80 | 530127.60 | 71356242.00 | 2100662.80 |
-| Landscape/S=0.50/B=1/L=0.10 | 121906.40 | 122448.80 | 4247316.00 | 529367.60 | 21755.40 | 10008540.80 |
-| Landscape/S=0.50/B=1/L=0.90 | 122258.00 | 121835.00 | 4257136.60 | 488528.20 | 22389.80 | 5535081.60 |
-| Landscape/S=0.50/B=10/L=0.10 | 122128.60 | 122284.60 | 159564.20 | 699845.60 | 70223220.20 | 10036787.20 |
-| Landscape/S=0.50/B=10/L=0.90 | 122377.60 | 123062.20 | 159374.60 | 725113.60 | 70069642.60 | 5462123.20 |
-| Landscape/S=0.50/B=50/L=0.10 | 121729.60 | 122085.20 | 119930.80 | 718813.40 | 290800343.60 | 10027132.80 |
-| Landscape/S=0.50/B=50/L=0.90 | 122431.00 | 121894.00 | 120122.20 | 746486.40 | 290370987.40 | 5465801.20 |
-| Landscape/S=0.90/B=1/L=0.10 | 123979.00 | 121930.40 | 4240561.00 | 551381.00 | 21075.20 | 11458744.60 |
-| Landscape/S=0.90/B=1/L=0.90 | 122368.80 | 121647.80 | 4232583.80 | 542530.60 | 21730.40 | 7322315.80 |
-| Landscape/S=0.90/B=10/L=0.10 | 122400.00 | 122205.60 | 159128.00 | 763661.00 | 104976960.00 | 11403292.00 |
-| Landscape/S=0.90/B=10/L=0.90 | 123489.60 | 121774.20 | 159240.80 | 798146.40 | 106590962.40 | 7305191.60 |
-| Landscape/S=0.90/B=50/L=0.10 | 122604.20 | 121578.00 | 121248.60 | 768343.80 | 817589984.40 | 16474546.80 |
-| Landscape/S=0.90/B=50/L=0.90 | 122837.80 | 121887.00 | 164772.40 | 783083.40 | 442383576.00 | 7303212.20 |
-| LargeAlternation/Count=10 | 35730.20 | 31175.20 | 158923.20 | 677582.00 | 22484.60 | 943564.60 |
-| LargeAlternation/Count=100 | 32198.60 | 31897.00 | 162165.20 | 630878.80 | 23634.80 | 941344.40 |
-| LargeAlternation/Count=1000 | 40864.20 | 30346.40 | 167589.00 | 623450.40 | 38865.20 | 944824.80 |
-| LargeAlternation/Count=10000 | 52580.80 | 30136.80 | 19092068.80 | N/A | N/A | 963737.00 |
-| LiteralScan/pat=Sherlock | 369.28 | 30.67 | 192.58 | 600140.40 | 1569.00 | 223761.40 |
-| LiteralScan/pat=The_Adventure_of_the_Speckled_Band | 1380.40 | 286.66 | 452.16 | 530246.00 | 2911.20 | 238473.60 |
-| NFAWorstCase/Run | 53357066.40 | 68215567.60 | 4254440.40 | 541796.20 | 24253.00 | 7699492.00 |
-| StandardSuite/Alternation/(fo\|foo) | 213.96 | 41.21 | 85.44 | 574770.60 | 2117.00 | 186556.40 |
-| StandardSuite/Anchored/^(?:a)$ | 40.83 | 17.45 | 5.73 | 502275.00 | 3086.60 | 185923.80 |
-| StandardSuite/CharClass/(?i)[@-A]+ | 167.56 | 51.69 | 12.05 | 527080.40 | 3080.80 | 187096.20 |
-| StandardSuite/Complex/a+ | 154.80 | 53.78 | 83.65 | 471475.40 | 2043.40 | 187438.40 |
-| StandardSuite/Literal/a | 135.94 | 22.14 | 84.41 | 549936.00 | 1742.00 | 189241.20 |
-| Synthetic/CCWarp | 15634027.80 | 218315.00 | 72335346.40 | 1212502.00 | 1080749.40 | 7368445.40 |
-| Synthetic/PureDFA | 30294286.40 | 3983437.00 | 177103923.00 | 1195572.40 | 203887704.40 | 7391816.00 |
-| Synthetic/SIMDWarp | 35456.20 | 35996.00 | 29623.80 | 566006.20 | 21140.00 | 1007073.80 |
-| Synthetic/SearchWarp | 24852849.60 | 277117.00 | 1405605.20 | 422174.40 | 851880.20 | 7485080.00 |
+| Test Case | GoRegexp | GoRegexpRe | Coregex | Hyperscan-CGO | PCRE2-CGO | RE2-CGO | RE2-Wasm |
+|---|---|---|---|---|---|---|---|
+| Anchors/pat=(?m)HTTP/1.1$ | 4071767.40 | 1606551.60 | 1431169.20 | 2444667.20 | 1060317.00 | 3555738.60 | 3543040.00 |
+| Anchors/pat=(?m)^127.0.0.1 | 78018809.00 | 285822.80 | 370146.60 | 1452568.20 | 4956044.00 | 17498087.80 | 17710333.80 |
+| Anchors/pat=HTTP/1.1$ | 6172867.40 | 51.81 | 39.71 | 1201796.00 | 1062758.00 | 469512.80 | 458667.80 |
+| Anchors/pat=\bGET\b | 1518.80 | 71.36 | 200.64 | 1299191.00 | 1917.20 | 477819.60 | 454474.20 |
+| Anchors/pat=^127.0.0.1 | 65.36 | 27.92 | 5.85 | 1100717.40 | 1735.20 | 452680.80 | 458667.80 |
+| Capturing/Email | 2616.80 | 1133.80 | 5169.20 | 424473.80 | 2698.60 | 200054.20 | 199803.20 |
+| Capturing/URI | 573.40 | 96.55 | 4121851.00 | 388299.40 | 1869.00 | 198320.60 | 197325.40 |
+| Landscape/S=0.01/B=1/L=0.10 | 233511.00 | 237644.40 | 4260337.40 | 549876.20 | 23288.40 | 1331743.20 | 1384689.20 |
+| Landscape/S=0.01/B=1/L=0.90 | 70734.40 | 70480.00 | 5920778.20 | 550536.80 | 23023.20 | 1072659.20 | 1088728.60 |
+| Landscape/S=0.01/B=10/L=0.10 | 233786.20 | 235109.40 | 282101.20 | 490062.40 | 1995615.40 | 1321916.60 | 1328454.60 |
+| Landscape/S=0.01/B=10/L=0.90 | 71326.40 | 69611.20 | 283614.00 | 468705.00 | 1894729.20 | 1110976.40 | 1068321.00 |
+| Landscape/S=0.01/B=50/L=0.10 | 235216.00 | 235622.00 | 142146.80 | 503701.60 | 7735389.60 | 1335173.60 | 1345885.60 |
+| Landscape/S=0.01/B=50/L=0.90 | 70912.20 | 70917.40 | 120686.00 | 509140.20 | 7568123.00 | 1089435.40 | 1064278.60 |
+| Landscape/S=0.10/B=1/L=0.10 | 1120730.80 | 1150523.80 | 4242680.60 | 562651.40 | 22339.20 | 4255055.80 | 4234998.00 |
+| Landscape/S=0.10/B=1/L=0.90 | 122583.00 | 121777.20 | 4255466.00 | 533469.40 | 22171.80 | 2109608.60 | 2115676.20 |
+| Landscape/S=0.10/B=10/L=0.10 | 1121671.40 | 1161932.60 | 159627.40 | 576985.00 | 17818358.60 | 4291185.60 | 4278728.40 |
+| Landscape/S=0.10/B=10/L=0.90 | 121984.40 | 121774.00 | 162028.60 | 539647.60 | 17923328.20 | 2107501.40 | 2121860.40 |
+| Landscape/S=0.10/B=50/L=0.10 | 1120824.80 | 1152713.00 | 121770.20 | 531005.80 | 71251849.60 | 4231565.00 | 4249142.40 |
+| Landscape/S=0.10/B=50/L=0.90 | 122041.20 | 121736.60 | 119642.00 | 539677.00 | 71441285.80 | 2104730.20 | 2124103.40 |
+| Landscape/S=0.50/B=1/L=0.10 | 122991.00 | 121403.40 | 4256102.00 | 515942.60 | 22499.40 | 10039554.20 | 10063799.00 |
+| Landscape/S=0.50/B=1/L=0.90 | 122476.00 | 122197.80 | 4257965.60 | 499267.20 | 22557.00 | 5461211.60 | 5462028.40 |
+| Landscape/S=0.50/B=10/L=0.10 | 123633.40 | 121824.20 | 159447.00 | 726187.60 | 70643242.80 | 10057366.80 | 10023984.40 |
+| Landscape/S=0.50/B=10/L=0.90 | 123097.80 | 123502.60 | 158505.40 | 743906.00 | 70934546.60 | 5481535.20 | 5513343.20 |
+| Landscape/S=0.50/B=50/L=0.10 | 122373.60 | 122493.40 | 120007.20 | 802613.40 | 292670572.60 | 10138472.00 | 10121565.00 |
+| Landscape/S=0.50/B=50/L=0.90 | 122242.80 | 122274.80 | 119847.40 | 1061626.80 | 291104867.80 | 5498624.60 | 5492944.80 |
+| Landscape/S=0.90/B=1/L=0.10 | 122348.60 | 121733.20 | 4300086.40 | 1257029.80 | 22637.40 | 11405527.40 | 11420287.40 |
+| Landscape/S=0.90/B=1/L=0.90 | 122449.00 | 123388.20 | 4251469.40 | 1184984.00 | 21543.00 | 7306208.40 | 7288819.80 |
+| Landscape/S=0.90/B=10/L=0.10 | 122472.00 | 121959.20 | 161254.60 | 1381982.00 | 105221819.40 | 11446686.20 | 11432720.40 |
+| Landscape/S=0.90/B=10/L=0.90 | 123927.60 | 121892.20 | 159350.00 | 794385.60 | 105902865.40 | 7293939.60 | 7279182.80 |
+| Landscape/S=0.90/B=50/L=0.10 | 122431.80 | 122135.20 | 120064.40 | 777356.80 | 437729584.60 | 11510716.20 | 11395300.00 |
+| Landscape/S=0.90/B=50/L=0.90 | 122771.80 | 121734.40 | 119884.60 | 800410.40 | 449297271.60 | 7326514.80 | 8905210.40 |
+| LargeAlternation/Count=10 | 35565.20 | 29501.80 | 160198.80 | 609027.20 | 21362.00 | 962227.60 | 950536.80 |
+| LargeAlternation/Count=100 | 32744.00 | 29014.00 | 162287.00 | 548803.20 | 22668.00 | 970011.80 | 948072.80 |
+| LargeAlternation/Count=1000 | 37462.00 | 28998.00 | 167953.60 | 588129.40 | 38933.20 | 965697.80 | 962273.40 |
+| LargeAlternation/Count=10000 | 49234.60 | 29897.80 | 19496500.80 | N/A | N/A | 955405.20 | 948822.40 |
+| LiteralScan/pat=Sherlock | 368.52 | 30.85 | 192.08 | 628408.60 | 1546.60 | 223108.00 | 219987.80 |
+| LiteralScan/pat=The_Adventure_of_the_Speckled_Band | 1388.00 | 284.06 | 462.98 | 620672.00 | 2842.80 | 234837.60 | 236278.40 |
+| NFAWorstCase/Run | 53350306.60 | 60873322.40 | 4260477.40 | 531283.00 | 22576.40 | 7647186.80 | 7626659.20 |
+| StandardSuite/Alternation/(fo\|foo) | 220.66 | 38.61 | 85.07 | 616366.60 | 1733.00 | 188824.60 | 190393.20 |
+| StandardSuite/Anchored/^(?:a)$ | 40.45 | 17.39 | 5.77 | 494988.20 | 1617.60 | 187508.20 | 192193.60 |
+| StandardSuite/CharClass/(?i)[@-A]+ | 167.22 | 47.44 | 11.95 | 626489.20 | 1724.80 | 188519.60 | 191007.20 |
+| StandardSuite/Complex/a+ | 154.48 | 49.07 | 83.25 | 500502.40 | 1761.20 | 193174.40 | 190699.20 |
+| StandardSuite/Literal/a | 142.04 | 22.21 | 83.95 | 598251.60 | 1740.20 | 188437.40 | 189340.40 |
+| Synthetic/CCWarp | 15803067.60 | 31.85 | 56142173.60 | 1169152.20 | 1080371.40 | 7539185.60 | 7399565.60 |
+| Synthetic/PureDFA | 29887882.60 | 4318848.20 | 345290309.20 | 1179212.60 | 202253139.40 | 7411368.00 | 7483039.80 |
+| Synthetic/SIMDWarp | 35725.80 | 35548.40 | 29840.80 | 521992.40 | 21347.40 | 993887.20 | 987326.00 |
+| Synthetic/SearchWarp | 24357642.60 | 279197.80 | 973789.80 | 421220.60 | 850770.00 | 7503401.60 | 7547455.20 |
 
 ## Throughput Comparison (Average MB/s)
-| Test Case | GoRegexp | GoRegexpRe | Coregex | Hyperscan-CGO | PCRE2-CGO | RE2-CGO |
-|---|---|---|---|---|---|---|
-| Anchors/pat=(?m)HTTP/1.1$ | 728.09 | 22.79 | 1648.28 | 1122.06 | 2255.62 | 676.09 |
-| Anchors/pat=(?m)^127.0.0.1 | 58.90 | 109.95 | 6285.16 | 1895.21 | 482.17 | 136.16 |
-| Anchors/pat=HTTP/1.1$ | 717.14 | 89352090.70 | 60188130.72 | 2147.39 | 2267.96 | 5389.98 |
-| Anchors/pat=\bGET\b | 1572433.02 | 35414622.89 | 11879971.17 | 2314.36 | 1249753.43 | 5423.44 |
-| Anchors/pat=^127.0.0.1 | 57721349.19 | 90055446.87 | 403825534.95 | 2385.64 | 1440371.94 | 4889.20 |
-| Capturing/Email | 403474.44 | 797909.20 | 203578.36 | 2133.28 | 380432.44 | 5385.81 |
-| Capturing/URI | 1819371.55 | 12281158.58 | 255.48 | 2331.34 | 543603.74 | 5365.42 |
-| Landscape/S=0.01/B=1/L=0.10 | 4497.73 | 4428.65 | 246.30 | 2143.19 | 49349.46 | 793.37 |
-| Landscape/S=0.01/B=1/L=0.90 | 14581.16 | 15008.77 | 246.72 | 2205.77 | 49150.75 | 986.21 |
-| Landscape/S=0.01/B=10/L=0.10 | 4489.23 | 4440.59 | 6589.39 | 2036.17 | 519.44 | 797.43 |
-| Landscape/S=0.01/B=10/L=0.90 | 14871.90 | 15033.37 | 6599.16 | 2068.25 | 554.84 | 963.14 |
-| Landscape/S=0.01/B=50/L=0.10 | 4486.30 | 4452.59 | 8757.00 | 2113.03 | 137.19 | 758.55 |
-| Landscape/S=0.01/B=50/L=0.90 | 14902.40 | 15075.39 | 8766.85 | 2181.38 | 137.71 | 981.17 |
-| Landscape/S=0.10/B=1/L=0.10 | 931.39 | 911.06 | 247.04 | 2009.74 | 47257.16 | 247.12 |
-| Landscape/S=0.10/B=1/L=0.90 | 8613.61 | 8611.26 | 247.14 | 2044.60 | 45830.20 | 465.55 |
-| Landscape/S=0.10/B=10/L=0.10 | 735.25 | 711.11 | 3701.58 | 2062.59 | 59.64 | 247.60 |
-| Landscape/S=0.10/B=10/L=0.90 | 8623.77 | 8420.15 | 6541.68 | 2020.39 | 59.60 | 498.85 |
-| Landscape/S=0.10/B=50/L=0.10 | 935.99 | 910.66 | 8744.66 | 2008.00 | 14.50 | 245.19 |
-| Landscape/S=0.10/B=50/L=0.90 | 8589.62 | 8589.90 | 8740.46 | 1983.04 | 14.69 | 499.17 |
-| Landscape/S=0.50/B=1/L=0.10 | 8601.51 | 8563.86 | 246.88 | 1981.90 | 48338.68 | 104.77 |
-| Landscape/S=0.50/B=1/L=0.90 | 8576.81 | 8606.58 | 246.31 | 2147.60 | 46872.55 | 189.58 |
-| Landscape/S=0.50/B=10/L=0.10 | 8585.92 | 8574.97 | 6571.68 | 1499.35 | 14.93 | 104.47 |
-| Landscape/S=0.50/B=10/L=0.90 | 8568.40 | 8523.79 | 6579.42 | 1447.33 | 14.97 | 191.97 |
-| Landscape/S=0.50/B=50/L=0.10 | 8614.03 | 8588.96 | 8743.27 | 1462.44 | 3.61 | 104.57 |
-| Landscape/S=0.50/B=50/L=0.90 | 8564.87 | 8602.44 | 8729.50 | 1405.09 | 3.61 | 191.85 |
-| Landscape/S=0.90/B=1/L=0.10 | 8462.18 | 8599.87 | 247.28 | 1901.83 | 49948.66 | 91.52 |
-| Landscape/S=0.90/B=1/L=0.90 | 8569.10 | 8619.90 | 247.74 | 1933.33 | 48266.97 | 143.20 |
-| Landscape/S=0.90/B=10/L=0.10 | 8566.86 | 8580.53 | 6589.57 | 1373.28 | 9.99 | 91.96 |
-| Landscape/S=0.90/B=10/L=0.90 | 8492.99 | 8610.90 | 6584.89 | 1314.52 | 9.84 | 143.54 |
-| Landscape/S=0.90/B=50/L=0.10 | 8552.55 | 8624.73 | 8650.25 | 1364.95 | 1.29 | 63.86 |
-| Landscape/S=0.90/B=50/L=0.90 | 8536.56 | 8602.90 | 6524.65 | 1339.09 | 2.37 | 143.58 |
-| LargeAlternation/Count=10 | 29372.17 | 33780.08 | 6598.49 | 1550.34 | 46686.56 | 1111.46 |
-| LargeAlternation/Count=100 | 32651.25 | 32962.52 | 6466.41 | 1662.54 | 44392.41 | 1114.07 |
-| LargeAlternation/Count=1000 | 25745.54 | 34592.74 | 6257.12 | 1682.71 | 27003.41 | 1109.86 |
-| LargeAlternation/Count=10000 | 19995.14 | 34821.23 | 54.94 | N/A | N/A | 1089.02 |
-| LiteralScan/pat=Sherlock | 3291325.88 | 39613896.48 | 6309110.30 | 2032.03 | 775823.10 | 5435.00 |
-| LiteralScan/pat=The_Adventure_of_the_Speckled_Band | 880237.35 | 4239833.19 | 2687226.52 | 2292.93 | 417406.72 | 5097.06 |
-| NFAWorstCase/Run | 19.65 | 15.37 | 246.47 | 1935.83 | 43258.16 | 136.22 |
-| StandardSuite/Alternation/(fo\|foo) | 4900671.30 | 25448439.11 | 12272969.83 | 1825.53 | 534892.93 | 5621.14 |
-| StandardSuite/Anchored/^(?:a)$ | 25683016.90 | 60110275.92 | 182966975.35 | 2089.30 | 340567.42 | 5640.86 |
-| StandardSuite/CharClass/(?i)[@-A]+ | 6257752.81 | 20285852.11 | 87035331.22 | 1991.05 | 340962.75 | 5606.38 |
-| StandardSuite/Complex/a+ | 6774015.82 | 19497732.12 | 12537952.50 | 2224.52 | 535130.87 | 5595.08 |
-| StandardSuite/Literal/a | 7713265.19 | 47370965.09 | 12425537.30 | 1908.84 | 602069.09 | 5544.44 |
-| Synthetic/CCWarp | 67.07 | 4802.96 | 14.85 | 865.74 | 970.22 | 142.30 |
-| Synthetic/PureDFA | 34.63 | 263.24 | 5.92 | 877.27 | 5.14 | 141.86 |
-| Synthetic/SIMDWarp | 30669.61 | 30225.26 | 36710.60 | 1924.53 | 51448.23 | 1081.36 |
-| Synthetic/SearchWarp | 42.22 | 3783.84 | 815.31 | 2484.20 | 1230.92 | 140.09 |
+| Test Case | GoRegexp | GoRegexpRe | Coregex | Hyperscan-CGO | PCRE2-CGO | RE2-CGO | RE2-Wasm |
+|---|---|---|---|---|---|---|---|
+| Anchors/pat=(?m)HTTP/1.1$ | 630.16 | 1475.70 | 1656.56 | 969.98 | 2236.01 | 666.83 | 669.14 |
+| Anchors/pat=(?m)^127.0.0.1 | 30.66 | 8294.73 | 6405.10 | 1632.27 | 478.37 | 135.49 | 133.97 |
+| Anchors/pat=HTTP/1.1$ | 385.56 | 45757218.81 | 59744739.43 | 1974.80 | 2232.13 | 5079.93 | 5169.22 |
+| Anchors/pat=\bGET\b | 1561283.84 | 33247445.06 | 11816995.77 | 1827.98 | 1237128.66 | 5021.87 | 5220.08 |
+| Anchors/pat=^127.0.0.1 | 39486396.09 | 84907190.33 | 405047219.90 | 2155.04 | 1367386.89 | 5240.02 | 5172.25 |
+| Capturing/Email | 400898.97 | 924678.51 | 202868.80 | 2475.48 | 388641.18 | 5243.60 | 5249.31 |
+| Capturing/URI | 1828800.37 | 10865233.88 | 254.41 | 2708.65 | 561501.96 | 5288.04 | 5315.35 |
+| Landscape/S=0.01/B=1/L=0.10 | 4490.53 | 4413.11 | 246.13 | 1907.74 | 45176.29 | 787.43 | 758.19 |
+| Landscape/S=0.01/B=1/L=0.90 | 14824.26 | 14879.30 | 181.68 | 1916.40 | 45824.62 | 977.73 | 963.50 |
+| Landscape/S=0.01/B=10/L=0.10 | 4485.25 | 4459.99 | 3758.81 | 2150.21 | 525.46 | 793.27 | 789.36 |
+| Landscape/S=0.01/B=10/L=0.90 | 14707.50 | 15063.93 | 3709.65 | 2238.87 | 553.43 | 944.69 | 981.55 |
+| Landscape/S=0.01/B=50/L=0.10 | 4458.40 | 4450.26 | 7643.06 | 2091.98 | 135.56 | 785.52 | 779.61 |
+| Landscape/S=0.01/B=50/L=0.90 | 14787.36 | 14793.43 | 8688.95 | 2072.71 | 138.57 | 962.77 | 985.25 |
+| Landscape/S=0.10/B=1/L=0.10 | 935.62 | 911.40 | 247.15 | 1866.47 | 47021.11 | 246.44 | 247.60 |
+| Landscape/S=0.10/B=1/L=0.90 | 8554.06 | 8610.69 | 246.41 | 1972.16 | 47363.26 | 497.06 | 495.63 |
+| Landscape/S=0.10/B=10/L=0.10 | 934.83 | 902.55 | 6568.94 | 1819.08 | 58.85 | 244.54 | 245.19 |
+| Landscape/S=0.10/B=10/L=0.90 | 8596.03 | 8610.88 | 6475.02 | 1951.70 | 58.57 | 497.55 | 494.23 |
+| Landscape/S=0.10/B=50/L=0.10 | 935.54 | 909.66 | 8615.15 | 1978.88 | 14.72 | 247.81 | 246.82 |
+| Landscape/S=0.10/B=50/L=0.90 | 8591.99 | 8613.50 | 8764.35 | 1951.21 | 14.68 | 498.21 | 493.80 |
+| Landscape/S=0.50/B=1/L=0.10 | 8528.34 | 8637.17 | 246.37 | 2048.83 | 46642.13 | 104.44 | 104.19 |
+| Landscape/S=0.50/B=1/L=0.90 | 8561.54 | 8581.18 | 246.26 | 2103.73 | 46601.40 | 192.01 | 191.98 |
+| Landscape/S=0.50/B=10/L=0.10 | 8484.92 | 8607.34 | 6576.44 | 1447.64 | 14.85 | 104.26 | 104.61 |
+| Landscape/S=0.50/B=10/L=0.90 | 8518.39 | 8495.62 | 6615.46 | 1411.45 | 14.79 | 191.29 | 190.25 |
+| Landscape/S=0.50/B=50/L=0.10 | 8569.15 | 8560.63 | 8737.63 | 1307.81 | 3.58 | 103.46 | 103.64 |
+| Landscape/S=0.50/B=50/L=0.90 | 8577.92 | 8575.69 | 8749.35 | 1096.39 | 3.60 | 190.72 | 190.91 |
+| Landscape/S=0.90/B=1/L=0.10 | 8570.48 | 8613.82 | 243.95 | 836.34 | 46332.03 | 91.94 | 91.82 |
+| Landscape/S=0.90/B=1/L=0.90 | 8563.45 | 8501.05 | 246.64 | 889.81 | 48686.96 | 143.52 | 143.86 |
+| Landscape/S=0.90/B=10/L=0.10 | 8561.81 | 8597.84 | 6505.69 | 844.61 | 9.97 | 91.61 | 91.72 |
+| Landscape/S=0.90/B=10/L=0.90 | 8465.72 | 8602.48 | 6580.56 | 1320.89 | 9.90 | 143.77 | 144.05 |
+| Landscape/S=0.90/B=50/L=0.10 | 8564.63 | 8585.75 | 8733.46 | 1351.69 | 2.40 | 91.12 | 92.02 |
+| Landscape/S=0.90/B=50/L=0.90 | 8540.93 | 8613.80 | 8746.60 | 1310.91 | 2.34 | 143.12 | 122.97 |
+| LargeAlternation/Count=10 | 29486.00 | 35562.80 | 6545.80 | 1723.82 | 49106.93 | 1089.98 | 1103.34 |
+| LargeAlternation/Count=100 | 32065.89 | 36151.99 | 6461.88 | 1917.53 | 46277.12 | 1082.16 | 1106.25 |
+| LargeAlternation/Count=1000 | 27997.04 | 36163.02 | 6243.67 | 1787.86 | 26947.45 | 1086.11 | 1090.26 |
+| LargeAlternation/Count=10000 | 21305.97 | 35107.04 | 53.82 | N/A | N/A | 1097.63 | 1105.28 |
+| LiteralScan/pat=Sherlock | 3296819.58 | 39381818.15 | 6325520.23 | 1933.55 | 789471.02 | 5446.75 | 5523.36 |
+| LiteralScan/pat=The_Adventure_of_the_Speckled_Band | 875324.56 | 4277352.06 | 2625858.61 | 1958.98 | 427624.18 | 5175.34 | 5143.41 |
+| NFAWorstCase/Run | 19.66 | 17.23 | 246.14 | 1977.63 | 46493.45 | 137.13 | 137.49 |
+| StandardSuite/Alternation/(fo\|foo) | 4754620.43 | 27168141.26 | 12326674.27 | 1701.25 | 607636.44 | 5555.92 | 5509.16 |
+| StandardSuite/Anchored/^(?:a)$ | 25927867.60 | 60298525.16 | 181796877.52 | 2121.21 | 648473.17 | 5592.72 | 5456.23 |
+| StandardSuite/CharClass/(?i)[@-A]+ | 6271057.99 | 22105125.23 | 87733390.43 | 1674.36 | 608001.31 | 5563.61 | 5492.19 |
+| StandardSuite/Complex/a+ | 6788199.49 | 21369106.66 | 12594978.51 | 2095.73 | 595745.06 | 5435.15 | 5499.84 |
+| StandardSuite/Literal/a | 7381975.51 | 47208299.04 | 12493446.51 | 1753.02 | 603077.79 | 5566.54 | 5539.66 |
+| Synthetic/CCWarp | 66.38 | 32921504.29 | 18.68 | 896.85 | 970.59 | 139.28 | 141.71 |
+| Synthetic/PureDFA | 35.09 | 242.81 | 4.95 | 889.27 | 5.18 | 141.49 | 140.20 |
+| Synthetic/SIMDWarp | 30438.49 | 30597.59 | 36474.13 | 2084.49 | 50950.07 | 1094.25 | 1101.39 |
+| Synthetic/SearchWarp | 43.05 | 3755.79 | 1078.04 | 2495.98 | 1232.53 | 139.75 | 138.93 |
 
 ## Performance Graphs (MB/s, higher is better)
 
@@ -106,421 +106,421 @@
 ```mermaid
 xychart-beta
     title "Anchors/pat=(?m)HTTP/1.1$ (MB/s)"
-    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO"]
+    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO", "RE2-Wasm"]
     y-axis "MB/s"
-    bar [728.09, 22.79, 1648.28, 1122.06, 2255.62, 676.09]
+    bar [630.16, 1475.70, 1656.56, 969.98, 2236.01, 666.83, 669.14]
 ```
 
 ### Anchors/pat=(?m)^127.0.0.1
 ```mermaid
 xychart-beta
     title "Anchors/pat=(?m)^127.0.0.1 (MB/s)"
-    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO"]
+    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO", "RE2-Wasm"]
     y-axis "MB/s"
-    bar [58.90, 109.95, 6285.16, 1895.21, 482.17, 136.16]
+    bar [30.66, 8294.73, 6405.10, 1632.27, 478.37, 135.49, 133.97]
 ```
 
 ### Anchors/pat=HTTP/1.1$
 ```mermaid
 xychart-beta
     title "Anchors/pat=HTTP/1.1$ (MB/s)"
-    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO"]
+    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO", "RE2-Wasm"]
     y-axis "MB/s"
-    bar [717.14, 89352090.70, 60188130.72, 2147.39, 2267.96, 5389.98]
+    bar [385.56, 45757218.81, 59744739.43, 1974.80, 2232.13, 5079.93, 5169.22]
 ```
 
 ### Anchors/pat=\bGET\b
 ```mermaid
 xychart-beta
     title "Anchors/pat=\bGET\b (MB/s)"
-    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO"]
+    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO", "RE2-Wasm"]
     y-axis "MB/s"
-    bar [1572433.02, 35414622.89, 11879971.17, 2314.36, 1249753.43, 5423.44]
+    bar [1561283.84, 33247445.06, 11816995.77, 1827.98, 1237128.66, 5021.87, 5220.08]
 ```
 
 ### Anchors/pat=^127.0.0.1
 ```mermaid
 xychart-beta
     title "Anchors/pat=^127.0.0.1 (MB/s)"
-    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO"]
+    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO", "RE2-Wasm"]
     y-axis "MB/s"
-    bar [57721349.19, 90055446.87, 403825534.95, 2385.64, 1440371.94, 4889.20]
+    bar [39486396.09, 84907190.33, 405047219.90, 2155.04, 1367386.89, 5240.02, 5172.25]
 ```
 
 ### Capturing/Email
 ```mermaid
 xychart-beta
     title "Capturing/Email (MB/s)"
-    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO"]
+    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO", "RE2-Wasm"]
     y-axis "MB/s"
-    bar [403474.44, 797909.20, 203578.36, 2133.28, 380432.44, 5385.81]
+    bar [400898.97, 924678.51, 202868.80, 2475.48, 388641.18, 5243.60, 5249.31]
 ```
 
 ### Capturing/URI
 ```mermaid
 xychart-beta
     title "Capturing/URI (MB/s)"
-    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO"]
+    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO", "RE2-Wasm"]
     y-axis "MB/s"
-    bar [1819371.55, 12281158.58, 255.48, 2331.34, 543603.74, 5365.42]
+    bar [1828800.37, 10865233.88, 254.41, 2708.65, 561501.96, 5288.04, 5315.35]
 ```
 
 ### Landscape/S=0.01/B=1/L=0.10
 ```mermaid
 xychart-beta
     title "Landscape/S=0.01/B=1/L=0.10 (MB/s)"
-    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO"]
+    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO", "RE2-Wasm"]
     y-axis "MB/s"
-    bar [4497.73, 4428.65, 246.30, 2143.19, 49349.46, 793.37]
+    bar [4490.53, 4413.11, 246.13, 1907.74, 45176.29, 787.43, 758.19]
 ```
 
 ### Landscape/S=0.01/B=1/L=0.90
 ```mermaid
 xychart-beta
     title "Landscape/S=0.01/B=1/L=0.90 (MB/s)"
-    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO"]
+    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO", "RE2-Wasm"]
     y-axis "MB/s"
-    bar [14581.16, 15008.77, 246.72, 2205.77, 49150.75, 986.21]
+    bar [14824.26, 14879.30, 181.68, 1916.40, 45824.62, 977.73, 963.50]
 ```
 
 ### Landscape/S=0.01/B=10/L=0.10
 ```mermaid
 xychart-beta
     title "Landscape/S=0.01/B=10/L=0.10 (MB/s)"
-    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO"]
+    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO", "RE2-Wasm"]
     y-axis "MB/s"
-    bar [4489.23, 4440.59, 6589.39, 2036.17, 519.44, 797.43]
+    bar [4485.25, 4459.99, 3758.81, 2150.21, 525.46, 793.27, 789.36]
 ```
 
 ### Landscape/S=0.01/B=10/L=0.90
 ```mermaid
 xychart-beta
     title "Landscape/S=0.01/B=10/L=0.90 (MB/s)"
-    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO"]
+    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO", "RE2-Wasm"]
     y-axis "MB/s"
-    bar [14871.90, 15033.37, 6599.16, 2068.25, 554.84, 963.14]
+    bar [14707.50, 15063.93, 3709.65, 2238.87, 553.43, 944.69, 981.55]
 ```
 
 ### Landscape/S=0.01/B=50/L=0.10
 ```mermaid
 xychart-beta
     title "Landscape/S=0.01/B=50/L=0.10 (MB/s)"
-    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO"]
+    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO", "RE2-Wasm"]
     y-axis "MB/s"
-    bar [4486.30, 4452.59, 8757.00, 2113.03, 137.19, 758.55]
+    bar [4458.40, 4450.26, 7643.06, 2091.98, 135.56, 785.52, 779.61]
 ```
 
 ### Landscape/S=0.01/B=50/L=0.90
 ```mermaid
 xychart-beta
     title "Landscape/S=0.01/B=50/L=0.90 (MB/s)"
-    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO"]
+    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO", "RE2-Wasm"]
     y-axis "MB/s"
-    bar [14902.40, 15075.39, 8766.85, 2181.38, 137.71, 981.17]
+    bar [14787.36, 14793.43, 8688.95, 2072.71, 138.57, 962.77, 985.25]
 ```
 
 ### Landscape/S=0.10/B=1/L=0.10
 ```mermaid
 xychart-beta
     title "Landscape/S=0.10/B=1/L=0.10 (MB/s)"
-    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO"]
+    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO", "RE2-Wasm"]
     y-axis "MB/s"
-    bar [931.39, 911.06, 247.04, 2009.74, 47257.16, 247.12]
+    bar [935.62, 911.40, 247.15, 1866.47, 47021.11, 246.44, 247.60]
 ```
 
 ### Landscape/S=0.10/B=1/L=0.90
 ```mermaid
 xychart-beta
     title "Landscape/S=0.10/B=1/L=0.90 (MB/s)"
-    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO"]
+    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO", "RE2-Wasm"]
     y-axis "MB/s"
-    bar [8613.61, 8611.26, 247.14, 2044.60, 45830.20, 465.55]
+    bar [8554.06, 8610.69, 246.41, 1972.16, 47363.26, 497.06, 495.63]
 ```
 
 ### Landscape/S=0.10/B=10/L=0.10
 ```mermaid
 xychart-beta
     title "Landscape/S=0.10/B=10/L=0.10 (MB/s)"
-    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO"]
+    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO", "RE2-Wasm"]
     y-axis "MB/s"
-    bar [735.25, 711.11, 3701.58, 2062.59, 59.64, 247.60]
+    bar [934.83, 902.55, 6568.94, 1819.08, 58.85, 244.54, 245.19]
 ```
 
 ### Landscape/S=0.10/B=10/L=0.90
 ```mermaid
 xychart-beta
     title "Landscape/S=0.10/B=10/L=0.90 (MB/s)"
-    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO"]
+    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO", "RE2-Wasm"]
     y-axis "MB/s"
-    bar [8623.77, 8420.15, 6541.68, 2020.39, 59.60, 498.85]
+    bar [8596.03, 8610.88, 6475.02, 1951.70, 58.57, 497.55, 494.23]
 ```
 
 ### Landscape/S=0.10/B=50/L=0.10
 ```mermaid
 xychart-beta
     title "Landscape/S=0.10/B=50/L=0.10 (MB/s)"
-    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO"]
+    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO", "RE2-Wasm"]
     y-axis "MB/s"
-    bar [935.99, 910.66, 8744.66, 2008.00, 14.50, 245.19]
+    bar [935.54, 909.66, 8615.15, 1978.88, 14.72, 247.81, 246.82]
 ```
 
 ### Landscape/S=0.10/B=50/L=0.90
 ```mermaid
 xychart-beta
     title "Landscape/S=0.10/B=50/L=0.90 (MB/s)"
-    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO"]
+    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO", "RE2-Wasm"]
     y-axis "MB/s"
-    bar [8589.62, 8589.90, 8740.46, 1983.04, 14.69, 499.17]
+    bar [8591.99, 8613.50, 8764.35, 1951.21, 14.68, 498.21, 493.80]
 ```
 
 ### Landscape/S=0.50/B=1/L=0.10
 ```mermaid
 xychart-beta
     title "Landscape/S=0.50/B=1/L=0.10 (MB/s)"
-    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO"]
+    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO", "RE2-Wasm"]
     y-axis "MB/s"
-    bar [8601.51, 8563.86, 246.88, 1981.90, 48338.68, 104.77]
+    bar [8528.34, 8637.17, 246.37, 2048.83, 46642.13, 104.44, 104.19]
 ```
 
 ### Landscape/S=0.50/B=1/L=0.90
 ```mermaid
 xychart-beta
     title "Landscape/S=0.50/B=1/L=0.90 (MB/s)"
-    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO"]
+    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO", "RE2-Wasm"]
     y-axis "MB/s"
-    bar [8576.81, 8606.58, 246.31, 2147.60, 46872.55, 189.58]
+    bar [8561.54, 8581.18, 246.26, 2103.73, 46601.40, 192.01, 191.98]
 ```
 
 ### Landscape/S=0.50/B=10/L=0.10
 ```mermaid
 xychart-beta
     title "Landscape/S=0.50/B=10/L=0.10 (MB/s)"
-    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO"]
+    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO", "RE2-Wasm"]
     y-axis "MB/s"
-    bar [8585.92, 8574.97, 6571.68, 1499.35, 14.93, 104.47]
+    bar [8484.92, 8607.34, 6576.44, 1447.64, 14.85, 104.26, 104.61]
 ```
 
 ### Landscape/S=0.50/B=10/L=0.90
 ```mermaid
 xychart-beta
     title "Landscape/S=0.50/B=10/L=0.90 (MB/s)"
-    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO"]
+    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO", "RE2-Wasm"]
     y-axis "MB/s"
-    bar [8568.40, 8523.79, 6579.42, 1447.33, 14.97, 191.97]
+    bar [8518.39, 8495.62, 6615.46, 1411.45, 14.79, 191.29, 190.25]
 ```
 
 ### Landscape/S=0.50/B=50/L=0.10
 ```mermaid
 xychart-beta
     title "Landscape/S=0.50/B=50/L=0.10 (MB/s)"
-    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO"]
+    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO", "RE2-Wasm"]
     y-axis "MB/s"
-    bar [8614.03, 8588.96, 8743.27, 1462.44, 3.61, 104.57]
+    bar [8569.15, 8560.63, 8737.63, 1307.81, 3.58, 103.46, 103.64]
 ```
 
 ### Landscape/S=0.50/B=50/L=0.90
 ```mermaid
 xychart-beta
     title "Landscape/S=0.50/B=50/L=0.90 (MB/s)"
-    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO"]
+    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO", "RE2-Wasm"]
     y-axis "MB/s"
-    bar [8564.87, 8602.44, 8729.50, 1405.09, 3.61, 191.85]
+    bar [8577.92, 8575.69, 8749.35, 1096.39, 3.60, 190.72, 190.91]
 ```
 
 ### Landscape/S=0.90/B=1/L=0.10
 ```mermaid
 xychart-beta
     title "Landscape/S=0.90/B=1/L=0.10 (MB/s)"
-    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO"]
+    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO", "RE2-Wasm"]
     y-axis "MB/s"
-    bar [8462.18, 8599.87, 247.28, 1901.83, 49948.66, 91.52]
+    bar [8570.48, 8613.82, 243.95, 836.34, 46332.03, 91.94, 91.82]
 ```
 
 ### Landscape/S=0.90/B=1/L=0.90
 ```mermaid
 xychart-beta
     title "Landscape/S=0.90/B=1/L=0.90 (MB/s)"
-    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO"]
+    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO", "RE2-Wasm"]
     y-axis "MB/s"
-    bar [8569.10, 8619.90, 247.74, 1933.33, 48266.97, 143.20]
+    bar [8563.45, 8501.05, 246.64, 889.81, 48686.96, 143.52, 143.86]
 ```
 
 ### Landscape/S=0.90/B=10/L=0.10
 ```mermaid
 xychart-beta
     title "Landscape/S=0.90/B=10/L=0.10 (MB/s)"
-    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO"]
+    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO", "RE2-Wasm"]
     y-axis "MB/s"
-    bar [8566.86, 8580.53, 6589.57, 1373.28, 9.99, 91.96]
+    bar [8561.81, 8597.84, 6505.69, 844.61, 9.97, 91.61, 91.72]
 ```
 
 ### Landscape/S=0.90/B=10/L=0.90
 ```mermaid
 xychart-beta
     title "Landscape/S=0.90/B=10/L=0.90 (MB/s)"
-    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO"]
+    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO", "RE2-Wasm"]
     y-axis "MB/s"
-    bar [8492.99, 8610.90, 6584.89, 1314.52, 9.84, 143.54]
+    bar [8465.72, 8602.48, 6580.56, 1320.89, 9.90, 143.77, 144.05]
 ```
 
 ### Landscape/S=0.90/B=50/L=0.10
 ```mermaid
 xychart-beta
     title "Landscape/S=0.90/B=50/L=0.10 (MB/s)"
-    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO"]
+    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO", "RE2-Wasm"]
     y-axis "MB/s"
-    bar [8552.55, 8624.73, 8650.25, 1364.95, 1.29, 63.86]
+    bar [8564.63, 8585.75, 8733.46, 1351.69, 2.40, 91.12, 92.02]
 ```
 
 ### Landscape/S=0.90/B=50/L=0.90
 ```mermaid
 xychart-beta
     title "Landscape/S=0.90/B=50/L=0.90 (MB/s)"
-    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO"]
+    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO", "RE2-Wasm"]
     y-axis "MB/s"
-    bar [8536.56, 8602.90, 6524.65, 1339.09, 2.37, 143.58]
+    bar [8540.93, 8613.80, 8746.60, 1310.91, 2.34, 143.12, 122.97]
 ```
 
 ### LargeAlternation/Count=10
 ```mermaid
 xychart-beta
     title "LargeAlternation/Count=10 (MB/s)"
-    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO"]
+    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO", "RE2-Wasm"]
     y-axis "MB/s"
-    bar [29372.17, 33780.08, 6598.49, 1550.34, 46686.56, 1111.46]
+    bar [29486.00, 35562.80, 6545.80, 1723.82, 49106.93, 1089.98, 1103.34]
 ```
 
 ### LargeAlternation/Count=100
 ```mermaid
 xychart-beta
     title "LargeAlternation/Count=100 (MB/s)"
-    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO"]
+    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO", "RE2-Wasm"]
     y-axis "MB/s"
-    bar [32651.25, 32962.52, 6466.41, 1662.54, 44392.41, 1114.07]
+    bar [32065.89, 36151.99, 6461.88, 1917.53, 46277.12, 1082.16, 1106.25]
 ```
 
 ### LargeAlternation/Count=1000
 ```mermaid
 xychart-beta
     title "LargeAlternation/Count=1000 (MB/s)"
-    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO"]
+    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO", "RE2-Wasm"]
     y-axis "MB/s"
-    bar [25745.54, 34592.74, 6257.12, 1682.71, 27003.41, 1109.86]
+    bar [27997.04, 36163.02, 6243.67, 1787.86, 26947.45, 1086.11, 1090.26]
 ```
 
 ### LargeAlternation/Count=10000
 ```mermaid
 xychart-beta
     title "LargeAlternation/Count=10000 (MB/s)"
-    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "RE2-CGO"]
+    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "RE2-CGO", "RE2-Wasm"]
     y-axis "MB/s"
-    bar [19995.14, 34821.23, 54.94, 1089.02]
+    bar [21305.97, 35107.04, 53.82, 1097.63, 1105.28]
 ```
 
 ### LiteralScan/pat=Sherlock
 ```mermaid
 xychart-beta
     title "LiteralScan/pat=Sherlock (MB/s)"
-    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO"]
+    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO", "RE2-Wasm"]
     y-axis "MB/s"
-    bar [3291325.88, 39613896.48, 6309110.30, 2032.03, 775823.10, 5435.00]
+    bar [3296819.58, 39381818.15, 6325520.23, 1933.55, 789471.02, 5446.75, 5523.36]
 ```
 
 ### LiteralScan/pat=The_Adventure_of_the_Speckled_Band
 ```mermaid
 xychart-beta
     title "LiteralScan/pat=The_Adventure_of_the_Speckled_Band (MB/s)"
-    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO"]
+    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO", "RE2-Wasm"]
     y-axis "MB/s"
-    bar [880237.35, 4239833.19, 2687226.52, 2292.93, 417406.72, 5097.06]
+    bar [875324.56, 4277352.06, 2625858.61, 1958.98, 427624.18, 5175.34, 5143.41]
 ```
 
 ### NFAWorstCase/Run
 ```mermaid
 xychart-beta
     title "NFAWorstCase/Run (MB/s)"
-    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO"]
+    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO", "RE2-Wasm"]
     y-axis "MB/s"
-    bar [19.65, 15.37, 246.47, 1935.83, 43258.16, 136.22]
+    bar [19.66, 17.23, 246.14, 1977.63, 46493.45, 137.13, 137.49]
 ```
 
 ### StandardSuite/Alternation/(fo|foo)
 ```mermaid
 xychart-beta
     title "StandardSuite/Alternation/(fo|foo) (MB/s)"
-    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO"]
+    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO", "RE2-Wasm"]
     y-axis "MB/s"
-    bar [4900671.30, 25448439.11, 12272969.83, 1825.53, 534892.93, 5621.14]
+    bar [4754620.43, 27168141.26, 12326674.27, 1701.25, 607636.44, 5555.92, 5509.16]
 ```
 
 ### StandardSuite/Anchored/^(?:a)$
 ```mermaid
 xychart-beta
     title "StandardSuite/Anchored/^(?:a)$ (MB/s)"
-    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO"]
+    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO", "RE2-Wasm"]
     y-axis "MB/s"
-    bar [25683016.90, 60110275.92, 182966975.35, 2089.30, 340567.42, 5640.86]
+    bar [25927867.60, 60298525.16, 181796877.52, 2121.21, 648473.17, 5592.72, 5456.23]
 ```
 
 ### StandardSuite/CharClass/(?i)[@-A]+
 ```mermaid
 xychart-beta
     title "StandardSuite/CharClass/(?i)[@-A]+ (MB/s)"
-    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO"]
+    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO", "RE2-Wasm"]
     y-axis "MB/s"
-    bar [6257752.81, 20285852.11, 87035331.22, 1991.05, 340962.75, 5606.38]
+    bar [6271057.99, 22105125.23, 87733390.43, 1674.36, 608001.31, 5563.61, 5492.19]
 ```
 
 ### StandardSuite/Complex/a+
 ```mermaid
 xychart-beta
     title "StandardSuite/Complex/a+ (MB/s)"
-    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO"]
+    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO", "RE2-Wasm"]
     y-axis "MB/s"
-    bar [6774015.82, 19497732.12, 12537952.50, 2224.52, 535130.87, 5595.08]
+    bar [6788199.49, 21369106.66, 12594978.51, 2095.73, 595745.06, 5435.15, 5499.84]
 ```
 
 ### StandardSuite/Literal/a
 ```mermaid
 xychart-beta
     title "StandardSuite/Literal/a (MB/s)"
-    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO"]
+    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO", "RE2-Wasm"]
     y-axis "MB/s"
-    bar [7713265.19, 47370965.09, 12425537.30, 1908.84, 602069.09, 5544.44]
+    bar [7381975.51, 47208299.04, 12493446.51, 1753.02, 603077.79, 5566.54, 5539.66]
 ```
 
 ### Synthetic/CCWarp
 ```mermaid
 xychart-beta
     title "Synthetic/CCWarp (MB/s)"
-    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO"]
+    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO", "RE2-Wasm"]
     y-axis "MB/s"
-    bar [67.07, 4802.96, 14.85, 865.74, 970.22, 142.30]
+    bar [66.38, 32921504.29, 18.68, 896.85, 970.59, 139.28, 141.71]
 ```
 
 ### Synthetic/PureDFA
 ```mermaid
 xychart-beta
     title "Synthetic/PureDFA (MB/s)"
-    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO"]
+    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO", "RE2-Wasm"]
     y-axis "MB/s"
-    bar [34.63, 263.24, 5.92, 877.27, 5.14, 141.86]
+    bar [35.09, 242.81, 4.95, 889.27, 5.18, 141.49, 140.20]
 ```
 
 ### Synthetic/SIMDWarp
 ```mermaid
 xychart-beta
     title "Synthetic/SIMDWarp (MB/s)"
-    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO"]
+    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO", "RE2-Wasm"]
     y-axis "MB/s"
-    bar [30669.61, 30225.26, 36710.60, 1924.53, 51448.23, 1081.36]
+    bar [30438.49, 30597.59, 36474.13, 2084.49, 50950.07, 1094.25, 1101.39]
 ```
 
 ### Synthetic/SearchWarp
 ```mermaid
 xychart-beta
     title "Synthetic/SearchWarp (MB/s)"
-    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO"]
+    x-axis ["GoRegexp", "GoRegexpRe", "Coregex", "Hyperscan-CGO", "PCRE2-CGO", "RE2-CGO", "RE2-Wasm"]
     y-axis "MB/s"
-    bar [42.22, 3783.84, 815.31, 2484.20, 1230.92, 140.09]
+    bar [43.05, 3755.79, 1078.04, 2495.98, 1232.53, 139.75, 138.93]
 ```
