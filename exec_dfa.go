@@ -16,7 +16,6 @@ func pass0_DiscoveryLoop(re *Regexp, in *ir.Input, searchStart int) (restartBase
 	matchState := re.matchState
 	anchorStart := re.anchorStart
 	strategy := d.SearchStrategy()
-	lineBounded := re.lineBounded
 
 	// MANDATE: strictly anchored patterns must give up if past index 0
 	if anchorStart && (in.AbsPos > 0 || searchStart > 0) {
@@ -39,355 +38,189 @@ func pass0_DiscoveryLoop(re *Regexp, in *ir.Input, searchStart int) (restartBase
 
 		candidatePos := -1
 		var candidateAnchor *ir.AnchorInfo
-		mLiteralPos := -1
+		matchLiteralPos = -1
 
-		// 1. Mandatory Text Anchor Jump
-		// If we have a mandatory anchor with fixed distance to start/end, use it to warp immediately.
+		// 1. Mandatory Text Anchor Jump (Prefix/Suffix with Fixed Distance)
 		anchor := re.primaryAnchor
 		if anchor != nil && anchor.Mandatory && anchor.IsFixed {
 			if anchor.HasBeginText {
 				absPos := in.AbsPos + i
 				if absPos == 0 {
-					// We must match exactly at anchor.Distance
-					if anchor.Distance < numBytes && (anchor.HasClass || bytes.HasPrefix(b[anchor.Distance:], anchor.Anchor)) {
-						mLiteralPos = anchor.Distance
-						candidatePos = mLiteralPos
+					if anchor.Validate(in, anchor.Distance) {
+						candidatePos = 0
+						matchLiteralPos = anchor.Distance
 						candidateAnchor = anchor
-					} else {
-						return -1, -1, nil
+						goto end_of_loop
 					}
-				} else {
-					return -1, -1, nil
 				}
-			} else if anchor.Type == ir.AnchorSuffix && anchor.HasEndText {
-				// Match must end at absEnd. Anchor is at distance 'Distance' from match start.
-				// Total match length is unknown, but anchor is at fixed distance from match start.
-				// Wait, AnchorInfo.Distance is distance from match start to anchor start.
-				// For suffix anchors, usually we know the distance to the end.
-				// MinDistToEnd is distance from anchor start to $.
-				pos := (in.TotalBytes - in.AbsPos) - len(anchor.Anchor) - anchor.MinDistToEnd
-				if pos >= i && pos+len(anchor.Anchor) <= numBytes && bytes.HasPrefix(b[pos:], anchor.Anchor) {
-					mLiteralPos = pos
-					candidatePos = mLiteralPos
+				return -1, -1, nil
+			} else if anchor.HasEndText {
+				// Standard $ matches at EOF or before a trailing newline.
+				posEOF := (in.TotalBytes - in.AbsPos) - len(anchor.Anchor) - anchor.MinDistToEnd
+				if anchor.HasClass {
+					posEOF = (in.TotalBytes - in.AbsPos) - 1 - anchor.MinDistToEnd
+				}
+				if posEOF >= i && anchor.Validate(in, posEOF) {
+					candidatePos = posEOF - anchor.Distance
+					matchLiteralPos = posEOF
 					candidateAnchor = anchor
-				} else {
-					return -1, -1, nil
+					goto end_of_loop
 				}
-			}
-		}
-
-		// 2. Line-start check (only for the very first candidate position)
-		if candidatePos < 0 && anchor != nil && anchor.HasBeginLine && in.AbsPos+i == 0 {
-			if bytes.HasPrefix(b[i:], anchor.Anchor) {
-				mLiteralPos = i
-				candidatePos = i
-				candidateAnchor = anchor
-			}
-		}
-
-		// 3. Main Search
-		if candidatePos < 0 {
-			switch strategy {
-			case ir.SearchStrategyLiteral:
-				anchor := re.primaryAnchor
-				if anchor.Type == ir.AnchorSuffix && (anchor.HasEndText || anchor.HasEndLine) {
-					boundary := numBytes
-					if !anchor.HasEndText {
-						if nl := bytes.IndexByte(b[i:], '\n'); nl >= 0 {
-							boundary = i + nl
-						}
-					}
-					off := (boundary - i) - len(anchor.Anchor) - anchor.MinDistToLineEnd
-					if off >= 0 && bytes.HasPrefix(b[i+off:], anchor.Anchor) {
-						mLiteralPos = i + off
-						candidatePos = mLiteralPos
+				// Case B: Before trailing newline
+				if in.TotalBytes > 0 && in.OriginalB[in.TotalBytes-1] == '\n' {
+					posNL := posEOF - 1
+					if posNL >= i && anchor.Validate(in, posNL) {
+						candidatePos = posNL - anchor.Distance
+						matchLiteralPos = posNL
 						candidateAnchor = anchor
-					} else {
-						// Skip line
-						if !anchor.HasEndText {
-							if nl := bytes.IndexByte(b[i:], '\n'); nl >= 0 {
-								i = i + nl + 1
-								continue
-							}
-						}
-						return -1, -1, nil
-					}
-				} else {
-					pos := -1
-					if anchor.HasBeginLine && re.primaryAugmented != nil {
-						pos = bytes.Index(b[i:], re.primaryAugmented.Pattern)
-						if pos >= 0 {
-							mLiteralPos = i + pos + re.primaryAugmented.Offset
-							candidatePos = mLiteralPos
-							candidateAnchor = anchor
-						}
-					}
-					// Fallback for line-start at index 0 or missed augmented
-					if pos < 0 {
-						pos = bytes.Index(b[i:], anchor.Anchor)
-						if pos >= 0 {
-							mLiteralPos = i + pos
-							candidatePos = mLiteralPos
-							candidateAnchor = anchor
-						} else if anchor.Mandatory {
-							return -1, -1, nil
-						}
+						goto end_of_loop
 					}
 				}
-			case ir.SearchStrategySearchWarp:
-				pos := ir.IndexClass(&re.searchWarp, b[i:])
-				if pos >= 0 {
-					mLiteralPos = i + pos
-					candidatePos = mLiteralPos
-				} else {
-					return -1, -1, nil
-				}
-			case ir.SearchStrategySDFA:
-				sd := d.SearchDFA()
-				foundSDFA := false
-				currI := i
-				for currI < numBytes {
-					idx := ir.IndexClass(&sd.Trigger, b[currI:])
-					if idx < 0 {
-						break
-					}
-					currI += idx
-
-					st := sd.Transitions[(uint16(sd.StartState)<<8)|uint16(b[currI])]
-					if st != sd.DeadState {
-						if sd.Accepting[st] {
-							mLiteralPos = currI
-							candidatePos = currI
-							foundSDFA = true
-							break
-						}
-						tempI := currI + 1
-						found := false
-						for tempI < numBytes {
-							st = sd.Transitions[(uint16(st)<<8)|uint16(b[tempI])]
-							if st == sd.DeadState {
-								break
-							}
-							if sd.Accepting[st] {
-								found = true
-								break
-							}
-							tempI++
-						}
-						if found {
-							mLiteralPos = currI
-							candidatePos = currI
-							foundSDFA = true
-							break
-						}
-					}
-					currI++
-				}
-				if !foundSDFA {
-					return -1, -1, nil
-				}
-			default:
-				// Fallback MAP (Covering Set)
-				if len(re.searchAny) > 0 {
-					var pos int = -1
-					if len(re.searchAny) == 1 {
-						pos = bytes.IndexByte(b[i:], re.searchAny[0])
-					} else {
-						for _, target := range re.searchAny {
-							p := bytes.IndexByte(b[i:], target)
-							if p >= 0 && (pos < 0 || p < pos) {
-								pos = p
-							}
-						}
-					}
-					if pos >= 0 {
-						trial := i + pos
-						fb := b[trial]
-						if (re.searchMask[fb/64] & (1 << (fb % 64))) != 0 {
-							for k := range re.mapAnchors {
-								a := &re.mapAnchors[k]
-								if (!a.HasClass && len(a.Anchor) > 0 && a.Anchor[0] == fb && bytes.HasPrefix(b[trial:], a.Anchor)) || (a.HasClass && ir.ValidateFixed(&a.Class, b[trial:trial+1])) {
-									candidatePos, candidateAnchor = trial, a
-									break
-								}
-							}
-						}
-						if candidatePos < 0 {
-							i = trial + 1
-							continue
-						}
-						mLiteralPos = candidatePos
-					}
-				}
-
-				if candidatePos < 0 && re.primaryAugmented != nil {
-					pos := bytes.Index(b[i:], re.primaryAugmented.Pattern)
-					if pos >= 0 {
-						mLiteralPos = i + pos + re.primaryAugmented.Offset
-						candidatePos = mLiteralPos
-						candidateAnchor = re.primaryAnchor
-					}
-				}
-
-				if candidatePos < 0 {
-					for k := range re.mapAnchors {
-						a := &re.mapAnchors[k]
-						if a.HasBeginText && in.AbsPos+i == 0 {
-							candidatePos, candidateAnchor = i, a
-							break
-						}
-						if a.HasBeginLine && (in.AbsPos+i == 0 || (in.AbsPos+i > 0 && in.OriginalB[in.AbsPos+i-1] == '\n')) {
-							candidatePos, candidateAnchor = i, a
-							break
-						}
-					}
-				}
-
-				if candidatePos < 0 && re.primaryAnchor != nil {
-					anchor := re.primaryAnchor
-					if anchor.HasBeginText {
-						if in.AbsPos+i == 0 && anchor.Distance+len(anchor.Anchor) <= numBytes && bytes.HasPrefix(b[anchor.Distance:], anchor.Anchor) {
-							candidatePos, candidateAnchor = anchor.Distance, anchor
-						} else if anchor.Mandatory {
-							return -1, -1, nil
-						}
-					} else if anchor.Type == ir.AnchorSuffix && (anchor.HasEndText || anchor.HasEndLine) {
-						boundary := numBytes
-						if !anchor.HasEndText {
-							if nl := bytes.IndexByte(b[i:], '\n'); nl >= 0 {
-								boundary = i + nl
-							}
-						}
-						pos := (boundary - i) - len(anchor.Anchor) - anchor.MinDistToLineEnd
-						if pos >= 0 && bytes.HasPrefix(b[i+pos:], anchor.Anchor) {
-							candidatePos, candidateAnchor = i+pos, anchor
-						} else if anchor.Mandatory {
-							return -1, -1, nil
-						}
-					} else if anchor.Mandatory && anchor.IsFixed {
-						pos := -1
-						if !anchor.HasClass {
-							pos = bytes.Index(b[i:], anchor.Anchor)
-						} else {
-							pos = ir.IndexClass(&anchor.Class, b[i:])
-						}
-						if pos >= 0 {
-							candidatePos, candidateAnchor = i+pos, anchor
-						} else {
-							return -1, -1, nil
-						}
-					}
-				}
-
-				if candidatePos < 0 && len(re.prefix) > 0 {
-					pos := bytes.Index(b[i:], re.prefix)
-					if pos >= 0 {
-						candidatePos = i + pos
-						mLiteralPos = candidatePos
-					}
-				}
-			}
-		}
-
-		if candidatePos < 0 {
-			if len(re.searchAny) == 0 && len(re.prefix) == 0 && strategy == ir.SearchStrategyNone {
-				candidatePos = i
-				mLiteralPos = i
-			} else {
 				return -1, -1, nil
 			}
 		}
 
-		// --- Phase 2: Gaze ---
-		if candidateAnchor != nil && !candidateAnchor.SkipGaze && len(candidateAnchor.Anchor) > 0 {
-			rejected := false
-			totalAbsPos := in.AbsPos + candidatePos
-			if candidateAnchor.HasBeginText && totalAbsPos != 0 {
-				rejected = true
-			}
-			if !rejected && candidateAnchor.HasBeginLine && re.primaryAugmented == nil {
-				if totalAbsPos > 0 && in.OriginalB[totalAbsPos-1] != '\n' {
-					rejected = true
+		// 2. Main Search
+		switch strategy {
+		case ir.SearchStrategyLiteral:
+			anchor := re.primaryAnchor
+			aug := re.primaryAugmented
+
+			// Special handling for pos 0 if using augmented pattern
+			if i == 0 && in.AbsPos == 0 && aug != nil && (anchor != nil && (anchor.HasBeginLine || anchor.HasBeginText)) {
+				if anchor.Validate(in, anchor.Distance) {
+					candidatePos = 0
+					matchLiteralPos = anchor.Distance
+					candidateAnchor = anchor
+					goto end_of_loop
 				}
 			}
-			if !rejected && candidateAnchor.HasEndText {
-				distToEnd := in.TotalBytes - (totalAbsPos + len(candidateAnchor.Anchor))
-				if distToEnd < candidateAnchor.MinDistToEnd || (candidateAnchor.MaxDistToEnd >= 0 && distToEnd > candidateAnchor.MaxDistToEnd) {
-					rejected = true
+
+			if aug != nil {
+				pos := bytes.Index(b[i:], aug.Pattern)
+				if pos >= 0 {
+					absLitPos := i + pos + aug.Offset
+					// Correct anchor for this augmented pattern
+					var ownerAnchor *ir.AnchorInfo
+					if aug.AnchorIdx >= 0 && aug.AnchorIdx < len(re.mapAnchors) {
+						ownerAnchor = &re.mapAnchors[aug.AnchorIdx]
+					} else {
+						ownerAnchor = anchor
+					}
+
+					if ownerAnchor != nil && ownerAnchor.Validate(in, absLitPos) {
+						candidatePos = absLitPos - ownerAnchor.Distance
+						matchLiteralPos = absLitPos
+						candidateAnchor = ownerAnchor
+						goto end_of_loop
+					}
+					i = i + pos + 1
+					continue
+				}
+				// End of Input Safety: if main search failed, check if the anchor matches at the very end
+				for j := range re.mapAnchors {
+					a := &re.mapAnchors[j]
+					for k := range a.Augmented {
+						augEnd := &a.Augmented[k]
+						if augEnd.IsEnd {
+							posEnd := numBytes - len(a.Anchor)
+							if a.HasClass {
+								posEnd = numBytes - 1
+							}
+							if posEnd >= i && a.Validate(in, posEnd) {
+								candidatePos = posEnd - a.Distance
+								matchLiteralPos = posEnd
+								candidateAnchor = a
+								goto end_of_loop
+							}
+						}
+					}
+				}
+				return -1, -1, nil
+			} else if anchor != nil {
+				pos := bytes.Index(b[i:], anchor.Anchor)
+				if pos >= 0 {
+					absLitPos := i + pos
+					if anchor.Validate(in, absLitPos) {
+						candidatePos = absLitPos - anchor.Distance
+						matchLiteralPos = absLitPos
+						candidateAnchor = anchor
+						goto end_of_loop
+					}
+					i = i + pos + 1
+					continue
+				}
+				if anchor.Mandatory {
+					return -1, -1, nil
 				}
 			}
-			if !rejected && candidateAnchor.HasEndLine {
-				boundary := numBytes
-				if nl := bytes.IndexByte(b[candidatePos:], '\n'); nl >= 0 {
-					boundary = candidatePos + nl
-				}
-				distToLineEnd := boundary - (candidatePos + len(candidateAnchor.Anchor))
-				if distToLineEnd < candidateAnchor.MinDistToLineEnd || (candidateAnchor.MaxDistToLineEnd >= 0 && distToLineEnd > candidateAnchor.MaxDistToLineEnd) {
-					rejected = true
-				}
+		case ir.SearchStrategySearchWarp:
+			pos := ir.IndexClass(&re.searchWarp, b[i:])
+			if pos >= 0 {
+				matchLiteralPos = i + pos
+				candidatePos = matchLiteralPos
+				goto end_of_loop
 			}
-			if !rejected {
-				for _, c := range candidateAnchor.SimpleBackward {
-					idx := candidatePos + c.Offset
-					if idx < 0 || b[idx] != byte(c.Info.V0) {
-						rejected = true
+			return -1, -1, nil
+		case ir.SearchStrategySDFA:
+			sd := d.SearchDFA()
+			foundSDFA := false
+			currI := i
+			for currI < numBytes {
+				idx := ir.IndexClass(&sd.Trigger, b[currI:])
+				if idx < 0 {
+					break
+				}
+				currI += idx
+
+				st := sd.Transitions[(uint16(sd.StartState)<<8)|uint16(b[currI])]
+				if st != sd.DeadState {
+					if sd.Accepting[st] {
+						candidatePos = currI
+						matchLiteralPos = currI
+						foundSDFA = true
+						break
+					}
+					tempI := currI + 1
+					for tempI < numBytes {
+						st = sd.Transitions[(uint16(st)<<8)|uint16(b[tempI])]
+						if st == sd.DeadState {
+							break
+						}
+						if sd.Accepting[st] {
+							candidatePos = currI
+							matchLiteralPos = tempI
+							foundSDFA = true
+							break
+						}
+						tempI++
+					}
+					if foundSDFA {
 						break
 					}
 				}
+				currI++
 			}
-			if rejected {
-				// If it's a mandatory fixed anchor, failing Gaze means we can give up or jump.
-				if candidateAnchor.Mandatory && candidateAnchor.IsFixed {
-					if candidateAnchor.HasBeginText || candidateAnchor.HasEndText {
-						return -1, -1, nil
-					}
-				}
-				i = mLiteralPos + 1
-				continue
+			if foundSDFA {
+				goto end_of_loop
 			}
+			return -1, -1, nil
+		default:
+			candidatePos, matchLiteralPos = i, i
 		}
 
-		// --- Phase 3: Snap ---
-		j := candidatePos
-		if candidateAnchor != nil {
-			if candidateAnchor.IsFixed {
-				j = candidatePos - candidateAnchor.Distance
-				if j < i && strategy != ir.SearchStrategyNone {
-					i = mLiteralPos + 1
-					continue
-				}
-			} else {
-				for _, c := range candidateAnchor.Backward {
-					if c.IsRepeat {
-						j -= ir.WarpBack(&c.Info, b[:j])
-					} else {
-						j -= c.Length
-					}
-				}
-				if candidateAnchor.HasBeginLine {
-					if nl := bytes.LastIndexByte(b[:j], '\n'); nl >= 0 {
-						j = nl + 1
-					} else {
-						j = 0
-					}
-				}
+	end_of_loop:
+		if candidatePos >= 0 {
+			j := candidatePos
+			if anchorStart && in.AbsPos+j > 0 {
+				return -1, -1, nil
 			}
-		}
-		if j < 0 {
-			j = 0
+			bestAnchor = candidateAnchor
+			return j, matchLiteralPos, bestAnchor
 		}
 
-		// MANDATE: restartBase must be on the SAME line if lineBounded
-		if lineBounded {
-			if nl := bytes.LastIndexByte(b[j:candidatePos], '\n'); nl >= 0 {
-				i = mLiteralPos + 1
-				continue
-			}
-		}
-
-		return j, mLiteralPos, candidateAnchor
+		i++
 	}
-
 	return -1, -1, nil
 }
 

@@ -150,6 +150,31 @@ func TestRegexp_Multiline(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("Class", func(t *testing.T) {
+		re := MustCompile("(?m)^[a-z]")
+		tests := []struct {
+			input string
+			match bool
+		}{
+			{"abc", true},
+			{"\nabc", true},
+			{"1\nabc", true},
+			{"1abc", false},
+		}
+		for _, tt := range tests {
+			if got := re.MatchString(tt.input); got != tt.match {
+				t.Errorf("MatchString(%q, %q) = %v; want %v", "(?m)^[a-z]", tt.input, got, tt.match)
+			}
+		}
+	})
+	t.Run("DotNL_UTF8", func(t *testing.T) {
+		re := MustCompile("(?s)^.*$")
+		input := "あ\nいう"
+		if got := re.MatchString(input); !got {
+			t.Errorf("MatchString(%q, %q) = false; want true", "(?s)^.*$", input)
+		}
+	})
 }
 
 func TestRegexp_FindSubmatchIndex(t *testing.T) {

@@ -3,17 +3,49 @@
 
 == Concept
 
-Many regular expressions are effectively just fixed strings (literals) or anchored literals. The `0-Pass` strategy detects these cases and bypasses the state machine entirely, delegating the search to SIMD-accelerated standard library functions like `bytes.Index`.
+Many regular expressions are effectively just fixed strings (literals) or anchored literals. The `0-Pass` strategy detects these cases and bypasses the state machine entirely, delegating the search to SIMD-accelerated standard library functions like `bytes.Index`. For more complex patterns, these same literal-bypass techniques are used as a pre-filter (**Pass 0: MAP**).
 
 == Algorithm Mechanism
 
-1. **Pattern Analysis**: During compilation, the engine identifies whether a pattern is a simple literal such as `^abc$`, `^abc`, or `abc$`.
-2. **Capture Template Generation**:
+1. **Pattern Analysis**: During compilation, the engine identifies potential literal candidates.
+2. **Selectivity Scoring**: Each candidate is assigned a score reflecting its expected throughput and rejection power (see <<Semantic Selectivity Scoring>>).
+3. **Capture Template Generation**:
    - If the expression contains capturing groups (e.g., `^(abc)$`), the engine pre-calculates the relative start and end positions of each group from the match's head.
    - This pre-calculated offset map is called a **"Capture Template."**
-3. **Execution**:
+4. **Execution**:
    - The engine uses `bytes.Index` or `bytes.HasPrefix` to locate the match.
    - On a successful match, it uses the template to generate submatch indices in $O(1)$ time by adding the match start position to the pre-calculated offsets.
+
+== Semantic Selectivity Scoring
+
+The engine selects the primary search pattern based on a semantic selectivity score calculated during construction:
+
+[latexmath]
+++++
+Score = (Length \times 10) + BoundaryBonus - ClassPenalty
+++++
+
+* **Length**: Number of bytes in the literal pattern. Longer patterns enable more efficient SIMD throughput.
+* **BoundaryBonus (+1000)**: Awarded when the pattern is explicitly joined with an anchor (`^`, `$`, `\n`) during extraction.
+* **ClassPenalty (-50)**: Applied when using character classes (`IndexClass`) instead of raw literals (`bytes.Index`).
+
+=== Theoretical Basis: Hits per Line vs. Total Hits
+
+The primary goal of the selectivity score is to minimize the number of times the engine must transition from SIMD scanning to more expensive validation phases (Gaze or DFA).
+
+Consider the pattern `(?m)HTTP/1.1$` scanning Apache log files:
+
+1. **Unanchored Literal (`HTTP/1.1`)**:
+   - In most log formats, this string appears in every single line.
+   - **Expected Hits**: $N$ (where $N$ is the number of lines).
+   - **Performance**: High SIMD throughput, but causes a "Gaze Storm" where the engine must perform a slow O(1) check at every line.
+
+2. **Anchor-Joined Literal (`1\n`)**:
+   - This pattern searches for the character `1` followed immediately by a newline.
+   - **Expected Hits**: At most one per line, but likely much lower depending on the data.
+   - **Maximum Upper Bound**: The total hit count is capped at the number of lines in the input. In many real-world cases (like log analysis), specific line-endings are far rarer than middle-of-line protocol strings.
+
+By prioritizing anchor-joined literals with the **BoundaryBonus**, the engine drastically reduces the total number of candidates, ensuring that the heavy machinery is only engaged when a match is highly probable.
 
 == Compilation-Phase Optimization (DFA Bypass)
 

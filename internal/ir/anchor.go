@@ -26,12 +26,28 @@ type Constraint struct {
 	Info     CCWarpInfo
 }
 
-// AugmentedPattern defines a search pattern that includes surrounding context.
+// CalculateSelectivity computes a score reflecting the expected throughput of a search pattern.
+// Higher scores indicate better selectivity (fewer false positives) and faster scanning.
+func CalculateSelectivity(length int, isAnchorJoined bool, hasClass bool) int {
+	score := length * 10
+	if isAnchorJoined {
+		score += 1000 // Boundary bonus for absolute or line-start anchors
+	}
+	if hasClass {
+		score -= 50
+	}
+	return score
+}
+
 type AugmentedPattern struct {
-	Pattern []byte
-	Offset  int  // Actual anchor starts at this offset in Pattern
-	IsStart bool // Only search at the very beginning of the input
-	IsEnd   bool // Only search at the very end of the input
+	Pattern     []byte
+	Selectivity int        // Pre-calculated selectivity score
+	AnchorIdx   int        // Index of the anchor this pattern belongs to
+	Class       CCWarpInfo // If non-empty, use this for validation at Offset
+	HasClass    bool
+	Offset      int  // Actual anchor starts at this offset in Pattern
+	IsStart     bool // Only search at the very beginning of the input
+	IsEnd       bool // Only search at the very end of the input
 }
 
 // AnchorInfo holds information about a potential anchor in the pattern.
@@ -392,7 +408,7 @@ func minLength(re *syntax.Regexp) int {
 	return -1
 }
 
-func ExtractConstraints(re *syntax.Regexp, anchor *AnchorInfo) {
+func ExtractConstraints(re *syntax.Regexp, anchor *AnchorInfo, anchorIdx int) {
 	flatRE := stripCaptures(re)
 	extractConstraints(flatRE, anchor)
 	if len(anchor.Backward) > 0 || len(anchor.Forward) > 0 {
@@ -413,22 +429,39 @@ func ExtractConstraints(re *syntax.Regexp, anchor *AnchorInfo) {
 		anchor.MaxDistToLineEnd = maxL
 	}
 
-	if !anchor.HasClass && len(anchor.Anchor) > 0 {
+	if anchor.HasClass {
 		if anchor.HasBeginText && anchor.Distance == 0 {
-			anchor.Augmented = append(anchor.Augmented, AugmentedPattern{Pattern: anchor.Anchor, Offset: 0, IsStart: true})
+			score := CalculateSelectivity(1, true, true)
+			anchor.Augmented = append(anchor.Augmented, AugmentedPattern{Class: anchor.Class, HasClass: true, Selectivity: score, AnchorIdx: anchorIdx, Offset: 0, IsStart: true})
+		}
+		if anchor.HasBeginLine && anchor.Distance == 0 && (re.Flags&syntax.OneLine == 0) {
+			score := CalculateSelectivity(2, true, true)
+			anchor.Augmented = append(anchor.Augmented, AugmentedPattern{Pattern: []byte{'\n'}, Class: anchor.Class, HasClass: true, Selectivity: score, AnchorIdx: anchorIdx, Offset: 1})
+			score = CalculateSelectivity(1, true, true)
+			anchor.Augmented = append(anchor.Augmented, AugmentedPattern{Class: anchor.Class, HasClass: true, Selectivity: score, AnchorIdx: anchorIdx, Offset: 0, IsStart: true})
+		}
+	} else if len(anchor.Anchor) > 0 {
+		if anchor.HasBeginText && anchor.Distance == 0 {
+			score := CalculateSelectivity(len(anchor.Anchor), true, false)
+			anchor.Augmented = append(anchor.Augmented, AugmentedPattern{Pattern: anchor.Anchor, Selectivity: score, AnchorIdx: anchorIdx, Offset: 0, IsStart: true})
 		}
 		if anchor.HasEndText && anchor.MaxDistToEnd == 0 {
-			anchor.Augmented = append(anchor.Augmented, AugmentedPattern{Pattern: anchor.Anchor, Offset: 0, IsEnd: true})
+			score := CalculateSelectivity(len(anchor.Anchor), true, false)
+			anchor.Augmented = append(anchor.Augmented, AugmentedPattern{Pattern: anchor.Anchor, Selectivity: score, AnchorIdx: anchorIdx, Offset: 0, IsEnd: true})
 		}
 		if anchor.HasBeginLine && anchor.Distance == 0 && (re.Flags&syntax.OneLine == 0) {
 			p := append([]byte{'\n'}, anchor.Anchor...)
-			anchor.Augmented = append(anchor.Augmented, AugmentedPattern{Pattern: p, Offset: 1})
-			anchor.Augmented = append(anchor.Augmented, AugmentedPattern{Pattern: anchor.Anchor, Offset: 0, IsStart: true})
+			score := CalculateSelectivity(len(p), true, false)
+			anchor.Augmented = append(anchor.Augmented, AugmentedPattern{Pattern: p, Selectivity: score, AnchorIdx: anchorIdx, Offset: 1})
+			score = CalculateSelectivity(len(anchor.Anchor), true, false)
+			anchor.Augmented = append(anchor.Augmented, AugmentedPattern{Pattern: anchor.Anchor, Selectivity: score, AnchorIdx: anchorIdx, Offset: 0, IsStart: true})
 		}
 		if anchor.HasEndLine && anchor.MaxDistToLineEnd == 0 && (re.Flags&syntax.OneLine == 0) {
 			p := append(append([]byte(nil), anchor.Anchor...), '\n')
-			anchor.Augmented = append(anchor.Augmented, AugmentedPattern{Pattern: p, Offset: 0})
-			anchor.Augmented = append(anchor.Augmented, AugmentedPattern{Pattern: anchor.Anchor, Offset: 0, IsEnd: true})
+			score := CalculateSelectivity(len(p), true, false)
+			anchor.Augmented = append(anchor.Augmented, AugmentedPattern{Pattern: p, Selectivity: score, AnchorIdx: anchorIdx, Offset: 0})
+			score = CalculateSelectivity(len(anchor.Anchor), true, false)
+			anchor.Augmented = append(anchor.Augmented, AugmentedPattern{Pattern: anchor.Anchor, Selectivity: score, AnchorIdx: anchorIdx, Offset: 0, IsEnd: true})
 		}
 	}
 
@@ -982,7 +1015,7 @@ func SelectBestAnchors(re *syntax.Regexp) []AnchorInfo {
 		anchors = anchors[:16]
 	}
 	for i := range anchors {
-		ExtractConstraints(re, &anchors[i])
+		ExtractConstraints(re, &anchors[i], i)
 	}
 	return anchors
 }
@@ -1227,98 +1260,118 @@ func (a *AnchorInfo) Score() int {
 	if !a.Mandatory || !a.IsFixed {
 		return 0
 	}
-	score := len(a.Anchor) * 10
-	if a.Distance == 0 {
-		score += 5
+	length := len(a.Anchor)
+	if a.HasClass {
+		length = 1
 	}
-	if a.IsFixed {
-		score += 50
-	}
-	if a.HasBeginText || a.HasBeginLine || a.HasEndText || a.HasEndLine {
-		score += 20
-	}
-	if a.Type == AnchorSuffix && (a.HasEndText || a.HasEndLine) {
-		score += 100
-	}
+	isAnchorJoined := a.HasBeginText || a.HasBeginLine || a.HasEndText || a.HasEndLine
+	score := CalculateSelectivity(length, isAnchorJoined, a.HasClass)
+
 	for _, aug := range a.Augmented {
-		if !aug.IsStart && !aug.IsEnd {
-			s := len(aug.Pattern) * 12
-			if s > score {
-				score = s
-			}
+		if aug.Selectivity > score {
+			score = aug.Selectivity
 		}
 	}
 	return score
 }
 
-func (a *AnchorInfo) Validate(b []byte, p int, matchStart int) (int, int, bool) {
-	newMatchStart := matchStart
+func (a *AnchorInfo) Validate(in *Input, p int) bool {
+	b := in.B
+	matchStart := p - a.Distance
+
+	// Verify Backward Constraints
 	for _, c := range a.Backward {
 		if c.IsRepeat {
 			end := p + c.Offset
-			if end < matchStart {
-				continue
+			if end < 0 {
+				return false
 			}
+			// Variable length backward check
 			switch CCWarpKernel(c.Info.Kernel) {
 			case CCWarpAnyExceptNL:
-				if idx := bytes.IndexByte(b[matchStart:end], '\n'); idx >= 0 {
-					return p, matchStart + idx + 1, false
-				}
-			case CCWarpEqual:
-				target := byte(c.Info.V0)
-				for i := matchStart; i < end; i++ {
-					if b[i] != target {
-						return p, i, false
-					}
-				}
-			case CCWarpSingleRange:
-				low, high := byte(c.Info.V0), byte(c.Info.V1)
-				for i := matchStart; i < end; i++ {
-					if v := b[i]; v < low || v > high {
-						return p, i, false
-					}
-				}
-			case CCWarpNotSingleRange:
-				low, high := byte(c.Info.V0), byte(c.Info.V1)
-				for i := matchStart; i < end; i++ {
-					if v := b[i]; v >= low && v <= high {
-						return p, i, false
-					}
+				// Ensure no \n in the skipped range
+				start := end - 1 // Minimal check, actually WarpBack should be used for full range
+				if start >= 0 && bytes.IndexByte(b[0:end], '\n') >= 0 {
+					return false
 				}
 			}
 		} else {
 			start := p + c.Offset
-			if start < matchStart {
-				return p, matchStart, false
+			if start < 0 || start+c.Length > len(b) {
+				return false
 			}
 			if !ValidateFixed(&c.Info, b[start:start+c.Length]) {
-				return p, start, false
+				return false
 			}
 		}
 	}
-	endPos := p + len(a.Anchor)
+
+	// Verify Anchor itself (Literal or Class)
 	if a.HasClass {
-		endPos = p + 1
+		if p >= len(b) || !ValidateFixed(&a.Class, b[p:p+1]) {
+			return false
+		}
+	} else {
+		if p+len(a.Anchor) > len(b) || !bytes.Equal(b[p:p+len(a.Anchor)], a.Anchor) {
+			return false
+		}
 	}
+
+	// Verify Forward Constraints
 	for _, c := range a.Forward {
 		start := p + c.Offset
-		if start > len(b) {
-			return p, newMatchStart, false
+		if start < 0 || start > len(b) {
+			return false
 		}
 		if c.IsRepeat {
-			skipped := Warp(&c.Info, b[start:])
-			endPos = start + skipped
+			// Just verify if it's possible to skip
+			// In Gaze phase, we just check O(1) properties
+			if CCWarpKernel(c.Info.Kernel) == CCWarpAnyExceptNL {
+				if start < len(b) && b[start] == '\n' {
+					return false
+				}
+			}
 		} else {
 			if start+c.Length > len(b) {
-				return p, newMatchStart, false
+				return false
 			}
 			if !ValidateFixed(&c.Info, b[start:start+c.Length]) {
-				return p, newMatchStart, false
+				return false
 			}
-			endPos = start + c.Length
 		}
 	}
-	return endPos, newMatchStart, true
+
+	// Verify Begin/End Anchors
+	if a.HasBeginText || a.HasBeginLine {
+		req := syntax.EmptyBeginText
+		if a.HasBeginLine {
+			req |= syntax.EmptyBeginLine
+		}
+		if !VerifyBegin(in, matchStart, req) {
+			return false
+		}
+	}
+	if a.HasEndText || a.HasEndLine {
+		req := syntax.EmptyEndText
+		if a.HasEndLine {
+			req |= syntax.EmptyEndLine
+		}
+		anchorLen := len(a.Anchor)
+		if a.HasClass {
+			anchorLen = 1
+		}
+		if a.MaxDistToEnd >= 0 && a.MinDistToEnd == a.MaxDistToEnd {
+			if !VerifyEnd(in, p+anchorLen+a.MaxDistToEnd, req) {
+				return false
+			}
+		} else if a.MaxDistToLineEnd >= 0 && a.MinDistToLineEnd == a.MaxDistToLineEnd {
+			if !VerifyEnd(in, p+anchorLen+a.MaxDistToLineEnd, req) {
+				return false
+			}
+		}
+	}
+
+	return true
 }
 
 func ValidateFixed(info *CCWarpInfo, b []byte) bool {
@@ -1404,6 +1457,9 @@ func Warp(info *CCWarpInfo, b []byte) int {
 	i := 0
 	switch CCWarpKernel(info.Kernel) {
 	case CCWarpAnyChar:
+		return len(b)
+	case CCWarpASCIIAny:
+		i := 0
 		n := len(b)
 		for i+8 <= n {
 			v := binary.LittleEndian.Uint64(b[i:])
@@ -1418,21 +1474,10 @@ func Warp(info *CCWarpInfo, b []byte) int {
 		return i
 	case CCWarpAnyExceptNL:
 		pos := bytes.IndexByte(b, '\n')
-		limit := len(b)
 		if pos >= 0 {
-			limit = pos
+			return pos
 		}
-		for i+8 <= limit {
-			v := binary.LittleEndian.Uint64(b[i:])
-			if (v & 0x8080808080808080) != 0 {
-				break
-			}
-			i += 8
-		}
-		for i < limit && b[i] < 0x80 {
-			i++
-		}
-		return i
+		return len(b)
 	case CCWarpEqual:
 		target := byte(info.V0)
 		target64 := splat(uint64(target))
@@ -1523,6 +1568,11 @@ func WarpBack(info *CCWarpInfo, b []byte) int {
 	switch CCWarpKernel(info.Kernel) {
 	case CCWarpAnyChar:
 		return n
+	case CCWarpASCIIAny:
+		for i < n && b[n-1-i] < 0x80 {
+			i++
+		}
+		return i
 	case CCWarpAnyExceptNL:
 		pos := bytes.LastIndexByte(b, '\n')
 		if pos < 0 {
@@ -1603,6 +1653,11 @@ func IndexClass(info *CCWarpInfo, b []byte) int {
 	switch CCWarpKernel(info.Kernel) {
 	case CCWarpAnyChar:
 		if len(b) > 0 {
+			return 0
+		}
+		return -1
+	case CCWarpASCIIAny:
+		if len(b) > 0 && b[0] < 0x80 {
 			return 0
 		}
 		return -1

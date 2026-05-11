@@ -106,27 +106,29 @@ To minimize compilation overhead, the engine MUST use an **Architectural Shortcu
 - **ASCII Restriction**: DFA construction is currently optimized for ASCII-only runes (0-127) when possible. Patterns requiring multi-byte UTF-8 support (e.g., non-ASCII runes or `.`) MUST utilize the full table-based DFA with UTF-8 handling.
 
 ### 2.10 Multi-Point Anchor & Constraint Optimization (Pass 0 - MAP)
-The engine MUST extract the most selective anchors from mandatory AST paths to minimize DFA activations.
-- **Unified MAP/DFA Construction**: To eliminate redundant AST traversals and minimize compilation latency, MAP analysis and anchor extraction MUST be integrated directly into the `ir.DFA` construction process. The resulting DFA MUST carry the optimized anchor set as metadata.
-- **LCP Factoring Mandate**: For patterns with alternations, the engine MUST identify and factor out the Longest Common Prefix (LCP) across all mandatory paths at the same fixed distance. This LCP MUST be promoted to a **Virtual Mandatory Anchor**, enabling SIMD-based string scanning (`bytes.Index`) for complex choices like `(abc|abd)`.
-- **SkipGaze Optimization**: If an anchor is fully verified by the Search phase (e.g., a factored literal) and carries no additional boundary or backward constraints, the compiler MUST mark it as **SkipGaze**. The execution loop MUST bypass Phase 2 (Gaze) for such anchors to eliminate redundant CPU cycles.
-- **Multi-Entry Point Discovery**: The engine MUST traverse **`OpAlternate`** to identify all possible entry points and categorize anchors into **Prefix** (start-anchored), **Pivot** (middle-anchored), or **Suffix** (end-anchored) candidates for EACH mandatory path (**Covering Set**).
-- **Mandatory Set Safety**: MAP utilizes the union of anchors from all alternate branches as a covering set. If any branch lacks an anchor, MAP MUST be disabled for that covering level to ensure correctness.
-- **Anchor Characteristic Preservation**: When combining anchors from `OpAlternate`, the engine MUST preserve `IsFixed` and `Distance` attributes if they are consistent across all branches, enabling precise Horizon Snapping even for complex alternations.
-- **Large-Set Efficiency**: The engine MUST support up to 256 bytes in the **`searchAny`** set and utilize a bit-parallel **`searchMask`** (`[4]uint64`) for O(1) candidate verification, ensuring that large alternations and character classes are effectively optimized.
-- **Case-Insensitive Expansion Mandate**: For literals or character classes with the `FoldCase` flag, MAP MUST expand all case variants using `unicode.SimpleFold` into a covering `EqualSet` or `Bitmask`. This ensures zero false negatives during the discovery phase.
-- **Mixed Anchor Search Mandate**: If any branch of the covering set includes start anchors (`^`, `\A`), the discovery loop MUST NOT skip the beginning of the input (pos 0) or line starts, even if literal-based filters (`searchAny`) suggest a later match. This is critical for patterns like `(^|[ ,;])`.
-- **Anchor Selection Heuristic**: Anchors MUST be selected based on a heuristic score that prioritizes length, specificity, and fixed-distance status.
-- **Line-Anchored Jump Mandate**: For non-multiline patterns, the engine MUST use **Line-Anchored Jump** to warp the search starting point directly to the beginning of the line where an anchor is found, bypassing redundant DFA transitions.
-- **Merged Newline Discovery**: To maximize throughput, the engine MUST utilize **Merged Newline Detection** within SWAR kernels to identify line boundaries and pattern anchors in a single pass.
-- **Mandatory & Fixed-Distance Safety**: Exclusive skipping (jumping `restartBase`) MUST be restricted to anchors that are both **Mandatory** for the whole pattern and have a **Fixed Distance** from the match start to guarantee leftmost-longest correctness.
-- **Capture Transparency**: Anchor extraction MUST be **Capture-Stripped**—ignoring `OpCapture` boundaries to merge adjacent literals into longer anchors.
-- **SIMD/SWAR Discovery**: Use SIMD (`bytes.Index`, `bytes.IndexAny`) for literals and SWAR (`IndexClass`) for character classes.
-- **Separation of Concerns (Search vs. Match)**: MAP is responsible for **Searching** (finding match start candidates). DFA is responsible for **Validation** (Anchored matching from the candidate position).
-- **Forward/Backward Constraint Guard**: Once an anchor candidate is found, validate surrounding character constraints (fixed-length or dynamic warps) using path-specific SWAR kernels before starting the DFA.
-- **Zero-Width Assertion Transparency**: Anchor extraction MUST skip past zero-width assertions (e.g., `^`, `$`, `\b`) to identify the most selective literal anchor in a mandatory path.
-- **Boundary-Aware MAP**: Word boundaries (`\b`, `\B`) are supported by MAP by utilizing the Absolute Coordinate Context for safe verification at candidate positions.
-- **Nullable-Safe Anchor Accumulation**: Anchor extraction MUST accumulate candidates from nullable elements in a concatenation (e.g., `(^|[ ,;])`). Such anchors MUST be marked as non-mandatory to ensure they act as search hints without incorrectly blocking matches.
+The engine MUST extract the most selective anchors and surrounding constraints to minimize DFA activations.
+- **Unified MAP/DFA Construction**: MAP analysis and anchor extraction are integrated into `ir.DFA` construction.
+- **Selectivity Scoring (Compile-time Evaluation)**: The engine MUST select the `primaryAugmented` pattern based on a semantic selectivity score calculated during construction:
+    $$Score = (Length \times 10) + BoundaryBonus - ClassPenalty$$
+    - **Length**: Number of bytes in the literal pattern (reflects SIMD throughput).
+    - **BoundaryBonus (+100)**: Awarded when the pattern is explicitly joined with an anchor (`^`, `$`, `\n`) during extraction.
+    - **ClassPenalty (-50)**: Applied when using character classes (`IndexClass`) instead of raw literals (`bytes.Index`).
+- **Strict Gaze (Constraint Propagation) Mandate**: Before activating the DFA (Pass 1), the discovery loop MUST verify all $O(1)$ constraints (fixed-distance literals, character classes, and dots) using `anchor.Validate`. If validation fails, the engine MUST resume SIMD scanning immediately without starting the DFA. This "Gatekeeper" role is critical for patterns like `(?m)^127.0.0.1` where false positives (newlines) are frequent.
+- **Augmented Pattern Discovery**: To maximize SIMD throughput for multiline anchors, the engine MUST utilize **Augmented Patterns** (e.g., `\nLITERAL` for `(?m)^LITERAL`). 
+    - **Pos 0 Safety**: Since `\nLITERAL` does not match the very beginning of the input, the discovery loop MUST perform an explicit $O(1)$ check (e.g., `bytes.HasPrefix`) for `pos 0` before entering the SIMD loop.
+- **Dot (.) Constraint Mandate**: Dots MUST NOT be treated as simple literals. They are $O(1)$ constraints:
+    - **(?s) Off**: Must verify the byte is not `\n`.
+    - **(?s) On**: Must verify the byte is a valid UTF-8 unit.
+    - These checks MUST be performed during the Gaze phase using specialized SWAR kernels (e.g., `CCWarpAnyExceptNL`).
+- **SkipGaze Promotion**: If an anchor and its surrounding constraints are fully verified during Pass 0 (Search + Gaze), the DFA MUST bypass redundant anchor verification for the match-start position.
+- **Line-Anchored Jump Mandate**: For non-multiline patterns, warp the search starting point directly to the beginning of the line where an anchor is found.
+- **Merged Newline Discovery**: Utilize SWAR kernels to identify line boundaries and pattern triggers in a single pass.
+- **Mandatory & Fixed-Distance Safety**: Exclusive skipping is restricted to anchors that are both **Mandatory** and have a **Fixed Distance**.
+- **Capture Transparency**: Anchor extraction ignores `OpCapture` boundaries to merge adjacent literals.
+- **Case-Insensitive Expansion**: Expand `FoldCase` literals into covering sets for discovery.
+- **Mixed Anchor Search**: If any branch includes start anchors, do not skip pos 0 or line starts.
+- **Boundary-Aware MAP**: Support `\b` using Absolute Coordinate Context validation.
+- **Nullable-Safe Protection**: Disable MAP if `minLength == 0` to prevent missing matches.
 
 ### 2.11 Pure Go (No CGO)
 - **Zero Overhead**: Native Go only. CGO is strictly prohibited.

@@ -35,6 +35,7 @@ const (
 	CCWarpSingleRange
 	CCWarpNotSingleRange
 	CCWarpAnyChar
+	CCWarpASCIIAny
 	CCWarpAnyExceptNL
 	CCWarpNotEqual
 	CCWarpNotEqualSet
