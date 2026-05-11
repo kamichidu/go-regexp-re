@@ -39,7 +39,19 @@ func VerifyEnd(in *Input, i int, req syntax.EmptyOp) bool {
 	if absPos == in.TotalBytes {
 		return true
 	}
-	return (req&syntax.EmptyEndLine) != 0 && absPos < in.TotalBytes && in.OriginalB[absPos] == '\n'
+	if (req & syntax.EmptyEndText) != 0 {
+		// $ matches at EOF or before a newline at EOF
+		if absPos == in.TotalBytes-1 && in.OriginalB[absPos] == '\n' {
+			return true
+		}
+	}
+	if (req & syntax.EmptyEndLine) != 0 {
+		// multiline $ matches at EOF or before any newline
+		if absPos == in.TotalBytes || (absPos < in.TotalBytes && in.OriginalB[absPos] == '\n') {
+			return true
+		}
+	}
+	return false
 }
 
 // VerifyWord checks for \b and \B anchors using absolute context.

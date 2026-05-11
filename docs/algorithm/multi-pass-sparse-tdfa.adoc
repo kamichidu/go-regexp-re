@@ -12,7 +12,9 @@ The engine selects the most efficient execution path based on pattern complexity
 === Pass 0: Heuristic Warp (SIMD Prefilter)
 *   **Objective**: Rapidly eliminate large segments of the input that cannot possibly contain a match.
 *   **Mechanism**: Uses SIMD-accelerated standard library functions (`bytes.Index`, `bytes.IndexByte`) or custom **SWAR (SIMD Within A Register)** character class filters.
-*   **Outcome**: Jumps directly to a potential match candidate position, bypassing the DFA execution for "noise" bytes.
+*   **Strict Gaze (MAP-DFA Handover)**: Before activating the DFA, Pass 0 performs a **Strict Gaze** check. It verifies all fixed-distance $O(1)$ constraints (dots, character classes, and anchors) using `anchor.Validate`. If validation fails, the engine resumes SIMD scanning immediately, bypassing the DFA.
+*   **End of Input Safety**: To capture matches at the absolute end of the buffer (where newline-joined search hints like `1\n` fail), Pass 0 performs a one-time $O(1)$ check at the EOF boundary.
+*   **Outcome**: A candidate match start position that has already passed all constant-time structural checks.
 
 === Pass 1: Boundary Discovery (Searching DFA)
 *   **Objective**: Determine the exact match end position and the winning priority in $O(n)$.

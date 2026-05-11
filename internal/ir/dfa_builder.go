@@ -81,7 +81,7 @@ func NewDFAWithMemoryLimit(ctx context.Context, re *syntax.Regexp, prog *syntax.
 				}
 			}
 			if allSameDist && len(common) > 1 {
-				d.mapAnchors = append(d.mapAnchors, AnchorInfo{
+				newAnchor := AnchorInfo{
 					Anchor:       common,
 					Distance:     commonDist,
 					Mandatory:    true,
@@ -92,10 +92,11 @@ func NewDFAWithMemoryLimit(ctx context.Context, re *syntax.Regexp, prog *syntax.
 					HasEndText:   hasEndText,
 					HasEndLine:   hasEndLine,
 					SkipGaze:     true,
-				})
+				}
+				ExtractConstraints(re, &newAnchor, len(d.mapAnchors))
+				d.mapAnchors = append(d.mapAnchors, newAnchor)
 			}
 		}
-
 		bestIdx := -1
 		maxScore := -1
 		for i := range d.mapAnchors {
@@ -399,10 +400,36 @@ func NewDFAWithMemoryLimit(ctx context.Context, re *syntax.Regexp, prog *syntax.
 		}
 
 		if count == 0 {
+			// Check if any non-ASCII bytes self-loop
+			fullCount := 0
+			for b := 0; b < 256; b++ {
+				idx := (i << 8) | b
+				if idx < len(d.transitions) && (d.transitions[idx]&StateIDMask) == uint32(i) {
+					fullCount++
+				}
+			}
+			if fullCount == 256 {
+				d.ccWarpTable[i] = CCWarpInfo{Kernel: uint8(CCWarpAnyChar)}
+			}
 			continue
 		}
 		if count == 128 {
-			d.ccWarpTable[i] = CCWarpInfo{Kernel: uint8(CCWarpAnyChar)}
+			// Check if all 256 bytes self-loop
+			all256 := true
+			for b := 128; b < 256; b++ {
+				idx := (i << 8) | b
+				if idx >= len(d.transitions) || (d.transitions[idx]&StateIDMask) != uint32(i) {
+					all256 = false
+					break
+				}
+			}
+			if all256 {
+				d.ccWarpTable[i] = CCWarpInfo{Kernel: uint8(CCWarpAnyChar)}
+			} else {
+				d.ccWarpTable[i] = CCWarpInfo{Kernel: uint8(CCWarpASCIIAny)}
+			}
+		} else if count == 127 && !selfLoops['\n'] {
+			d.ccWarpTable[i] = CCWarpInfo{Kernel: uint8(CCWarpAnyExceptNL)}
 		} else {
 			low, high := -1, -1
 			isSingleRange := true
@@ -485,15 +512,29 @@ func NewDFAWithMemoryLimit(ctx context.Context, re *syntax.Regexp, prog *syntax.
 					V1:     uint32(high),
 				}
 			}
+		} else if searchCount > 0 {
+			mask := make([]uint64, 4)
+			copy(mask, firstBytes[:])
+			d.searchWarp = CCWarpInfo{
+				Kernel: uint8(CCWarpBitmask),
+				Extra:  &mask,
+			}
 		}
 	}
 
 	// Select optimal search strategy
-	if d.primaryAnchor != nil && len(d.primaryAnchor.Anchor) >= 3 && d.primaryAnchor.IsFixed {
-		d.searchStrategy = SearchStrategyLiteral
-	} else if CCWarpKernel(d.searchWarp.Kernel) != CCWarpNone {
+	if d.primaryAnchor != nil && d.primaryAnchor.IsFixed {
+		score := d.primaryAnchor.Score()
+		// Threshold: A score of 30 means unanchored 3-byte literal (3*10)
+		// Or any anchored literal (minimum score 110 for 1-byte + boundary bonus)
+		if score >= 30 {
+			d.searchStrategy = SearchStrategyLiteral
+		}
+	}
+	if d.searchStrategy == SearchStrategyNone && CCWarpKernel(d.searchWarp.Kernel) != CCWarpNone {
 		d.searchStrategy = SearchStrategySearchWarp
-	} else if d.searchDFA != nil {
+	}
+	if d.searchStrategy == SearchStrategyNone && d.searchDFA != nil {
 		// Only use sDFA if it's more complex than a single byte search
 		isComplex := false
 		startState := d.searchDFA.StartState
@@ -510,11 +551,7 @@ func NewDFAWithMemoryLimit(ctx context.Context, re *syntax.Regexp, prog *syntax.
 
 		if isComplex {
 			d.searchStrategy = SearchStrategySDFA
-		} else {
-			d.searchStrategy = SearchStrategyNone
 		}
-	} else {
-		d.searchStrategy = SearchStrategyNone
 	}
 
 	return d, nil

@@ -23,19 +23,26 @@ The engine analyzes the optimized AST to identify the most "selective" literal o
 To maximize SIMD efficiency, MAP "augments" literal anchors with adjacent structural constraints during compilation. This merges two separate checks into a single `bytes.Index` call.
 
 - **Line-Start Augmentation**: `(?m)^Rare` becomes the search pattern `"\nRare"`. The engine also performs a one-time check at buffer index 0 for `"Rare"`.
-- **Line-End Augmentation**: `(?m)Rare$` becomes the search pattern `"Rare\n"`. The engine also performs a one-time check at buffer EOF for `"Rare"`.
-- **Fused Suffix Search**: For patterns like `HTTP/1.1$`, the engine prioritizes searching for `"1\n"` (in multiline) or `"1"` at `EOF-1` (in single-line) rather than searching for the prefix `"HTTP/1"`.
+- **Line-End Augmentation**: `(?m)Rare$` becomes the search pattern `"Rare\n"`.
+- **Fused Suffix Search**: For patterns like `HTTP/1.1$`, the engine prioritizes searching for `"1\n"` (in multiline) or `"1"` at `EOF-1` (in single-line) if it provides higher selectivity.
+- **End of Input Safety**: When using newline-joined augmented patterns (e.g., `Rare\n`), the discovery loop explicitly checks the `EOF` boundary to ensure matches at the very end of the buffer are not missed.
 
 === B. LCP Factoring (Alternation Optimization)
 To optimize alternations with common prefixes, MAP employs **Longest Common Prefix (LCP) Factoring**.
 - **Mechanism**: If all branches of an alternation share a common literal prefix at the same fixed distance (e.g., `fo` in `(fo|foo)`), the engine factors out this prefix and promotes it to a **Virtual Mandatory Anchor**.
 - **Performance Impact**: This transforms a low-selectivity single-byte search (`IndexByte('f')`) into a high-selectivity string search (`bytes.Index("fo")`), significantly reducing DFA activations and false positives.
 
-=== C. Anchor Selection Criteria (Structural Density)
-The engine selects a single **Primary Iterator** based on the "Structural Density" of the augmented patterns:
-- **Literal Score**: 10 points per character.
-- **Boundary Bonus**: +20 for `^`/`$` (Text boundaries), +15 for `(?m)^`/`(?m)$` (Line boundaries).
-- **Specificity Score**: Higher for rare classes or multi-literal sequences.
+=== C. Anchor Selection Criteria (Semantic Selectivity)
+The engine selects a single **Primary Iterator** based on the semantic selectivity score calculated during construction:
+
+[latexmath]
+++++
+Score = (Length \times 10) + BoundaryBonus - ClassPenalty
+++++
+
+- **Length**: 10 points per character (SIMD throughput).
+- **BoundaryBonus (+1000)**: Awarded when the pattern is explicitly joined with an anchor (`^`, `$`, `\n`) during extraction. This reflects the drastic reduction in expected hits (max 1 hit per line).
+- **ClassPenalty (-50)**: Deducted for using character classes (`IndexClass`) instead of literals.
 
 === C. Support for Alternation (Covering Set)
 MAP identifies a **Covering Set** of anchors that represent all possible execution paths. If a pattern has alternations (e.g., `apple|banana`), the engine ensures that at least one selective anchor is tracked for every branch.
@@ -66,17 +73,22 @@ To ensure 100% compatibility with standard regular expression semantics, MAP adh
 - **Capture Transparency**: Anchor extraction uses **Capture Stripping** to ignore `OpCapture` boundaries, merging adjacent literals into longer, more efficient anchors (e.g., `abc(def)ghi` -> `abcdefghi`).
 - **Anchor Context Awareness**: Anchors tied to `^` (BeginText) are validated only at index 0, while Pivot anchors search the entire buffer.
 
+=== D. Bit-Parallel Candidate Discovery (SWAR Bitmask)
+For patterns with a very large number of alternatives (e.g., 10,000 postal codes) that lack a common prefix, MAP employs **Bit-Parallel Candidate Discovery**.
+- **Mechanism**: The engine aggregates the first byte of every alternative into a single 256-bit mask. This mask is then processed by a specialized **SWAR Bitmask Kernel** in the Search phase.
+- **Efficiency**: Instead of executing $N$ separate searches or invoking the DFA at every byte, the engine identifies potential match starts 8 bytes at a time using bitwise operations.
+- **Throughput**: This enables the engine to maintainスループット exceeding **30 GB/s** even for extremely complex alternations, effectively turning the Search phase into a high-speed memory scan.
+
 == 3. Lightweight Unified Propagator (Pass 0)
 
 Once the Primary Iterator identifies a candidate position `P`, the engine enters the **Lightweight Unified Propagator** phase. The goal of Pass 0 is not exhaustive validation, but **high-confidence rejection of false positives** using constant-time (O(1)) operations.
 
-=== A. O(1) Pruning Constraints
-The propagator only executes checks that are significantly cheaper than a few DFA steps:
+=== A. O(1) Pruning Constraints (Strict Gaze)
+The propagator executes **Strict Gaze** checks using `anchor.Validate`. This acts as a final gatekeeper before starting the state machine:
 
-- **SkipGaze Optimization**: To eliminate redundant verification, the compiler identifies anchors that are "Self-Verifying"—meaning their content is fully guaranteed by the Search phase (SIMD/SWAR) and they possess no surrounding boundary or distance constraints. Such anchors bypass the Gaze phase entirely.
-- **Boundary Distance Verification**: If anchored to `$`, verify if the remaining buffer length is within the expected range `[MinDist, MaxDist]`.
-- **Structural Boundary Check**: Verify if `P` is preceded/followed by `\n` if the pattern is line-anchored.
-- **Single-Point Literal Check**: If the pattern has other mandatory literal points, verify a single byte or short prefix at a fixed offset from `P`.
+- **SkipGaze Optimization**: To eliminate redundant verification, the compiler identifies anchors that are "Self-Verifying"—meaning their content is fully guaranteed by the Search phase (SIMD/SWAR) and they possess no surrounding boundary or distance constraints.
+- **Boundary Verification**: Verify if `P` correctly corresponds to a text start, line start, text end, or line end as required by the anchor.
+- **Fixed-Distance Constraints**: Verify multiple mandatory literal points or character classes (e.g., dots) at fixed offsets from `P`. **Crucially, dots are validated as O(1) character constraints (e.g., non-newline) rather than being ignored.**
 
 === C. Searching DFA (sDFA) - Multi-byte Pre-filtering
 To further bridge the gap between high-speed SIMD search and heavy DFA execution, MAP utilizes a **Searching DFA (sDFA)**.
@@ -86,14 +98,14 @@ To further bridge the gap between high-speed SIMD search and heavy DFA execution
     2.  **DFA Verification**: Once a trigger is found, the engine runs the sDFA strictly over the following bytes. If the sDFA confirms the sequence (reaches an **Accepting State**), the candidate is promoted to the Primary DFA.
 - **High-Confidence Rejection**: If the sDFA reaches a **Dead State**, the candidate is immediately rejected, and the engine resumes the SIMD skip from the next byte. This keeps the Primary DFA's state space clean and ensures that heavy state machine activation only occurs for high-probability candidates.
 
-=== D. Early Handover Principle
-To avoid the "validation bottleneck," MAP defers all complex verification to the DFA (Pass 1):
+=== D. The Gatekeeper Principle
+To maximize throughput, Pass 0 must prevent the DFA from starting unless a match is highly likely:
 
-- **No Variable-Length Skips**: Variable-length constraints (`.*`, `a+`) are never validated in Pass 0.
-- **No Multi-Byte Loops**: Large literal sequences or complex character classes are left for the DFA's optimized transition loop.
-- **Early DFA Activation**: If O(1) structural requirements are met, the engine immediately hands over control to the DFA. Since the DFA is a highly optimized state machine, it will naturally reject mismatches within its first few cycles with minimal overhead.
+- **O(1) Everything**: All checks in Pass 0 (Gaze) must be constant-time relative to the buffer size.
+- **Total Constraint Satisfaction**: The DFA is ONLY activated if all extracted O(1) constraints are satisfied. For example, in `(?m)^127.0.0.1`, finding `\n` is not enough; the engine verifies `127.0.0.1` and the next newline/EOF before handing over to Pass 1.
+- **Direct DFA Rejection**: If the DFA is activated but fails immediately, the engine resumes the SIMD scan without restarting from the beginning of the line, minimizing re-scanning overhead.
 
-This balanced approach ensures that Pass 0 remains a fast filter rather than a secondary execution engine.
+This integrated Search+Gaze strategy ensures that the state machine overhead is only incurred for legitimate candidates.
 
 === B. Candidate Snapping (Backward Propagation)
 When an anchor is discovered at position `P`, the engine must determine the correct starting position (`restartBase`) for the DFA to ensure **leftmost-longest** match semantics.

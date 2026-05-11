@@ -19,6 +19,7 @@ The match boundaries `[start, end]` (indices 0 and 1) MUST strictly match the st
 
 - **Greedy/Non-greedy**: Must respect the leftmost-first rule.
 - **Anchors**: Must correctly respect `^`, `$`, and `\b` (ASCII-only).
+  - **Standard $ Behavior**: In alignment with Go's `regexp`, the `$` anchor matches at the very end of the input (EOF) **or** immediately before a newline at the very end of the input.
 - **UTF-8 Boundaries**: Must handle multi-byte characters correctly (refer to `docs/algorithm/multibyte-warp-optimization.adoc`).
 
 === Tier 2: Submatch Boundary Precision (Best Effort)

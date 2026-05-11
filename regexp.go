@@ -200,15 +200,25 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 			}
 
 			// 2. Select the best Augmented pattern as primaryAugmented.
-		outer:
+			var bestAug *ir.AugmentedPattern
+			var bestAnchor *ir.AnchorInfo
+			bestScore := -1
 			for i := range res.mapAnchors {
+				if !res.mapAnchors[i].IsFixed {
+					continue
+				}
 				for j := range res.mapAnchors[i].Augmented {
 					aug := &res.mapAnchors[i].Augmented[j]
-					if !aug.IsStart && !aug.IsEnd {
-						res.primaryAugmented = aug
-						break outer
+					if aug.Selectivity > bestScore {
+						bestScore = aug.Selectivity
+						bestAug = aug
+						bestAnchor = &res.mapAnchors[i]
 					}
 				}
+			}
+			res.primaryAugmented = bestAug
+			if bestAnchor != nil {
+				res.primaryAnchor = bestAnchor
 			}
 		}
 	}
