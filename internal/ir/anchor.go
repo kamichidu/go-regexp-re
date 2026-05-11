@@ -1657,8 +1657,11 @@ func IndexClass(info *CCWarpInfo, b []byte) int {
 		}
 		return -1
 	case CCWarpASCIIAny:
-		if len(b) > 0 && b[0] < 0x80 {
-			return 0
+		for i < len(b) {
+			if b[i] < 0x80 || (includeNL && b[i] == '\n') {
+				return i
+			}
+			i++
 		}
 		return -1
 	case CCWarpAnyExceptNL:
@@ -1718,6 +1721,7 @@ func IndexClass(info *CCWarpInfo, b []byte) int {
 				return i
 			}
 		}
+		return -1
 	case CCWarpNotSingleRange:
 		low, high := byte(info.V0), byte(info.V1)
 		for i < len(b) {
@@ -1746,7 +1750,10 @@ func IndexClass(info *CCWarpInfo, b []byte) int {
 
 	case CCWarpNotEqualSet:
 		if info.Extra == nil {
-			return 0
+			if len(b) > 0 {
+				return 0
+			}
+			return -1
 		}
 		for i < len(b) {
 			target := b[i]
@@ -1762,6 +1769,36 @@ func IndexClass(info *CCWarpInfo, b []byte) int {
 			}
 			i++
 		}
+		return -1
+	case CCWarpBitmask:
+		if info.Extra == nil {
+			return -1
+		}
+		mask := *info.Extra
+		for i < len(b) {
+			target := b[i]
+			if (mask[target/64]&(1<<(target%64))) != 0 || (includeNL && target == '\n') {
+				return i
+			}
+			i++
+		}
+		return -1
+	case CCWarpNotBitmask:
+		if info.Extra == nil {
+			if len(b) > 0 {
+				return 0
+			}
+			return -1
+		}
+		mask := *info.Extra
+		for i < len(b) {
+			target := b[i]
+			if (mask[target/64]&(1<<(target%64))) == 0 || (includeNL && target == '\n') {
+				return i
+			}
+			i++
+		}
+		return -1
 	}
 	return -1
 }

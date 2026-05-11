@@ -512,6 +512,13 @@ func NewDFAWithMemoryLimit(ctx context.Context, re *syntax.Regexp, prog *syntax.
 					V1:     uint32(high),
 				}
 			}
+		} else if searchCount > 0 {
+			mask := make([]uint64, 4)
+			copy(mask, firstBytes[:])
+			d.searchWarp = CCWarpInfo{
+				Kernel: uint8(CCWarpBitmask),
+				Extra:  &mask,
+			}
 		}
 	}
 
@@ -523,9 +530,11 @@ func NewDFAWithMemoryLimit(ctx context.Context, re *syntax.Regexp, prog *syntax.
 		if score >= 30 {
 			d.searchStrategy = SearchStrategyLiteral
 		}
-	} else if CCWarpKernel(d.searchWarp.Kernel) != CCWarpNone {
+	}
+	if d.searchStrategy == SearchStrategyNone && CCWarpKernel(d.searchWarp.Kernel) != CCWarpNone {
 		d.searchStrategy = SearchStrategySearchWarp
-	} else if d.searchDFA != nil {
+	}
+	if d.searchStrategy == SearchStrategyNone && d.searchDFA != nil {
 		// Only use sDFA if it's more complex than a single byte search
 		isComplex := false
 		startState := d.searchDFA.StartState
@@ -542,11 +551,7 @@ func NewDFAWithMemoryLimit(ctx context.Context, re *syntax.Regexp, prog *syntax.
 
 		if isComplex {
 			d.searchStrategy = SearchStrategySDFA
-		} else {
-			d.searchStrategy = SearchStrategyNone
 		}
-	} else {
-		d.searchStrategy = SearchStrategyNone
 	}
 
 	return d, nil
