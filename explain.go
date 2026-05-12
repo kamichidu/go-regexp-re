@@ -112,7 +112,7 @@ func (re *Regexp) Explain() string {
 			}
 		},
 	})
-	
+
 	tmpl, err := tmpl.ParseFS(explainAssets, "cmd/regexp-re-explain/assets/explain-view.tmpl")
 	if err != nil {
 		return fmt.Sprintf("Error parsing template: %v", err)
@@ -204,8 +204,8 @@ func (re *Regexp) getExplainViewData() explainViewData {
 			warpDetail = fmt.Sprintf("Available (Trigger: %s)", explainCCWarp(&re.searchWarp))
 		}
 		p0.Strategies = append(p0.Strategies, strategyData{
-			Name: "SearchWarp (SWAR)",
-			Detail: warpDetail,
+			Name:     "SearchWarp (SWAR)",
+			Detail:   warpDetail,
 			Selected: selected == ir.SearchStrategySearchWarp,
 		})
 
@@ -274,7 +274,7 @@ func (re *Regexp) getExplainViewData() explainViewData {
 		{S: "Low   ", L: "Low   ", Fitness: "Sub-optimal"},
 		{S: "High  ", L: "Low   ", Fitness: "Poor"},
 	}
-	
+
 	foundMatch := false
 	for i := range logics {
 		if strings.TrimSpace(logics[i].S) == sLevel && strings.TrimSpace(logics[i].L) == lLevel {
