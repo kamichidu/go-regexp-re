@@ -181,19 +181,19 @@ To achieve the $O(n)$ physical throughput goal, the engine MUST implement a hier
 - **Physical Throughput Baseline**: The engine MUST aim for a baseline throughput of 3-5 GB/s for simple repetitions (`a+`, `.*`, `[0-9]+`) and 0.5-1 GB/s for disjoint sets on modern x86/ARM hardware.
 
 ### 2.21 MAP Correctness & Safety Mandate
-To maintain 100% compatibility, MAP MUST adhere to safety constraints:
+To maintain high API compatibility, MAP MUST adhere to safety constraints:
 - **Nullable Pattern Protection**: If a pattern can match an empty string (`minLength == 0`), Pass 0 (MAP rejection) MUST be **disabled** to prevent missing matches.
 - **Contextual Anchor Support**: Context-dependent anchors including line boundaries (`^`, `$`) and word boundaries (`\b`, `\B`) are supported by MAP using Absolute Coordinate Context validation. MAP is only disabled if safe validation is physically impossible for a specific pattern structure.
 - **FindAll Advancement Rule**: The `FindAll` loop MUST skip redundant empty matches at the same position and advance exactly one rune (not one byte) to avoid infinite loops and ensure standard library parity.
 
 #### 2.22 Absolute Coordinate Context Propagation (Mandate)
-To ensure 100% accurate anchor verification and submatch extraction regardless of the internal scan's starting point, the engine MUST propagate an **Absolute Coordinate Context** via the `ir.Input` structure.
+To ensure accurate anchor verification and submatch extraction regardless of the internal scan's starting point, the engine MUST propagate an **Absolute Coordinate Context** via the `ir.Input` structure.
 - **Virtual Slicing (Allocation Exclusion)**: `ir.Input` MUST hold the full, original byte slice (`OriginalB`) to act as a zero-allocation alternative to repeated slice truncations.
 - **Relative-Coordinate Hot Loops**: Internal execution loops MUST maintain a **Relative Coordinate System**. Loop variables (`i`), priority (`prio`), and internal capture indices MUST be 0-based relative to the start of the current virtual slice (`in.AbsPos`). This ensures that absolute coordinate addition is excluded from the $O(1)$ hot path.
 - **Zero-Ambiguity Contextual Anchors**: `VerifyBegin`, `VerifyEnd`, and `VerifyWord (\b)` MUST use `(in.AbsPos + i)` to index into `in.OriginalB`. This allows accurate boundary assessment even when the virtual slice starts in the middle of a word or line.
 - **Unified Discovery/Propagator Integration**: Pass 0 (MAP) MUST utilize the same absolute context to perform Search/Gaze/Snap operations, ensuring that identified candidates are globally valid before starting the DFA.
 - **Exit-Only Absolute Conversion**: Conversion from relative to absolute coordinates (e.g., `regs[i] += in.AbsPos`) MUST be performed **exactly once** at the public API boundary before returning results to the caller.
-- **Encapsulation**: This absolute coordinate system is an internal architectural detail. Public APIs MUST continue to provide standard, buffer-relative indices (0-based from the provided slice) to maintain 100% compatibility with Go's `regexp` package.
+- **Encapsulation**: This absolute coordinate system is an internal architectural detail. Public APIs MUST continue to provide standard, buffer-relative indices (0-based from the provided slice) to maintain high API compatibility with Go's `regexp` package.
 
 
 ## 3. Feature Selection Policy
@@ -225,7 +225,7 @@ Every implementation must adhere to the **xref:docs/api-stability.adoc[API Stabi
     - **Engine Limitation**: If the engine rejects a pattern that is valid in standard `regexp` (returning an `UnsupportedError`), it MUST be treated as a **SKIP** (Acknowledged Limitation).
     - **Unexpected Error**: Any other compilation failure MUST be treated as a **FAIL**.
 - **Memory Accumulation Prevention**: Dispose of compiled `Regexp` objects promptly during mass testing.
-- **100% DFA Validation**: DFA match boundaries MUST strictly match the standard library's boundaries except where documented (e.g., Dot behavior).
+- **High-Fidelity DFA Validation**: DFA match boundaries MUST strictly match the standard library's boundaries except where documented (e.g., Dot behavior).
 
 ### 4.1 Throughput-Oriented Benchmarking
 To minimize environmental noise and provide a flat evaluation of engine performance, the project employs a **Throughput-Oriented Benchmarking** strategy.

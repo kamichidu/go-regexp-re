@@ -163,7 +163,7 @@ To maintain a focused, high-performance execution model, the following Go `regex
 1. **Strict Structural Validation**: Certain patterns are rejected at compile-time with `regexp.UnsupportedError` to **preserve DFA determinacy** and guarantee $O(n)$ performance. Refer to the **xref:docs/compatibility-policy.adoc[Compatibility Policy]** for details and examples.
    - **Epsilon Loops**: e.g., `(|a)*`, `(a?)*`.
    - **Ambiguous Captures**: e.g., `(a|)`, `(a*)?`.
-2. **Submatch Precision**: While overall match boundaries (indices 0 and 1) are 100% compliant, internal submatch boundaries for highly ambiguous patterns (e.g., `a*(a)`) may occasionally deviate.
+2. **Submatch Precision**: While overall match boundaries (indices 0 and 1) are strictly compliant, internal submatch boundaries for highly ambiguous patterns (e.g., `a*(a)`) may occasionally deviate.
 3. **Byte-Level Matching**: The engine operates on raw bytes. While it correctly handles UTF-8 boundaries, it does not support `\uFFFD` replacement semantics for invalid UTF-8 sequences to maintain maximum throughput.
 
 == Implementation Details
