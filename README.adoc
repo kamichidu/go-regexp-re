@@ -10,36 +10,42 @@ image:https://img.shields.io/github/license/kamichidu/go-regexp-re["License", li
 
 [IMPORTANT]
 ====
-This project is in **Beta**. Architectural changes and bug fixes are ongoing. Use in production environments should be evaluated accordingly.
+This project is in **active development (Beta)**. Interfaces and internal architecture may evolve.
+It is **NOT** a full replacement for the Go standard `regexp` package; it targets a deterministic subset optimized for strictly $O(n)$ execution.
 ====
 
-go-regexp-re is a pure Go byte-oriented DFA regex engine. It is designed for extreme throughput and Core API Subset Compatibility for a deterministic feature subset, maintaining strictly $O(n)$ time complexity.
+go-regexp-re is a pure Go byte-oriented DFA regex engine. It is designed for extreme throughput and Core API Subset Compatibility for a deterministic feature subset.
+
+== Core Value
+
+This engine is optimized for:
+
+- **Deterministic $O(n)$ regex execution** for supported pattern classes.
+- **Zero-backtracking matching guarantees**, eliminating ReDoS vulnerabilities.
+- **Compile-time optimized execution planning** to minimize runtime overhead.
+- **High-throughput byte-level scanning** for long-lived regex workloads.
 
 == Technical Characteristics
 
-* **Pure Go (No CGO, No Assembly)**: Implementation is written entirely in native Go. It achieves extreme performance through manual loop monomorphization and compiler-friendly optimizations, avoiding architecture-specific assembly code and CGO overhead for maximum portability and maintainability.
+* **Pure Go (No CGO, No Assembly)**: Implementation is written entirely in native Go. Extreme performance is achieved through compiler-friendly loop structures and runtime-safe bitwise/SWAR-style operations expressed in Go, avoiding the portability and maintenance costs of CGO or assembly.
 * **Byte-Oriented Scanning**: Input is processed as a raw byte sequence (`[]byte`) to avoid the overhead of UTF-8 rune decoding and maximize CPU pipeline efficiency.
 * **Deterministic Finite Automaton (DFA)**: Patterns are converted into deterministic transition tables to ensure constant-time processing per input byte.
 * **Execution Transparency**: Built-in introspection capabilities via `Regexp.Explain()` and the `regexp-re-explain` tool, providing detailed visibility into compilation decisions and execution plans.
-* **API Subset Compatibility**: High-fidelity parity with the core interface of the standard `regexp` package for supported deterministic patterns. It guarantees 100% match boundary integrity (indices 0 and 1) for all non-rejected expressions.
+* **API Subset Compatibility**: High-fidelity parity with the core interface of the standard `regexp` package for supported deterministic pattern classes. It guarantees 100% correctness for full match boundaries (indices 0 and 1). Submatch boundaries (indices 2+) are provided on a best-effort basis for ambiguous constructs.
 
 == Performance Model
 
-The engine achieves high throughput by offloading computation to the compilation phase and utilizing SIMD/bit-parallel execution paths. This performance model is optimized for long-lived regex objects where the construction cost is amortized over many execution cycles.
+The engine achieves high throughput by offloading computation to the compilation phase and utilizing bit-parallel execution paths. This model is optimized for long-lived regex objects where the construction cost is amortized over millions of execution cycles.
 
-== Architectural Implementation
+== Execution Strategies
 
-The engine employs a modular architecture designed to separate the compilation phase from the high-performance execution phase.
+The engine dynamically selects the most efficient path based on pattern characteristics:
 
-1. **Compilation Layer**: Managed within `internal/ir/`. This layer handles state space exploration, NFA to DFA conversion (Subset Construction), and transition table generation.
-2. **Execution Layer (Runtime)**: Located in the root package. It utilizes manually monomorphized hot-loops to achieve zero-overhead matching, selecting the most efficient kernel based on pattern characteristics.
-3. **AST Optimization**: Managed within `syntax/`. Performs project-specific simplifications and optimizations before the pattern is compiled into an intermediate representation.
+1. **Literal Bypass (Fast Path)**: For pure constant strings and anchored literals. Bypasses all DFA construction and uses direct memory comparison.
+2. **DFA Execution (Deterministic Path)**: Converts patterns into a high-density deterministic automaton for guaranteed $O(n)$ matching.
+3. **Bit-parallel/SWAR Acceleration (Hybrid Path)**: Accelerates character class scanning and repetitions using bitwise logic expressed in Go (SWAR), reaching physical memory bandwidth limits.
 
-=== Core Components
-
-- **Strategy Dispatcher**: Automatically routes patterns to the optimal execution path (Literal Bypass, Bit-parallel, or Pure DFA).
-- **3-Pass Sparse TDFA**: A deterministic submatch extraction engine that guarantees $O(n)$ time complexity by utilizing pre-calculated transition-resident tags.
-- **SIMD/SWAR Warping**: High-speed segment skipping that fast-forwards through non-matching data using CPU-native vector instructions.
+Captured metadata is extracted via a **3-Pass Sparse TDFA** pipeline, ensuring that submatch extraction remains strictly $O(n)$ relative to the input length.
 
 == Usage
 
@@ -176,6 +182,10 @@ go test -v ./internal/compat
 # Performance Benchmarks (Normalized Ratios)
 ./_scripts/benchmark-full.sh
 ----
+
+== Project Stability
+
+While in Beta, `go-regexp-re` is continuously audited against the standard library's test suite and high-stress NFA-hard corpora to ensure functional integrity and $O(n)$ predictability within its deterministic subset.
 
 == Roadmap
 
