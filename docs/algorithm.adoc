@@ -6,7 +6,7 @@
 == Overview
 
 `go-regexp-re` is a high-density, high-performance Deterministic Finite Automaton (DFA) engine implemented in **Pure Go**.
-The project's primary objective is to push the boundaries of regular expression processing speed within the Go ecosystem while maintaining 100% compatibility with the standard `regexp` library's `leftmost-first` matching semantics.
+The project's primary objective is to push the boundaries of regular expression processing speed within the Go ecosystem while maintaining high API compatibility with the standard `regexp` library's `leftmost-first` matching semantics for a deterministic subset of patterns.
 
 By combining $O(n)$ time complexity with advanced SIMD acceleration and bit-parallel processing, this engine explores the theoretical and physical limits of string matching in a memory-safe, native Go environment.
 

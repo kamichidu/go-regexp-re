@@ -28,7 +28,7 @@ To maximize throughput, the engine MUST select the most efficient execution loop
 
 - **0-Pass (Literal Bypass)**: Selected for pure constant strings and anchored literals. Bypasses all DFA construction. Uses pointer-passing and direct bytes.Equal/Index to achieve 0-allocation parity with standard library.
 - **Fast Path (Boundary-Only Discovery)**: Selected for `Match` and `FindIndex` calls where capture groups are not required. It utilizes a minimalist execution loop (Pass 0 + Pass 1) with zero history recording and early exit on first match.
-- **Full Path (Multi-Pass Sparse TDFA)**: Selected for `FindSubmatchIndex` calls. It employs the comprehensive 5-pass pipeline to guarantee peak performance and Go parity:
+- **Full Path (Multi-Pass Sparse TDFA)**: Selected for `FindSubmatchIndex` calls. It employs the comprehensive 5-pass pipeline to guarantee peak performance and Go API parity:
 - **Pass 0 (MAP)**: Primary search phase. Identifies mandatory paths and extracts anchor candidates (**Prefix**, **Pivot**, or **Suffix**).
     - **Search**: Identifies raw candidate positions using SIMD/SWAR. **Leverages LCP (Longest Common Prefix) Factoring to extract mandatory prefixes from alternations (e.g., 'fo' from '(fo|foo)'), enabling high-speed string scanning even for complex choices.**
     - **Search Strategy Dispatch**: The engine statically selects the most efficient pre-filter during compilation: **Literal (SIMD) > SearchWarp (SWAR) > sDFA**. **For 'NFAWorstCase' patterns like '(a+)+b' and Large Alternations without common prefixes, SearchWarp (SWAR) with Bitmask kernels is preferred over sDFA to maximize throughput (30 GB/s+).**
@@ -57,7 +57,7 @@ To maximize throughput, the engine MUST select the most efficient execution loop
 - **Pre-calculated Search/Match States**: The initial `searchState` and `matchState` MUST be pre-calculated during compilation with all relevant flags already applied, eliminating per-match setup costs.
 
 ### 2.5 Submatch Extraction Architecture (Multi-Pass Sparse TDFA)
-The engine follows a **Multi-Pass Sparse TDFA** strategy (implemented in **`exec_tdfa.go`**) to guarantee peak performance, $O(n)$ time complexity, and production-grade Go parity.
+The engine follows a **Multi-Pass Sparse TDFA** strategy (implemented in **`exec_tdfa.go`**) to guarantee peak performance, $O(n)$ time complexity, and high-fidelity Go API parity.
 
 - **NFA-Free & Calculation-Free Mandate**: Runtime NFA simulation, backtracking, or dynamic priority comparison is **STRICTLY PROHIBITED**. All submatch extraction decisions MUST be pre-calculated and "burned into" the transition tables during compilation.
 - **Pass 1: Boundary Discovery (Searching DFA)**: A high-speed forward scan that determines the exact match end and the winning priority.
@@ -149,9 +149,10 @@ The engine MUST extract the most selective anchors and surrounding constraints t
 ### 2.15 Syntax-Level Optimization & AST Rewriting
 - **Mandatory Optimization**: The engine MUST call `syntax.Simplify` and `syntax.Optimize` before compilation. Static compatibility checks MUST be performed on the resulting optimized AST to avoid false positives.
 
-### 2.19 Submatch Precision & High-Fidelity Go Parity (Field-Proven)
+### 2.19 Submatch Precision & High-Fidelity Go API Parity (Field-Proven)
 - **Overall Match Boundaries**: The engine MUST guarantee that indices 0 and 1 strictly match the standard library's results.
 - **Leftmost-First Tagging**: During Pass 4 licking, Start tags (even bits: 2, 4, ...) MUST be fixed once set (leftmost), while End tags (odd bits: 3, 5, ...) MUST be updated by the latest encounter on the winning path.
+- **Pragmatic Parity Mandate**: For internal capturing groups (indices 2+), the engine aims for standard parity. Non-ambiguous patterns MUST match exactly, while highly ambiguous patterns MAY be treated as a known architectural limitation if boundaries slightly deviate while preserving overall match integrity.
 - **Lead-Byte Warp (Jump Optimization)**: For the "any-rune" (dot) and wide character classes, the DFA MUST employ a **Warp-on-Lead-Byte** strategy. **The Warp flag is applied ONLY when all NFA paths in a state accept any valid UTF-8 continuation (e.g., InstRuneAny).**
 - **Warp Flag Preservation**: The `WarpStateFlag` (Bit 21) MUST be preserved during DFA minimization.
 
@@ -203,8 +204,8 @@ To ensure 100% accurate anchor verification and submatch extraction regardless o
 - **Capturing Groups**: Supported via the DFA-First Hybrid Strategy.
 
 ### 3.2 Excluded Features
-- **Backreferences & Dynamic Lookaround**: Strictly excluded.
-- **POSIX Semantics**: Unsupported to maintain $O(n)$.
+- **POSIX Semantics & API**: Strictly excluded. Methods such as `Longest()` are not provided to ensure the engine remains focused on the primary leftmost-first execution path.
+- **Backreferences & Dynamic Lookaround**: Strictly excluded as they break the $O(n)$ guarantee.
 
 ## 4. Engineering & Validation Standards
 The project employs a rigorous validation hierarchy to ensure that performance optimizations never compromise the $O(n)$ guarantee or functional correctness. For detailed methodology, refer to **`docs/compatibility-policy.adoc`**.
@@ -246,7 +247,7 @@ The project maintains a multi-layered automated verification suite to ensure tha
 - **Compatibility Audit**: Every change MUST be evaluated against the standard library using the `Compatibility Audit`.
     - **Zero Unexpected Regression**: Any "Unexpected Incompatibility" (mismatched match results or unexpected errors) is treated as a critical regression and MUST be fixed.
     - **Visibility**: Compatibility rates (Passed %) MUST be reported in the CI summary to provide transparency on the engine's maturity.
-- **Hierarchy of Verification**: Correctness (Unit Tests) > Parity (Compatibility Audit) > Efficiency (Benchmarks). A faster engine that fails correctness or loses parity is considered a failure.
+- **Hierarchy of Verification**: Correctness (Unit Tests) > API Parity (Compatibility Audit) > Efficiency (Benchmarks). A faster engine that fails correctness or loses parity for supported patterns is considered a failure.
 
 ### 4.4 Performance Landscape Visualization
 To prove the engine's superiority across diverse workloads, the project maintains a multi-dimensional visualization dashboard on GitHub Pages.
@@ -265,6 +266,7 @@ To ensure that architectural changes do not silently degrade performance or bypa
     1. The intended **MAP Strategy** (Literal vs SWAR vs sDFA) is selected based on pattern characteristics.
     2. **Gaze/Snap filters** are correctly skipped when redundant.
     3. The pattern's **SBL Fitness** aligns with architectural expectations (e.g., high-L patterns achieving SIMD acceleration).
+    4. **API Parity** is maintained by ensuring match boundaries align with standard expectations.
 - **Optimization Validation**: When introducing new optimization layers, the developer MUST provide an explain comparison showing how the logical execution plan has been improved.
 
 ## 5. Coding Conventions

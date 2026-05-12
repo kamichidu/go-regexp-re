@@ -13,14 +13,15 @@ image:https://img.shields.io/github/license/kamichidu/go-regexp-re["License", li
 This project is in **Beta**. Architectural changes and bug fixes are ongoing. Use in production environments should be evaluated accordingly.
 ====
 
-go-regexp-re is a pure Go byte-oriented DFA regex engine. It is designed for extreme throughput and drop-in compatibility with the standard `regexp` package while maintaining $O(n)$ time complexity.
+go-regexp-re is a pure Go byte-oriented DFA regex engine. It is designed for extreme throughput and Core API Subset Compatibility for a deterministic feature subset, maintaining strictly $O(n)$ time complexity.
 
 == Technical Characteristics
 
 * **Pure Go (No CGO, No Assembly)**: Implementation is written entirely in native Go. It achieves extreme performance through manual loop monomorphization and compiler-friendly optimizations, avoiding architecture-specific assembly code and CGO overhead for maximum portability and maintainability.
 * **Byte-Oriented Scanning**: Input is processed as a raw byte sequence (`[]byte`) to avoid the overhead of UTF-8 rune decoding and maximize CPU pipeline efficiency.
 * **Deterministic Finite Automaton (DFA)**: Patterns are converted into deterministic transition tables to ensure constant-time processing per input byte.
-* **Drop-in Compatibility**: The exported API follows the patterns established by the Go standard `regexp` package.
+* **Execution Transparency**: Built-in introspection capabilities via `Regexp.Explain()` and the `regexp-re-explain` tool, providing detailed visibility into compilation decisions and execution plans.
+* **API Subset Compatibility**: High-fidelity parity with the core interface of the standard `regexp` package for supported deterministic patterns. It guarantees 100% match boundary integrity (indices 0 and 1) for all non-rejected expressions.
 
 == Performance Model
 
@@ -38,7 +39,7 @@ The engine employs a modular architecture designed to separate the compilation p
 
 - **Strategy Dispatcher**: Automatically routes patterns to the optimal execution path (Literal Bypass, Bit-parallel, or Pure DFA).
 - **3-Pass Sparse TDFA**: A deterministic submatch extraction engine that guarantees $O(n)$ time complexity by utilizing pre-calculated transition-resident tags.
-=== SIMD/SWAR Warping: High-speed segment skipping that fast-forwards through non-matching data using CPU-native vector instructions.
+- **SIMD/SWAR Warping**: High-speed segment skipping that fast-forwards through non-matching data using CPU-native vector instructions.
 
 == Usage
 
@@ -87,12 +88,18 @@ go install github.com/kamichidu/go-regexp-re/cmd/regexp-re-explain@latest
 
 === Execution
 
-Pass any regular expression pattern as an argument. You can also specify the memory limit for DFA construction using the `-m` flag:
+Pass any regular expression pattern as an argument, read from a file using the `-f` flag, or provide it via standard input (STDIN):
 
 [source,bash]
 ----
 # Standard usage
 regexp-re-explain "(a+)b"
+
+# From a file
+regexp-re-explain -f pattern.txt
+
+# From STDIN (useful for multi-line or complex escapes)
+echo "(abc|def)" | regexp-re-explain
 
 # With custom memory limit (e.g., 128 MiB) using units
 regexp-re-explain -m 128m "(a+)b"
@@ -119,7 +126,7 @@ The output is organized into three logical layers:
 
 == Compatibility & Constraints
 
-`go-regexp-re` inherits the core philosophy of the https://pkg.go.dev/regexp[Go standard regexp package^]: prioritizing $O(n)$ performance and safety over features that require backtracking.
+`go-regexp-re` provides high API compatibility with the Go standard `regexp` package while prioritizing $O(n)$ performance and DFA determinism. While the interface is a drop-in replacement, the underlying engine enforces specific structural constraints to maintain its performance guarantees.
 
 For a comprehensive breakdown of our validation strategy and architectural boundaries, refer to the **xref:docs/compatibility-policy.adoc[Compatibility Policy]**.
 
@@ -128,10 +135,15 @@ For a comprehensive breakdown of our validation strategy and architectural bound
 Like the standard library (RE2-based), this engine enforces constraints necessary to guarantee linear-time execution:
 
 1. **No Backreferences**: Features like `(a)\1` are strictly unsupported as they would require exponential-time backtracking.
-2. **ASCII-Only Character Classes**: Common Perl character classes and boundaries are restricted to the ASCII range, matching standard Go behavior:
-   - `\d` is `[0-9]`, `\s` is `[\t\n\f\r ]`, `\w` is `[a-zA-Z0-9_]`.
-   - `\b` and `\B` are calculated based on the ASCII `\w` definition.
-3. **Leftmost-First Rule**: We strictly follow Go's standard matching priority. POSIX "longest-match" semantics are not supported.
+2. **ASCII-Only Character Classes**: Common Perl character classes and boundaries are restricted to the ASCII range, matching standard Go behavior.
+3. **Leftmost-First Rule**: We strictly follow Go's standard matching priority. POSIX "longest-match" semantics are not supported, as our priority is high-fidelity API compatibility with Go's default `regexp` behavior.
+
+=== API Subset & Excluded Features
+
+To maintain a focused, high-performance execution model, the following Go `regexp` features are excluded:
+
+1. **Longest-match (POSIX) API**: Methods like `Longest()` are not implemented. The engine is strictly optimized for Go's default leftmost-first semantics.
+2. **Backreferences & Lookaround**: Features requiring non-linear time or complex backtracking are inherently incompatible with our DFA architecture.
 
 === Engine-Specific Architectural Constraints
 
