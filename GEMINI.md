@@ -208,7 +208,14 @@ To ensure 100% accurate anchor verification and submatch extraction regardless o
 - **Backreferences & Dynamic Lookaround**: Strictly excluded as they break the $O(n)$ guarantee.
 
 ## 4. Engineering & Validation Standards
-The project employs a rigorous validation hierarchy to ensure that performance optimizations never compromise the $O(n)$ guarantee or functional correctness. For detailed methodology, refer to **`docs/compatibility-policy.adoc`**.
+The project employs a rigorous validation hierarchy to ensure that performance optimizations never compromise the $O(n)$ guarantee or functional correctness.
+
+### 4.1 Stability Boundary & Layers
+The project is explicitly split into two layers to balance usability with performance evolution:
+- **Stable Public Contract**: The root package (`github.com/kamichidu/go-regexp-re`) provides a stable API baseline (Go 1.25). Signatures and behavioral correctness for supported patterns are preserved.
+- **Volatile Execution Core**: Implementation details (DFA logic, SWAR kernels, internal storage) are subject to continuous refactoring to reach physical throughput limits.
+
+Every implementation must adhere to the **xref:docs/api-stability.adoc[API Stability Policy]**.
 
 - **Two-Stage Submatch Evaluation**: Test validation MUST distinguish between engine search correctness and submatch extraction precision:
     - **Overall Match Mismatch (Tier 1)**: (Indices 0, 1) If the engine fails to identify the correct match boundaries [start, end], it MUST be treated as a **FAIL**.

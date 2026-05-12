@@ -168,8 +168,9 @@ To maintain a focused, high-performance execution model, the following Go `regex
 
 == Implementation Details
 
-Refer to the internal documentation for details on the algorithms used:
+Refer to the internal documentation for details on the algorithms and stability guarantees:
 
+* **xref:docs/api-stability.adoc[API Stability Policy]**
 * **xref:docs/algorithm.adoc[Technical Documentation: Algorithms]**
 * **xref:docs/compatibility-policy.adoc[Compatibility & Validation Policy]**
 * **xref:docs/benchmark-strategy.adoc[Benchmark Strategy]**
