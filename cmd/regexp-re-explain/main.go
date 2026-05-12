@@ -44,10 +44,11 @@ func (m *memoryFlag) String() string {
 func main() {
 	var maxMemory memoryFlag = memoryFlag(ir.MaxDFAMemory)
 	patternFile := flag.String("f", "", "Read pattern from file")
+	verbose := flag.Bool("v", false, "Display full pattern without truncation")
 
 	flag.Var(&maxMemory, "m", "Max memory limit for DFA construction (e.g., 64m, 1g)")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: regexp-re-explain [-m memory_limit] [-f file] [pattern]\n")
+		fmt.Fprintf(os.Stderr, "Usage: regexp-re-explain [-v] [-m memory_limit] [-f file] [pattern]\n")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
@@ -88,5 +89,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	fmt.Println(re.Explain())
+	fmt.Println(re.ExplainWithOptions(regexp.ExplainOptions{
+		Verbose: *verbose,
+	}))
 }

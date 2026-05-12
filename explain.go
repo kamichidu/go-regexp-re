@@ -92,8 +92,16 @@ type fitnessLogic struct {
 	Active  bool
 }
 
+type ExplainOptions struct {
+	Verbose bool
+}
+
 func (re *Regexp) Explain() string {
-	data := re.getExplainViewData()
+	return re.ExplainWithOptions(ExplainOptions{})
+}
+
+func (re *Regexp) ExplainWithOptions(opts ExplainOptions) string {
+	data := re.getExplainViewData(opts)
 
 	tmpl := template.New("explain-view.tmpl").Funcs(template.FuncMap{
 		"add": func(a, b int) int { return a + b },
@@ -126,11 +134,18 @@ func (re *Regexp) Explain() string {
 	return buf.String()
 }
 
-func (re *Regexp) getExplainViewData() explainViewData {
+func (re *Regexp) getExplainViewData(opts ExplainOptions) explainViewData {
 	s, bVal, l, _, _, _ := re.estimateSBLWithSources()
 
+	displayPattern := re.expr
+	displayPattern = strings.ReplaceAll(displayPattern, "\n", "\\n")
+	displayPattern = strings.ReplaceAll(displayPattern, "\r", "\\r")
+	if !opts.Verbose && len(displayPattern) > 80 {
+		displayPattern = displayPattern[:80] + "..."
+	}
+
 	data := explainViewData{
-		Pattern:               re.expr,
+		Pattern:               displayPattern,
 		OverallStrategy:       re.strategy.String(),
 		LiteralPrefix:         string(re.prefix),
 		LiteralPrefixComplete: re.complete,
