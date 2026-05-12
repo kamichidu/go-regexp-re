@@ -33,19 +33,26 @@ This engine is optimized for:
 * **Execution Transparency**: Built-in introspection capabilities via `Regexp.Explain()` and the `regexp-re-explain` tool, providing detailed visibility into compilation decisions and execution plans.
 * **API Subset Compatibility**: High-fidelity parity with the core interface of the standard `regexp` package for supported deterministic pattern classes. It guarantees 100% correctness for full match boundaries (indices 0 and 1). Submatch boundaries (indices 2+) are provided on a best-effort basis for ambiguous constructs.
 
-== Performance Model
+== Core Architecture: Multi-Pass Sparse TDFA
 
-The engine achieves high throughput by offloading computation to the compilation phase and utilizing bit-parallel execution paths. This model is optimized for long-lived regex objects where the construction cost is amortized over millions of execution cycles.
+The heart of `go-regexp-re` is its **Multi-Pass Sparse TDFA (Tagged Deterministic Finite Automaton)** pipeline. Unlike traditional backtracking engines or monolithic DFAs, this engine orchestrates multiple specialized passes to achieve both $O(n)$ time complexity and Go-native submatch precision.
 
-== Execution Strategies
+=== The Multi-Pass Pipeline
 
-The engine dynamically selects the most efficient path based on pattern characteristics:
+The engine executes a series of coordinated passes, selecting the most efficient **Execution Kernels** for each stage:
 
-1. **Literal Bypass (Fast Path)**: For pure constant strings and anchored literals. Bypasses all DFA construction and uses direct memory comparison.
-2. **DFA Execution (Deterministic Path)**: Converts patterns into a high-density deterministic automaton for guaranteed $O(n)$ matching.
-3. **Bit-parallel/SWAR Acceleration (Hybrid Path)**: Accelerates character class scanning and repetitions using bitwise logic expressed in Go (SWAR), reaching physical memory bandwidth limits.
+1. **Pass 0: Discovery (MAP)**: Rapidly identifies match candidates using SIMD-style literal searching or bit-parallel SWAR kernels.
+2. **Pass 1: Boundary Discovery**: Uses a specialized **Searching DFA** to determine the exact match end and winning priority with $O(1)$ memory per byte.
+3. **Pass 2: Anchored Recording**: If submatches are required, an **Anchored DFA** re-scans the identified match range to record a compressed execution history.
+4. **Pass 3 & 4: Extraction**: Reconstructs the winning NFA path and applies capture tags using bit-parallel updates.
 
-Captured metadata is extracted via a **3-Pass Sparse TDFA** pipeline, ensuring that submatch extraction remains strictly $O(n)$ relative to the input length.
+=== Auxiliary Execution Kernels
+
+While the Multi-Pass pipeline provides the framework, the actual scanning is performed by interchangeable kernels optimized for specific patterns:
+
+* **Literal Bypass**: A zero-overhead kernel for constant strings that skips DFA construction entirely.
+* **Specialized DFAs**: Multiple internal DFAs (Searching, Anchored, and sDFA pre-filters) are used as auxiliary engines within the pipeline stages.
+* **SWAR/Bit-parallel Kernels**: Accelerators that fast-forward through character classes and repetitions at memory-bandwidth speeds.
 
 == Usage
 
