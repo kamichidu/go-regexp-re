@@ -87,11 +87,18 @@ go install github.com/kamichidu/go-regexp-re/cmd/regexp-re-explain@latest
 
 === Execution
 
-Pass any regular expression pattern as an argument:
+Pass any regular expression pattern as an argument. You can also specify the memory limit for DFA construction using the `-m` flag:
 
 [source,bash]
 ----
+# Standard usage
 regexp-re-explain "(a+)b"
+
+# With custom memory limit (e.g., 128 MiB) using units
+regexp-re-explain -m 128m "(a+)b"
+
+# Units supported: k (KiB), m (MiB), g (GiB)
+regexp-re-explain -m 1g "very-complex-pattern"
 ----
 
 === Interpreting the Output
