@@ -10,7 +10,7 @@ import (
 	"github.com/kamichidu/go-regexp-re/internal/ir"
 )
 
-//go:embed cmd/regexp-re-explain/assets/explain-view.tmpl
+//go:embed assets/explain-view.tmpl
 var explainAssets embed.FS
 
 type explainViewData struct {
@@ -124,7 +124,7 @@ func (re *Regexp) ExplainWithOptions(opts ExplainOptions) string {
 		},
 	})
 
-	tmpl, err := tmpl.ParseFS(explainAssets, "cmd/regexp-re-explain/assets/explain-view.tmpl")
+	tmpl, err := tmpl.ParseFS(explainAssets, "assets/explain-view.tmpl")
 	if err != nil {
 		return fmt.Sprintf("Error parsing template: %v", err)
 	}
@@ -213,12 +213,21 @@ func (re *Regexp) getExplainViewData(opts ExplainOptions) explainViewData {
 
 		// Literal
 		litScore := -1
-		if re.primaryAnchor != nil && re.primaryAnchor.IsFixed {
+		if re.primaryAnchor != nil && len(re.primaryAnchor.Anchor) > 0 {
+			litScore = re.primaryAnchor.Score()
+		} else if re.primaryAugmented != nil {
 			litScore = re.primaryAnchor.Score()
 		}
-		litDetail := "Score N/A (No fixed anchor found)"
+
+		litDetail := "Score N/A (No mandatory literal found)"
 		if litScore >= 0 {
-			litDetail = fmt.Sprintf("Score %d (Threshold: 30)", litScore)
+			pattern := ""
+			if re.primaryAugmented != nil {
+				pattern = fmt.Sprintf(" (Pattern: %q)", string(re.primaryAugmented.Pattern))
+			} else if re.primaryAnchor != nil {
+				pattern = fmt.Sprintf(" (Pattern: %q)", string(re.primaryAnchor.Anchor))
+			}
+			litDetail = fmt.Sprintf("Score %d (Threshold: 10)%s", litScore, pattern)
 		}
 		p0.Strategies = append(p0.Strategies, strategyData{
 			Name: "Literal (SIMD)", Detail: litDetail, Selected: selected == ir.SearchStrategyLiteral,
