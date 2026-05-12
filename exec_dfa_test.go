@@ -118,6 +118,11 @@ func TestVariableDistanceCorrectness(t *testing.T) {
 			input:   "abbbdcdcde",
 			want:    []int{0, 10},
 		},
+		{
+			pattern: ".*@example\\.com",
+			input:   "line1\nline2 @example.com",
+			want:    []int{6, 24},
+		},
 	}
 
 	for _, tt := range tests {

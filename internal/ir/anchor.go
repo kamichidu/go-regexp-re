@@ -1303,31 +1303,15 @@ func (a *AnchorInfo) Validate(in *Input, p int) bool {
 
 	// Verify Backward Constraints
 	for _, c := range a.Backward {
-		if !c.IsFixedOffset {
+		if !c.IsFixedOffset || c.IsRepeat {
 			continue
 		}
-		if c.IsRepeat {
-			end := p + c.Offset
-			if end < 0 {
-				return false
-			}
-			// Variable length backward check
-			switch CCWarpKernel(c.Info.Kernel) {
-			case CCWarpAnyExceptNL:
-				// Ensure no \n in the skipped range
-				start := end - 1 // Minimal check, actually WarpBack should be used for full range
-				if start >= 0 && bytes.IndexByte(b[0:end], '\n') >= 0 {
-					return false
-				}
-			}
-		} else {
-			start := p + c.Offset
-			if start < 0 || start+c.Length > len(b) {
-				return false
-			}
-			if !ValidateFixed(&c.Info, b[start:start+c.Length]) {
-				return false
-			}
+		start := p + c.Offset
+		if start < 0 || start+c.Length > len(b) {
+			return false
+		}
+		if !ValidateFixed(&c.Info, b[start:start+c.Length]) {
+			return false
 		}
 	}
 
