@@ -111,7 +111,7 @@ This integrated Search+Gaze strategy ensures that the state machine overhead is 
 When an anchor is discovered at position `P`, the engine must determine the correct starting position (`restartBase`) for the DFA to ensure **leftmost-longest** match semantics.
 
 - **Fixed Distance Snapping**: If the anchor is at a constant offset `D` from the match start, `restartBase` is set to `P - D`.
-- **Variable Distance Snapping (WarpBack)**: For patterns like `a*b` hit at `b`, the engine uses **WarpBack** (a reverse SIMD/SWAR scan) to find the leftmost extent of the preceding character class (`a*`).
+- **Variable Distance Snapping (WarpBack)**: For patterns like `a*b` hit at `b`, the engine utilizes **WarpBack** (a reverse SWAR scan) to find the leftmost extent of the preceding character class (`a*`). This enables high-speed literal scanning even for patterns with variable-length prefixes, maintaining $O(n)$ while achieving SIMD-level throughput.
 - **Boundary Snapping**: If the pattern is anchored to a line start (`(?m)^`), the snap logic finds the nearest preceding newline (`\n`) to determine the potential start of the match.
 
 This snapping ensures that the DFA (Pass 1) begins at the earliest possible point that could result in a match containing the discovered anchor, maintaining full compatibility with Go's `regexp` behavior.

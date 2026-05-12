@@ -212,6 +212,27 @@ func pass0_DiscoveryLoop(re *Regexp, in *ir.Input, searchStart int) (restartBase
 	end_of_loop:
 		if candidatePos >= 0 {
 			j := candidatePos
+			// 3. Candidate Snapping (Variable Distance / WarpBack)
+			// If the anchor is not at fixed distance 0, we need to find the true leftmost match start.
+			if candidateAnchor != nil && !candidateAnchor.IsFixed {
+				j = matchLiteralPos
+				prevOffset := 0
+				for k := 0; k < len(candidateAnchor.Backward); k++ {
+					c := &candidateAnchor.Backward[k]
+					// Offset is distance from anchor start (negative or zero)
+					// Delta is distance from the start of the subsequent block
+					delta := c.Offset - prevOffset
+					j += delta
+					if c.IsRepeat {
+						if j > 0 {
+							skipped := ir.WarpBack(&c.Info, b[:j])
+							j -= skipped
+						}
+					}
+					prevOffset = c.Offset
+				}
+			}
+
 			if anchorStart && in.AbsPos+j > 0 {
 				return -1, -1, nil
 			}

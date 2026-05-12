@@ -20,10 +20,11 @@ const (
 
 // Constraint defines a requirement on characters surrounding the anchor.
 type Constraint struct {
-	Offset   int  // Relative to anchor start
-	Length   int  // Fixed length if > 0
-	IsRepeat bool // If true, this is a variable length skip (Warp)
-	Info     CCWarpInfo
+	Offset        int  // Relative to anchor start
+	Length        int  // Fixed length if > 0
+	IsRepeat      bool // If true, this is a variable length skip (Warp)
+	IsFixedOffset bool // True if the offset is absolute relative to anchor
+	Info          CCWarpInfo
 }
 
 // CalculateSelectivity computes a score reflecting the expected throughput of a search pattern.
@@ -722,6 +723,7 @@ func extractConstraints(re *syntax.Regexp, anchor *AnchorInfo) {
 	}
 
 	backOffset := 0
+	isFixedBack := true
 	for i := anchorIdx - 1; i >= 0; i-- {
 		sub := re.Sub[i]
 		if sub.Op == syntax.OpBeginText || sub.Op == syntax.OpBeginLine {
@@ -737,7 +739,7 @@ func extractConstraints(re *syntax.Regexp, anchor *AnchorInfo) {
 				r := sub.Rune[j]
 				rd := utf8.RuneLen(r)
 				anchor.Backward = append(anchor.Backward, Constraint{
-					Offset: backOffset - rd, Length: rd,
+					Offset: backOffset - rd, Length: rd, IsFixedOffset: isFixedBack,
 					Info: CCWarpInfo{Kernel: uint8(CCWarpEqual), V0: uint32(r)},
 				})
 				backOffset -= rd
@@ -747,22 +749,22 @@ func extractConstraints(re *syntax.Regexp, anchor *AnchorInfo) {
 
 		if info, ok := toCCWarp(sub); ok {
 			anchor.Backward = append(anchor.Backward, Constraint{
-				Offset: backOffset - d, Length: d, IsRepeat: isRepeat, Info: info,
+				Offset: backOffset - d, Length: d, IsRepeat: isRepeat, IsFixedOffset: isFixedBack, Info: info,
 			})
 			if isRepeat {
-				break
+				isFixedBack = false
 			}
 		} else {
 			if d == maxD && d > 0 {
 				anchor.Backward = append(anchor.Backward, Constraint{
-					Offset: backOffset - d, Length: d, IsRepeat: false,
+					Offset: backOffset - d, Length: d, IsRepeat: false, IsFixedOffset: isFixedBack,
 				})
 			} else if maxLength(sub) > 0 {
 				anchor.Backward = append(anchor.Backward, Constraint{
-					Offset: backOffset, Length: 0, IsRepeat: true,
+					Offset: backOffset, Length: 0, IsRepeat: true, IsFixedOffset: isFixedBack,
 					Info: CCWarpInfo{Kernel: uint8(CCWarpAnyChar)},
 				})
-				break
+				isFixedBack = false
 			}
 		}
 		if d >= 0 {
@@ -776,6 +778,7 @@ func extractConstraints(re *syntax.Regexp, anchor *AnchorInfo) {
 	if !anchor.HasClass {
 		forwardOffset = len(anchor.Anchor)
 	}
+	isFixedForward := true
 
 	for i := anchorIdx + 1; i < len(re.Sub); i++ {
 		sub := re.Sub[i]
@@ -791,7 +794,7 @@ func extractConstraints(re *syntax.Regexp, anchor *AnchorInfo) {
 			for _, r := range sub.Rune {
 				rd := utf8.RuneLen(r)
 				anchor.Forward = append(anchor.Forward, Constraint{
-					Offset: forwardOffset, Length: rd,
+					Offset: forwardOffset, Length: rd, IsFixedOffset: isFixedForward,
 					Info: CCWarpInfo{Kernel: uint8(CCWarpEqual), V0: uint32(r)},
 				})
 				forwardOffset += rd
@@ -801,22 +804,22 @@ func extractConstraints(re *syntax.Regexp, anchor *AnchorInfo) {
 
 		if info, ok := toCCWarp(sub); ok {
 			anchor.Forward = append(anchor.Forward, Constraint{
-				Offset: forwardOffset, Length: d, IsRepeat: isRepeat, Info: info,
+				Offset: forwardOffset, Length: d, IsRepeat: isRepeat, IsFixedOffset: isFixedForward, Info: info,
 			})
 			if isRepeat {
-				break
+				isFixedForward = false
 			}
 		} else {
 			if d == maxD && d > 0 {
 				anchor.Forward = append(anchor.Forward, Constraint{
-					Offset: forwardOffset, Length: d, IsRepeat: false,
+					Offset: forwardOffset, Length: d, IsRepeat: false, IsFixedOffset: isFixedForward,
 				})
 			} else if maxLength(sub) > 0 {
 				anchor.Forward = append(anchor.Forward, Constraint{
-					Offset: forwardOffset, Length: 0, IsRepeat: true,
+					Offset: forwardOffset, Length: 0, IsRepeat: true, IsFixedOffset: isFixedForward,
 					Info: CCWarpInfo{Kernel: uint8(CCWarpAnyChar)},
 				})
-				break
+				isFixedForward = false
 			}
 		}
 		if d >= 0 {
@@ -825,6 +828,7 @@ func extractConstraints(re *syntax.Regexp, anchor *AnchorInfo) {
 			break
 		}
 	}
+
 }
 
 func isLiteral(re *syntax.Regexp) ([]byte, bool) {
@@ -1055,7 +1059,7 @@ func findCoveringSuffixAnchors(re *syntax.Regexp, distFromEnd int, atEnd bool, h
 			sub := re.Sub[i]
 			subAnchors := findCoveringSuffixAnchors(sub, currentDist, currentAtEnd, currentHasEndText, currentHasEndLine)
 			if len(subAnchors) > 0 {
-				isNullable := matchesEmpty(sub)
+				isOptional := sub.Op == syntax.OpQuest || sub.Op == syntax.OpStar || (sub.Op == syntax.OpRepeat && sub.Min == 0)
 				// To be IsFixed, EVERYTHING before this sub must be fixed distance
 				prefixIsFixed := true
 				for k := 0; k < i; k++ {
@@ -1066,7 +1070,7 @@ func findCoveringSuffixAnchors(re *syntax.Regexp, distFromEnd int, atEnd bool, h
 				}
 				for j := range subAnchors {
 					subAnchors[j].IsFixed = subAnchors[j].IsFixed && prefixIsFixed
-					if isNullable {
+					if isOptional {
 						subAnchors[j].Mandatory = false
 					}
 				}
@@ -1183,10 +1187,10 @@ func findCoveringAnchors(re *syntax.Regexp, offset int, atStart bool, hasBeginTe
 		for _, sub := range re.Sub {
 			subAnchors := findCoveringAnchors(sub, currentOffset, currentAtStart, currentHasBeginText, currentHasBeginLine)
 			if len(subAnchors) > 0 {
-				isNullable := matchesEmpty(sub)
+				isOptional := sub.Op == syntax.OpQuest || sub.Op == syntax.OpStar || (sub.Op == syntax.OpRepeat && sub.Min == 0)
 				for j := range subAnchors {
 					subAnchors[j].IsFixed = subAnchors[j].IsFixed && currentIsFixed
-					if isNullable {
+					if isOptional {
 						subAnchors[j].Mandatory = false
 					}
 				}
@@ -1257,19 +1261,37 @@ func findCoveringAnchors(re *syntax.Regexp, offset int, atStart bool, hasBeginTe
 }
 
 func (a *AnchorInfo) Score() int {
-	if !a.Mandatory || !a.IsFixed {
+	if !a.Mandatory {
 		return 0
 	}
 	length := len(a.Anchor)
 	if a.HasClass {
 		length = 1
 	}
+
 	isAnchorJoined := a.HasBeginText || a.HasBeginLine || a.HasEndText || a.HasEndLine
 	score := CalculateSelectivity(length, isAnchorJoined, a.HasClass)
 
+	if length == 0 && !a.HasClass {
+		// Just an anchor (^, $, etc.) without any surrounding literals or classes.
+		// These are highly selective but not suitable for bytes.Index.
+		score = 0
+	}
+
+	if !a.IsFixed {
+		// Non-fixed distance anchors (e.g. .*target) are useful as search hints,
+		// but they require a WarpBack phase. We penalize them to prefer
+		// fixed-distance anchors if available.
+		score /= 4
+	}
+
 	for _, aug := range a.Augmented {
-		if aug.Selectivity > score {
-			score = aug.Selectivity
+		augScore := aug.Selectivity
+		if !a.IsFixed {
+			augScore /= 4
+		}
+		if augScore > score {
+			score = augScore
 		}
 	}
 	return score
@@ -1281,6 +1303,9 @@ func (a *AnchorInfo) Validate(in *Input, p int) bool {
 
 	// Verify Backward Constraints
 	for _, c := range a.Backward {
+		if !c.IsFixedOffset {
+			continue
+		}
 		if c.IsRepeat {
 			end := p + c.Offset
 			if end < 0 {
@@ -1319,6 +1344,9 @@ func (a *AnchorInfo) Validate(in *Input, p int) bool {
 
 	// Verify Forward Constraints
 	for _, c := range a.Forward {
+		if !c.IsFixedOffset {
+			continue
+		}
 		start := p + c.Offset
 		if start < 0 || start > len(b) {
 			return false
