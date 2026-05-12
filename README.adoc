@@ -10,35 +10,49 @@ image:https://img.shields.io/github/license/kamichidu/go-regexp-re["License", li
 
 [IMPORTANT]
 ====
-This project is in **Beta**. Architectural changes and bug fixes are ongoing. Use in production environments should be evaluated accordingly.
+This project is in **active development (Beta)**. Interfaces and internal architecture may evolve.
+It is **NOT** a full replacement for the Go standard `regexp` package; it targets a deterministic subset optimized for strictly $O(n)$ execution.
 ====
 
-go-regexp-re is a pure Go byte-oriented DFA regex engine. It is designed for extreme throughput and drop-in compatibility with the standard `regexp` package while maintaining $O(n)$ time complexity.
+go-regexp-re is a pure Go byte-oriented DFA regex engine. It is designed for extreme throughput and Core API Subset Compatibility for a deterministic feature subset.
+
+== Core Value
+
+This engine is optimized for:
+
+- **Deterministic $O(n)$ regex execution** for supported pattern classes.
+- **Zero-backtracking matching guarantees**, eliminating ReDoS vulnerabilities.
+- **Compile-time optimized execution planning** to minimize runtime overhead.
+- **High-throughput byte-level scanning** for long-lived regex workloads.
 
 == Technical Characteristics
 
-* **Pure Go (No CGO, No Assembly)**: Implementation is written entirely in native Go. It achieves extreme performance through manual loop monomorphization and compiler-friendly optimizations, avoiding architecture-specific assembly code and CGO overhead for maximum portability and maintainability.
+* **Pure Go (No CGO, No Assembly)**: Implementation is written entirely in native Go. Extreme performance is achieved through compiler-friendly loop structures and runtime-safe bitwise/SWAR-style operations expressed in Go, avoiding the portability and maintenance costs of CGO or assembly.
 * **Byte-Oriented Scanning**: Input is processed as a raw byte sequence (`[]byte`) to avoid the overhead of UTF-8 rune decoding and maximize CPU pipeline efficiency.
 * **Deterministic Finite Automaton (DFA)**: Patterns are converted into deterministic transition tables to ensure constant-time processing per input byte.
-* **Drop-in Compatibility**: The exported API follows the patterns established by the Go standard `regexp` package.
+* **Execution Transparency**: Built-in introspection capabilities via `Regexp.Explain()` and the `regexp-re-explain` tool, providing detailed visibility into compilation decisions and execution plans.
+* **API Subset Compatibility**: High-fidelity parity with the core interface of the standard `regexp` package for supported deterministic pattern classes. It guarantees 100% correctness for full match boundaries (indices 0 and 1). Submatch boundaries (indices 2+) are provided on a best-effort basis for ambiguous constructs.
 
-== Performance Model
+== Core Architecture: Multi-Pass Sparse TDFA
 
-The engine achieves high throughput by offloading computation to the compilation phase and utilizing SIMD/bit-parallel execution paths. This performance model is optimized for long-lived regex objects where the construction cost is amortized over many execution cycles.
+The heart of `go-regexp-re` is its **Multi-Pass Sparse TDFA (Tagged Deterministic Finite Automaton)** pipeline. Unlike traditional backtracking engines or monolithic DFAs, this engine orchestrates multiple specialized passes to achieve both $O(n)$ time complexity and Go-native submatch precision.
 
-== Architectural Implementation
+=== The Multi-Pass Pipeline
 
-The engine employs a modular architecture designed to separate the compilation phase from the high-performance execution phase.
+The engine executes a series of coordinated passes, selecting the most efficient **Execution Kernels** for each stage:
 
-1. **Compilation Layer**: Managed within `internal/ir/`. This layer handles state space exploration, NFA to DFA conversion (Subset Construction), and transition table generation.
-2. **Execution Layer (Runtime)**: Located in the root package. It utilizes manually monomorphized hot-loops to achieve zero-overhead matching, selecting the most efficient kernel based on pattern characteristics.
-3. **AST Optimization**: Managed within `syntax/`. Performs project-specific simplifications and optimizations before the pattern is compiled into an intermediate representation.
+1. **Pass 0: Discovery (MAP)**: Rapidly identifies match candidates using SIMD-style literal searching or bit-parallel SWAR kernels.
+2. **Pass 1: Boundary Discovery**: Uses a specialized **Searching DFA** to determine the exact match end and winning priority with $O(1)$ memory per byte.
+3. **Pass 2: Anchored Recording**: If submatches are required, an **Anchored DFA** re-scans the identified match range to record a compressed execution history.
+4. **Pass 3 & 4: Extraction**: Reconstructs the winning NFA path and applies capture tags using bit-parallel updates.
 
-=== Core Components
+=== Auxiliary Execution Kernels
 
-- **Strategy Dispatcher**: Automatically routes patterns to the optimal execution path (Literal Bypass, Bit-parallel, or Pure DFA).
-- **3-Pass Sparse TDFA**: A deterministic submatch extraction engine that guarantees $O(n)$ time complexity by utilizing pre-calculated transition-resident tags.
-- **SIMD/SWAR Warping**: High-speed segment skipping that fast-forwards through non-matching data using CPU-native vector instructions.
+While the Multi-Pass pipeline provides the framework, the actual scanning is performed by interchangeable kernels optimized for specific patterns:
+
+* **Literal Bypass**: A zero-overhead kernel for constant strings that skips DFA construction entirely.
+* **Specialized DFAs**: Multiple internal DFAs (Searching, Anchored, and sDFA pre-filters) are used as auxiliary engines within the pipeline stages.
+* **SWAR/Bit-parallel Kernels**: Accelerators that fast-forward through character classes and repetitions at memory-bandwidth speeds.
 
 == Usage
 
@@ -74,9 +88,58 @@ func IsIdentifier(s string) bool {
 }
 ----
 
+== Execution Explanation
+
+The `regexp-re-explain` tool provides transparency into the engine's compilation decisions and execution strategy. It is essential for debugging performance and understanding how a specific pattern is optimized.
+
+=== Installation
+
+[source,bash]
+----
+go install github.com/kamichidu/go-regexp-re/cmd/regexp-re-explain@latest
+----
+
+=== Execution
+
+Pass any regular expression pattern as an argument, read from a file using the `-f` flag, or provide it via standard input (STDIN):
+
+[source,bash]
+----
+# Standard usage
+regexp-re-explain "(a+)b"
+
+# From a file
+regexp-re-explain -f pattern.txt
+
+# From STDIN (useful for multi-line or complex escapes)
+echo "(abc|def)" | regexp-re-explain
+
+# With custom memory limit (e.g., 128 MiB) using units
+regexp-re-explain -m 128m "(a+)b"
+
+# Units supported: k (KiB), m (MiB), g (GiB)
+regexp-re-explain -m 1g "very-complex-pattern"
+----
+
+=== Interpreting the Output
+
+The output is organized into three logical layers:
+
+1. **[IR - COMPILED STRUCTURE]**: Physical characteristics of the compiled object.
+    * *Strategy*: High-level execution path (Literal, Fast, or Extended).
+    * *MAP Strategy*: Pre-filter selection (SIMD vs SWAR vs sDFA). Refer to technical details on **xref:docs/algorithm/multi-point-anchored-constraint-propagation.adoc[MAP Optimization]**, **xref:docs/algorithm/searching-dfa.adoc[Searching DFA]**, and **xref:docs/algorithm/swar-character-class-warp.adoc[SWAR Kernels]**.
+    * *DFA Resource Stats*: physical memory footprint and state count.
+2. **[EXPLAIN - LOGICAL EXECUTION PLAN]**: The runtime execution pipeline.
+    * *Tree View*: Hierarchical representation of the 5-pass pipeline (Pass 0 to Pass 4). Detailed mechanics are described in the **xref:docs/algorithm/multi-pass-sparse-tdfa.adoc[Multi-Pass TDFA documentation]**.
+    * *Filters*: Specific Gaze (O(1) checks) and Snap (horizon discovery) conditions.
+    * *Skip*: Intentionally bypassed phases with static reasoning provided.
+3. **[ESTIMATED PERFORMANCE MODEL]**: Heuristic performance forecast.
+    * *SBL Trends*: Selectivity (S) and Locality (L) binning (Low/Middle/High). For a detailed explanation of the SBL model, refer to the **xref:docs/benchmark-landscape.adoc[Performance Landscape documentation]**.
+    * *Fitness Logic*: Matrix showing how S and L combine (e.g., S:Low * L:High => Optimal).
+
 == Compatibility & Constraints
 
-`go-regexp-re` inherits the core philosophy of the https://pkg.go.dev/regexp[Go standard regexp package^]: prioritizing $O(n)$ performance and safety over features that require backtracking.
+`go-regexp-re` provides high API compatibility with the Go standard `regexp` package while prioritizing $O(n)$ performance and DFA determinism. While the interface is a drop-in replacement, the underlying engine enforces specific structural constraints to maintain its performance guarantees.
 
 For a comprehensive breakdown of our validation strategy and architectural boundaries, refer to the **xref:docs/compatibility-policy.adoc[Compatibility Policy]**.
 
@@ -85,23 +148,29 @@ For a comprehensive breakdown of our validation strategy and architectural bound
 Like the standard library (RE2-based), this engine enforces constraints necessary to guarantee linear-time execution:
 
 1. **No Backreferences**: Features like `(a)\1` are strictly unsupported as they would require exponential-time backtracking.
-2. **ASCII-Only Character Classes**: Common Perl character classes and boundaries are restricted to the ASCII range, matching standard Go behavior:
-   - `\d` is `[0-9]`, `\s` is `[\t\n\f\r ]`, `\w` is `[a-zA-Z0-9_]`.
-   - `\b` and `\B` are calculated based on the ASCII `\w` definition.
-3. **Leftmost-First Rule**: We strictly follow Go's standard matching priority. POSIX "longest-match" semantics are not supported.
+2. **ASCII-Only Character Classes**: Common Perl character classes and boundaries are restricted to the ASCII range, matching standard Go behavior.
+3. **Leftmost-First Rule**: We strictly follow Go's standard matching priority. POSIX "longest-match" semantics are not supported, as our priority is high-fidelity API compatibility with Go's default `regexp` behavior.
+
+=== API Subset & Excluded Features
+
+To maintain a focused, high-performance execution model, the following Go `regexp` features are excluded:
+
+1. **Longest-match (POSIX) API**: Methods like `Longest()` are not implemented. The engine is strictly optimized for Go's default leftmost-first semantics.
+2. **Backreferences & Lookaround**: Features requiring non-linear time or complex backtracking are inherently incompatible with our DFA architecture.
 
 === Engine-Specific Architectural Constraints
 
 1. **Strict Structural Validation**: Certain patterns are rejected at compile-time with `regexp.UnsupportedError` to **preserve DFA determinacy** and guarantee $O(n)$ performance. Refer to the **xref:docs/compatibility-policy.adoc[Compatibility Policy]** for details and examples.
    - **Epsilon Loops**: e.g., `(|a)*`, `(a?)*`.
    - **Ambiguous Captures**: e.g., `(a|)`, `(a*)?`.
-2. **Submatch Precision**: While overall match boundaries (indices 0 and 1) are 100% compliant, internal submatch boundaries for highly ambiguous patterns (e.g., `a*(a)`) may occasionally deviate.
+2. **Submatch Precision**: While overall match boundaries (indices 0 and 1) are strictly compliant, internal submatch boundaries for highly ambiguous patterns (e.g., `a*(a)`) may occasionally deviate.
 3. **Byte-Level Matching**: The engine operates on raw bytes. While it correctly handles UTF-8 boundaries, it does not support `\uFFFD` replacement semantics for invalid UTF-8 sequences to maintain maximum throughput.
 
 == Implementation Details
 
-Refer to the internal documentation for details on the algorithms used:
+Refer to the internal documentation for details on the algorithms and stability guarantees:
 
+* **xref:docs/api-stability.adoc[API Stability Policy]**
 * **xref:docs/algorithm.adoc[Technical Documentation: Algorithms]**
 * **xref:docs/compatibility-policy.adoc[Compatibility & Validation Policy]**
 * **xref:docs/benchmark-strategy.adoc[Benchmark Strategy]**
@@ -121,6 +190,10 @@ go test -v ./internal/compat
 # Performance Benchmarks (Normalized Ratios)
 ./_scripts/benchmark-full.sh
 ----
+
+== Project Stability
+
+While in Beta, `go-regexp-re` is continuously audited against the standard library's test suite and high-stress NFA-hard corpora to ensure functional integrity and $O(n)$ predictability within its deterministic subset.
 
 == Roadmap
 

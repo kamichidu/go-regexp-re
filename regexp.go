@@ -2,13 +2,41 @@ package regexp
 
 import (
 	"context"
+	"io"
+	"time"
+	"unicode/utf8"
+
 	"github.com/kamichidu/go-regexp-re/internal/ir"
 	"github.com/kamichidu/go-regexp-re/syntax"
-	"unicode/utf8"
 )
+
+func readAll(r io.RuneReader) []byte {
+	if ra, ok := r.(io.Reader); ok {
+		b, err := io.ReadAll(ra)
+		if err != nil && err != io.EOF {
+			panic(err)
+		}
+		return b
+	}
+	// Fallback for pure RuneReader
+	var runes []rune
+	for {
+		rn, _, err := r.ReadRune()
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			panic(err)
+		}
+		runes = append(runes, rn)
+	}
+	// Convert []rune to []byte via string conversion
+	return []byte(string(runes))
+}
 
 type Regexp struct {
 	expr             string
+	compileTime      time.Duration
 	numSubexp        int
 	prefix           []byte
 	complete         bool
@@ -46,6 +74,7 @@ func CompileContext(ctx context.Context, expr string) (*Regexp, error) {
 }
 
 func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOptions) (*Regexp, error) {
+	start := time.Now()
 	s, err := syntax.Parse(expr, syntax.Perl)
 	if err != nil {
 		return nil, err
@@ -235,6 +264,7 @@ func CompileContextWithOptions(ctx context.Context, expr string, opts CompileOpt
 		res.strategy = strategyNone
 	}
 
+	res.compileTime = time.Since(start)
 	return res, nil
 }
 

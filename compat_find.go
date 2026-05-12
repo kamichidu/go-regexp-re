@@ -1,6 +1,7 @@
 package regexp
 
 import (
+	"io"
 	"unsafe"
 
 	"github.com/kamichidu/go-regexp-re/internal/ir"
@@ -35,6 +36,15 @@ func (re *Regexp) FindStringIndex(s string) []int {
 	return re.FindIndex(b)
 }
 
+// FindReaderIndex returns a two-element slice of integers defining the location
+// of the leftmost match of the regular expression in text read from the RuneReader.
+//
+// Deprecated: This method performs a full memory load of the reader's content
+// before processing and is not truly streaming.
+func (re *Regexp) FindReaderIndex(r io.RuneReader) (loc []int) {
+	return re.FindIndex(readAll(r))
+}
+
 func (re *Regexp) FindSubmatch(b []byte) [][]byte {
 	loc := re.FindSubmatchIndex(b)
 	if loc == nil {
@@ -66,6 +76,16 @@ func (re *Regexp) FindStringSubmatch(s string) []string {
 func (re *Regexp) FindStringSubmatchIndex(s string) []int {
 	b := unsafe.Slice(unsafe.StringData(s), len(s))
 	return re.findSubmatchIndexAt(b, 0, len(b), b)
+}
+
+// FindReaderSubmatchIndex returns a slice holding the index pairs identifying
+// the leftmost match of the regular expression of the text read from the RuneReader,
+// and the matches, if any, of its capturing groups.
+//
+// Deprecated: This method performs a full memory load of the reader's content
+// before processing and is not truly streaming.
+func (re *Regexp) FindReaderSubmatchIndex(r io.RuneReader) []int {
+	return re.FindSubmatchIndex(readAll(r))
 }
 
 func (re *Regexp) FindAll(b []byte, n int) [][]byte {

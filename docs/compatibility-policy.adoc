@@ -1,4 +1,4 @@
-= Compatibility Policy: Standard Library Parity vs. $O(n)$ Efficiency
+= Compatibility Policy: API Parity vs. Deterministic $O(n)$ Efficiency
 :sectnums:
 :toc: left
 
@@ -6,9 +6,9 @@ This document defines the compatibility goals, validation logic, and acknowledge
 
 == Philosophy: "Pragmatic Parity"
 
-The core mission of `go-regexp-re` is to provide $O(n)$ physical throughput. While we strive for 100% compatibility with the behavior defined by the https://pkg.go.dev/regexp[Go standard library^] and its https://pkg.go.dev/regexp/syntax[underlying syntax specification^], we prioritize the $O(n)$ guarantee and DFA determinism over matching the standard library's backtracking artifacts.
+The core mission of `go-regexp-re` is to provide $O(n)$ physical throughput. While we strive for high API parity with the behavior defined by the https://pkg.go.dev/regexp[Go standard library^], we prioritize the $O(n)$ guarantee and DFA determinism over matching the standard library's backtracking artifacts.
 
-We distinguish between **Functional Correctness** (identifying the correct match boundaries) and **Submatch Precision** (identifying internal group boundaries in ambiguous patterns).
+We distinguish between **Functional Correctness** (guaranteeing 100% match boundary integrity for supported patterns) and **Submatch Precision** (identifying internal group boundaries in complex cases).
 
 == Tiered Validation Strategy
 
@@ -80,6 +80,9 @@ The DFA transition table is subject to a memory limit (default 64MiB). If a patt
 
 * **Cause**: Highly complex repetitions or large sets of overlapping character classes.
 * **Error**: `regexp: pattern too large or ambiguous (states: X, max: Y)`
+
+=== 4. Longest-match (POSIX) API
+The `Longest()` method and its associated longest-match semantics are not supported. This engine is a specialized implementation for Go's default leftmost-first matching. By excluding the alternate POSIX priority model, we reduce transition table complexity and ensure more predictable $O(n)$ performance while maintaining focus on high-fidelity API compatibility for the primary Go use case.
 
 == Verification Suites
 

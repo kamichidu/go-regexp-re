@@ -1,9 +1,12 @@
 package regexp
 
 import (
-	"io"
 	"strings"
 )
+
+func (re *Regexp) Copy() *Regexp {
+	return re
+}
 
 func (re *Regexp) NumSubexp() int {
 	return re.numSubexp
@@ -36,20 +39,6 @@ func (re *Regexp) UnmarshalText(text []byte) error {
 	}
 	*re = *r
 	return nil
-}
-
-func (re *Regexp) MatchReader(r io.RuneReader) bool {
-	var b []byte
-	for {
-		rn, _, err := r.ReadRune()
-		if err != nil {
-			break
-		}
-		var buf [8]byte
-		n := copy(buf[:], string(rn))
-		b = append(b, buf[:n]...)
-	}
-	return re.Match(b)
 }
 
 func (re *Regexp) Expand(dst []byte, template []byte, src []byte, match []int) []byte {

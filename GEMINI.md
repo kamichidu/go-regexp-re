@@ -28,7 +28,7 @@ To maximize throughput, the engine MUST select the most efficient execution loop
 
 - **0-Pass (Literal Bypass)**: Selected for pure constant strings and anchored literals. Bypasses all DFA construction. Uses pointer-passing and direct bytes.Equal/Index to achieve 0-allocation parity with standard library.
 - **Fast Path (Boundary-Only Discovery)**: Selected for `Match` and `FindIndex` calls where capture groups are not required. It utilizes a minimalist execution loop (Pass 0 + Pass 1) with zero history recording and early exit on first match.
-- **Full Path (Multi-Pass Sparse TDFA)**: Selected for `FindSubmatchIndex` calls. It employs the comprehensive 5-pass pipeline to guarantee peak performance and Go parity:
+- **Full Path (Multi-Pass Sparse TDFA)**: Selected for `FindSubmatchIndex` calls. It employs the comprehensive 5-pass pipeline to guarantee peak performance and Go API parity:
 - **Pass 0 (MAP)**: Primary search phase. Identifies mandatory paths and extracts anchor candidates (**Prefix**, **Pivot**, or **Suffix**).
     - **Search**: Identifies raw candidate positions using SIMD/SWAR. **Leverages LCP (Longest Common Prefix) Factoring to extract mandatory prefixes from alternations (e.g., 'fo' from '(fo|foo)'), enabling high-speed string scanning even for complex choices.**
     - **Search Strategy Dispatch**: The engine statically selects the most efficient pre-filter during compilation: **Literal (SIMD) > SearchWarp (SWAR) > sDFA**. **For 'NFAWorstCase' patterns like '(a+)+b' and Large Alternations without common prefixes, SearchWarp (SWAR) with Bitmask kernels is preferred over sDFA to maximize throughput (30 GB/s+).**
@@ -57,7 +57,7 @@ To maximize throughput, the engine MUST select the most efficient execution loop
 - **Pre-calculated Search/Match States**: The initial `searchState` and `matchState` MUST be pre-calculated during compilation with all relevant flags already applied, eliminating per-match setup costs.
 
 ### 2.5 Submatch Extraction Architecture (Multi-Pass Sparse TDFA)
-The engine follows a **Multi-Pass Sparse TDFA** strategy (implemented in **`exec_tdfa.go`**) to guarantee peak performance, $O(n)$ time complexity, and production-grade Go parity.
+The engine follows a **Multi-Pass Sparse TDFA** strategy (implemented in **`exec_tdfa.go`**) to guarantee peak performance, $O(n)$ time complexity, and high-fidelity Go API parity.
 
 - **NFA-Free & Calculation-Free Mandate**: Runtime NFA simulation, backtracking, or dynamic priority comparison is **STRICTLY PROHIBITED**. All submatch extraction decisions MUST be pre-calculated and "burned into" the transition tables during compilation.
 - **Pass 1: Boundary Discovery (Searching DFA)**: A high-speed forward scan that determines the exact match end and the winning priority.
@@ -149,9 +149,10 @@ The engine MUST extract the most selective anchors and surrounding constraints t
 ### 2.15 Syntax-Level Optimization & AST Rewriting
 - **Mandatory Optimization**: The engine MUST call `syntax.Simplify` and `syntax.Optimize` before compilation. Static compatibility checks MUST be performed on the resulting optimized AST to avoid false positives.
 
-### 2.19 Submatch Precision & High-Fidelity Go Parity (Field-Proven)
+### 2.19 Submatch Precision & High-Fidelity Go API Parity (Field-Proven)
 - **Overall Match Boundaries**: The engine MUST guarantee that indices 0 and 1 strictly match the standard library's results.
 - **Leftmost-First Tagging**: During Pass 4 licking, Start tags (even bits: 2, 4, ...) MUST be fixed once set (leftmost), while End tags (odd bits: 3, 5, ...) MUST be updated by the latest encounter on the winning path.
+- **Pragmatic Parity Mandate**: For internal capturing groups (indices 2+), the engine aims for standard parity. Non-ambiguous patterns MUST match exactly, while highly ambiguous patterns MAY be treated as a known architectural limitation if boundaries slightly deviate while preserving overall match integrity.
 - **Lead-Byte Warp (Jump Optimization)**: For the "any-rune" (dot) and wide character classes, the DFA MUST employ a **Warp-on-Lead-Byte** strategy. **The Warp flag is applied ONLY when all NFA paths in a state accept any valid UTF-8 continuation (e.g., InstRuneAny).**
 - **Warp Flag Preservation**: The `WarpStateFlag` (Bit 21) MUST be preserved during DFA minimization.
 
@@ -180,19 +181,19 @@ To achieve the $O(n)$ physical throughput goal, the engine MUST implement a hier
 - **Physical Throughput Baseline**: The engine MUST aim for a baseline throughput of 3-5 GB/s for simple repetitions (`a+`, `.*`, `[0-9]+`) and 0.5-1 GB/s for disjoint sets on modern x86/ARM hardware.
 
 ### 2.21 MAP Correctness & Safety Mandate
-To maintain 100% compatibility, MAP MUST adhere to safety constraints:
+To maintain high API compatibility, MAP MUST adhere to safety constraints:
 - **Nullable Pattern Protection**: If a pattern can match an empty string (`minLength == 0`), Pass 0 (MAP rejection) MUST be **disabled** to prevent missing matches.
 - **Contextual Anchor Support**: Context-dependent anchors including line boundaries (`^`, `$`) and word boundaries (`\b`, `\B`) are supported by MAP using Absolute Coordinate Context validation. MAP is only disabled if safe validation is physically impossible for a specific pattern structure.
 - **FindAll Advancement Rule**: The `FindAll` loop MUST skip redundant empty matches at the same position and advance exactly one rune (not one byte) to avoid infinite loops and ensure standard library parity.
 
 #### 2.22 Absolute Coordinate Context Propagation (Mandate)
-To ensure 100% accurate anchor verification and submatch extraction regardless of the internal scan's starting point, the engine MUST propagate an **Absolute Coordinate Context** via the `ir.Input` structure.
+To ensure accurate anchor verification and submatch extraction regardless of the internal scan's starting point, the engine MUST propagate an **Absolute Coordinate Context** via the `ir.Input` structure.
 - **Virtual Slicing (Allocation Exclusion)**: `ir.Input` MUST hold the full, original byte slice (`OriginalB`) to act as a zero-allocation alternative to repeated slice truncations.
 - **Relative-Coordinate Hot Loops**: Internal execution loops MUST maintain a **Relative Coordinate System**. Loop variables (`i`), priority (`prio`), and internal capture indices MUST be 0-based relative to the start of the current virtual slice (`in.AbsPos`). This ensures that absolute coordinate addition is excluded from the $O(1)$ hot path.
 - **Zero-Ambiguity Contextual Anchors**: `VerifyBegin`, `VerifyEnd`, and `VerifyWord (\b)` MUST use `(in.AbsPos + i)` to index into `in.OriginalB`. This allows accurate boundary assessment even when the virtual slice starts in the middle of a word or line.
 - **Unified Discovery/Propagator Integration**: Pass 0 (MAP) MUST utilize the same absolute context to perform Search/Gaze/Snap operations, ensuring that identified candidates are globally valid before starting the DFA.
 - **Exit-Only Absolute Conversion**: Conversion from relative to absolute coordinates (e.g., `regs[i] += in.AbsPos`) MUST be performed **exactly once** at the public API boundary before returning results to the caller.
-- **Encapsulation**: This absolute coordinate system is an internal architectural detail. Public APIs MUST continue to provide standard, buffer-relative indices (0-based from the provided slice) to maintain 100% compatibility with Go's `regexp` package.
+- **Encapsulation**: This absolute coordinate system is an internal architectural detail. Public APIs MUST continue to provide standard, buffer-relative indices (0-based from the provided slice) to maintain high API compatibility with Go's `regexp` package.
 
 
 ## 3. Feature Selection Policy
@@ -203,11 +204,18 @@ To ensure 100% accurate anchor verification and submatch extraction regardless o
 - **Capturing Groups**: Supported via the DFA-First Hybrid Strategy.
 
 ### 3.2 Excluded Features
-- **Backreferences & Dynamic Lookaround**: Strictly excluded.
-- **POSIX Semantics**: Unsupported to maintain $O(n)$.
+- **POSIX Semantics & API**: Strictly excluded. Methods such as `Longest()` are not provided to ensure the engine remains focused on the primary leftmost-first execution path.
+- **Backreferences & Dynamic Lookaround**: Strictly excluded as they break the $O(n)$ guarantee.
 
 ## 4. Engineering & Validation Standards
-The project employs a rigorous validation hierarchy to ensure that performance optimizations never compromise the $O(n)$ guarantee or functional correctness. For detailed methodology, refer to **`docs/compatibility-policy.adoc`**.
+The project employs a rigorous validation hierarchy to ensure that performance optimizations never compromise the $O(n)$ guarantee or functional correctness.
+
+### 4.1 Stability Boundary & Layers
+The project is explicitly split into two layers to balance usability with performance evolution:
+- **Stable Public Contract**: The root package (`github.com/kamichidu/go-regexp-re`) provides a stable API baseline (Go 1.25). Signatures and behavioral correctness for supported patterns are preserved.
+- **Volatile Execution Core**: Implementation details (DFA logic, SWAR kernels, internal storage) are subject to continuous refactoring to reach physical throughput limits.
+
+Every implementation must adhere to the **xref:docs/api-stability.adoc[API Stability Policy]**.
 
 - **Two-Stage Submatch Evaluation**: Test validation MUST distinguish between engine search correctness and submatch extraction precision:
     - **Overall Match Mismatch (Tier 1)**: (Indices 0, 1) If the engine fails to identify the correct match boundaries [start, end], it MUST be treated as a **FAIL**.
@@ -217,7 +225,7 @@ The project employs a rigorous validation hierarchy to ensure that performance o
     - **Engine Limitation**: If the engine rejects a pattern that is valid in standard `regexp` (returning an `UnsupportedError`), it MUST be treated as a **SKIP** (Acknowledged Limitation).
     - **Unexpected Error**: Any other compilation failure MUST be treated as a **FAIL**.
 - **Memory Accumulation Prevention**: Dispose of compiled `Regexp` objects promptly during mass testing.
-- **100% DFA Validation**: DFA match boundaries MUST strictly match the standard library's boundaries except where documented (e.g., Dot behavior).
+- **High-Fidelity DFA Validation**: DFA match boundaries MUST strictly match the standard library's boundaries except where documented (e.g., Dot behavior).
 
 ### 4.1 Throughput-Oriented Benchmarking
 To minimize environmental noise and provide a flat evaluation of engine performance, the project employs a **Throughput-Oriented Benchmarking** strategy.
@@ -246,7 +254,7 @@ The project maintains a multi-layered automated verification suite to ensure tha
 - **Compatibility Audit**: Every change MUST be evaluated against the standard library using the `Compatibility Audit`.
     - **Zero Unexpected Regression**: Any "Unexpected Incompatibility" (mismatched match results or unexpected errors) is treated as a critical regression and MUST be fixed.
     - **Visibility**: Compatibility rates (Passed %) MUST be reported in the CI summary to provide transparency on the engine's maturity.
-- **Hierarchy of Verification**: Correctness (Unit Tests) > Parity (Compatibility Audit) > Efficiency (Benchmarks). A faster engine that fails correctness or loses parity is considered a failure.
+- **Hierarchy of Verification**: Correctness (Unit Tests) > API Parity (Compatibility Audit) > Efficiency (Benchmarks). A faster engine that fails correctness or loses parity for supported patterns is considered a failure.
 
 ### 4.4 Performance Landscape Visualization
 To prove the engine's superiority across diverse workloads, the project maintains a multi-dimensional visualization dashboard on GitHub Pages.
@@ -256,7 +264,17 @@ To prove the engine's superiority across diverse workloads, the project maintain
     - **Locality (L)**: 0.1 (Random) to 0.9 (Continuous). Identifies CCWarp (SWAR) acceleration zones.
 - **Generator-Viewer Decoupling**:
     - **Generator Mandate (Main Branch)**: This branch is responsible for data generation and processing. CI workflows MUST execute the landscape benchmarks and convert raw text results into rendering-ready JSON using tools in `_scripts/`.
-    - **Viewer Mandate (gh-pages Branch)**: The `gh-pages` branch is a pure data consumer. It MUST NOT contain Go source code or processing logic. It exists solely to host static visualization assets and data artifacts.
+        - **Viewer Mandate (gh-pages Branch)**: The `gh-pages` branch is a pure data consumer. It MUST NOT contain Go source code or processing logic. It exists solely to host static visualization assets and data artifacts.
+
+### 4.5 Performance Auditing & Traceability
+To ensure that architectural changes do not silently degrade performance or bypass intended optimizations, the project mandates the use of **Execution Explanation**.
+- **Traceability Mandate**: Every regular expression compiled by the engine MUST be inspectable via the `Regexp.Explain()` method.
+- **Auditing Tool (`regexp-re-explain`)**: Developers MUST use the `regexp-re-explain` command to verify that:
+    1. The intended **MAP Strategy** (Literal vs SWAR vs sDFA) is selected based on pattern characteristics.
+    2. **Gaze/Snap filters** are correctly skipped when redundant.
+    3. The pattern's **SBL Fitness** aligns with architectural expectations (e.g., high-L patterns achieving SIMD acceleration).
+    4. **API Parity** is maintained by ensuring match boundaries align with standard expectations.
+- **Optimization Validation**: When introducing new optimization layers, the developer MUST provide an explain comparison showing how the logical execution plan has been improved.
 
 ## 5. Coding Conventions
 - **Explicit Aliasing**:

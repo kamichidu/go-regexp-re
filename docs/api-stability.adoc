@@ -1,0 +1,41 @@
+= API Stability Policy
+:sectnums:
+:toc: left
+
+This document defines the stability guarantees and versioning strategy of `go-regexp-re`. The project is explicitly split into a **stable public contract layer** and a **highly volatile execution layer**.
+
+== Philosophy: "Stable Surface, Evolving Core"
+
+Our mission is to provide an unchanging, standard-compatible interface for users while maintaining absolute freedom to refactor internal algorithms for extreme throughput. We prioritize physical performance and DFA optimization; as such, the internals are in a state of constant evolution.
+
+== Stability Boundary
+
+The only stable contract is the **public API surface of the root package** (`github.com/kamichidu/go-regexp-re`). Everything else is considered an implementation detail.
+
+== Public API Contract (Stable)
+
+For the core API subset provided in the root package, we guarantee the following:
+
+=== 1. Go 1.25 Baseline Compatibility
+This library targets API compatibility with the Go standard `regexp` package at the current major version baseline (Go 1.25). We strive to maintain signature and behavioral parity for the supported deterministic subset. Support for new standard library features in future Go versions will be evaluated on a case-by-case basis.
+
+=== 2. Guaranteed Match Integrity
+Any regular expression pattern that compiles successfully (i.e., does not return a `syntax.UnsupportedError`) is guaranteed to produce identical match results (indices 0 and 1) across all future minor and patch updates within the same major version.
+
+=== 3. Signature Stability
+Method signatures and return types for the compatibility API will remain unchanged. Once a standard `regexp` method is implemented, it will not be renamed or removed.
+
+== Internal Implementation (Volatile)
+
+To ensure the engine can always reach the physical limits of the hardware, **internal implementation details may change without notice** as long as public API contracts are preserved.
+
+The following areas are explicitly **unstable**:
+
+* **The `internal/` package hierarchy**: DFA construction logic, transition table layouts, and SWAR kernels.
+* **Private fields**: Any unexported members of the `Regexp` or other structures.
+* **The `regexp-re-explain` output**: While the data is factual, the presentation format and heuristic sources are subject to improvement and change.
+
+== Versioning Strategy
+
+* **v1.0.0 and beyond**: Major version increments are reserved for breaking changes to the public API surface or significant narrowing of the supported pattern subset.
+* **Beta Period (v0.x.x)**: During the active development phase, both internal architecture and behavioral guarantees for non-core edge cases may evolve. Public API contracts remain the primary stability boundary even during Beta.

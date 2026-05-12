@@ -66,3 +66,14 @@ To accurately represent the "explosion" of MAP + SIMD optimizations (which can r
 === 3. Statistical Ground Truth
 - **Geometric Mean**: The `Avg Speedup` reported in the dashboard is calculated as a **Geometric Mean**. This is the standard for averaging ratios, ensuring that astronomical outliers do not disproportionately bias the overall evaluation.
 - **Performance Bands**: Historical trends are visualized as a band (Min-Avg-Max) to illustrate the engine's stability and consistent growth across all terrains.
+
+== Inspection: The Performance Explain
+
+To understand where a specific pattern sits on the SBL landscape, the engine provides the `regexp-re-explain` utility. This tool extracts the heuristic coordinates and optimization logic directly from the compiled object.
+
+=== Optimization Fitness Logic
+The trace reveals the **Fitness Logic** used to predict performance:
+- **Optimal (S:Low * L:High)**: Patterns that stay in the SIMD/MAP fast-path.
+- **Poor (S:High * L:Low)**: Patterns that force the DFA to process every byte individually.
+
+By inspecting the trace, developers can identify "Optimization Gaps"—scenarios where a pattern should be fast but is being held back by a sub-optimal strategy or redundant filters.
