@@ -15,6 +15,7 @@ var explainAssets embed.FS
 
 type explainViewData struct {
 	Pattern               string
+	CompilationTime       string
 	OverallStrategy       string
 	LiteralPrefix         string
 	LiteralPrefixComplete bool
@@ -92,8 +93,18 @@ type fitnessLogic struct {
 	Active  bool
 }
 
-func (re *Regexp) Explain(verbose bool) string {
-	data := re.getExplainViewData(verbose)
+type ExplainOptions struct {
+	// MaxPatternLength defines the maximum number of characters to display for the pattern.
+	// Use -1 for unlimited length. 0 defaults to 80.
+	MaxPatternLength int
+}
+
+func (re *Regexp) Explain() string {
+	return re.ExplainWithOptions(ExplainOptions{})
+}
+
+func (re *Regexp) ExplainWithOptions(opts ExplainOptions) string {
+	data := re.getExplainViewData(opts)
 
 	tmpl := template.New("explain-view.tmpl").Funcs(template.FuncMap{
 		"add": func(a, b int) int { return a + b },
@@ -126,18 +137,27 @@ func (re *Regexp) Explain(verbose bool) string {
 	return buf.String()
 }
 
-func (re *Regexp) getExplainViewData(verbose bool) explainViewData {
+func (re *Regexp) getExplainViewData(opts ExplainOptions) explainViewData {
 	s, bVal, l, _, _, _ := re.estimateSBLWithSources()
 
 	displayPattern := re.expr
 	displayPattern = strings.ReplaceAll(displayPattern, "\n", "\\n")
 	displayPattern = strings.ReplaceAll(displayPattern, "\r", "\\r")
-	if !verbose && len(displayPattern) > 80 {
-		displayPattern = displayPattern[:80] + "..."
+
+	limit := opts.MaxPatternLength
+	if limit == 0 {
+		limit = 80
+	}
+	if limit != -1 {
+		runes := []rune(displayPattern)
+		if len(runes) > limit {
+			displayPattern = string(runes[:limit]) + "..."
+		}
 	}
 
 	data := explainViewData{
 		Pattern:               displayPattern,
+		CompilationTime:       re.compileTime.String(),
 		OverallStrategy:       re.strategy.String(),
 		LiteralPrefix:         string(re.prefix),
 		LiteralPrefixComplete: re.complete,

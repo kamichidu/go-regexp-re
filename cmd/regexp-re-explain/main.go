@@ -89,5 +89,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	fmt.Println(re.Explain(*verbose))
+	fmt.Println(re.ExplainWithOptions(regexp.ExplainOptions{
+		MaxPatternLength: func() int {
+			if *verbose {
+				return -1
+			}
+			return 80
+		}(),
+	}))
 }
