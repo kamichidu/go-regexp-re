@@ -38,7 +38,7 @@ The engine employs a modular architecture designed to separate the compilation p
 
 - **Strategy Dispatcher**: Automatically routes patterns to the optimal execution path (Literal Bypass, Bit-parallel, or Pure DFA).
 - **3-Pass Sparse TDFA**: A deterministic submatch extraction engine that guarantees $O(n)$ time complexity by utilizing pre-calculated transition-resident tags.
-- **SIMD/SWAR Warping**: High-speed segment skipping that fast-forwards through non-matching data using CPU-native vector instructions.
+=== SIMD/SWAR Warping: High-speed segment skipping that fast-forwards through non-matching data using CPU-native vector instructions.
 
 == Usage
 
@@ -73,6 +73,42 @@ func IsIdentifier(s string) bool {
     return identRe.MatchString(s)
 }
 ----
+
+== Execution Explanation
+
+The `regexp-re-explain` tool provides transparency into the engine's compilation decisions and execution strategy. It is essential for debugging performance and understanding how a specific pattern is optimized.
+
+=== Installation
+
+[source,bash]
+----
+go install github.com/kamichidu/go-regexp-re/cmd/regexp-re-explain@latest
+----
+
+=== Execution
+
+Pass any regular expression pattern as an argument:
+
+[source,bash]
+----
+regexp-re-explain "(a+)b"
+----
+
+=== Interpreting the Output
+
+The output is organized into three logical layers:
+
+1. **[IR - COMPILED STRUCTURE]**: Physical characteristics of the compiled object.
+    * *Strategy*: High-level execution path (Literal, Fast, or Extended).
+    * *MAP Strategy*: Pre-filter selection (SIMD vs SWAR vs sDFA). Refer to technical details on **xref:docs/algorithm/multi-point-anchored-constraint-propagation.adoc[MAP Optimization]**, **xref:docs/algorithm/searching-dfa.adoc[Searching DFA]**, and **xref:docs/algorithm/swar-character-class-warp.adoc[SWAR Kernels]**.
+    * *DFA Resource Stats*: physical memory footprint and state count.
+2. **[EXPLAIN - LOGICAL EXECUTION PLAN]**: The runtime execution pipeline.
+    * *Tree View*: Hierarchical representation of the 5-pass pipeline (Pass 0 to Pass 4). Detailed mechanics are described in the **xref:docs/algorithm/multi-pass-sparse-tdfa.adoc[Multi-Pass TDFA documentation]**.
+    * *Filters*: Specific Gaze (O(1) checks) and Snap (horizon discovery) conditions.
+    * *Skip*: Intentionally bypassed phases with static reasoning provided.
+3. **[ESTIMATED PERFORMANCE MODEL]**: Heuristic performance forecast.
+    * *SBL Trends*: Selectivity (S) and Locality (L) binning (Low/Middle/High). For a detailed explanation of the SBL model, refer to the **xref:docs/benchmark-landscape.adoc[Performance Landscape documentation]**.
+    * *Fitness Logic*: Matrix showing how S and L combine (e.g., S:Low * L:High => Optimal).
 
 == Compatibility & Constraints
 

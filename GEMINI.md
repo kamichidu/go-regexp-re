@@ -256,7 +256,16 @@ To prove the engine's superiority across diverse workloads, the project maintain
     - **Locality (L)**: 0.1 (Random) to 0.9 (Continuous). Identifies CCWarp (SWAR) acceleration zones.
 - **Generator-Viewer Decoupling**:
     - **Generator Mandate (Main Branch)**: This branch is responsible for data generation and processing. CI workflows MUST execute the landscape benchmarks and convert raw text results into rendering-ready JSON using tools in `_scripts/`.
-    - **Viewer Mandate (gh-pages Branch)**: The `gh-pages` branch is a pure data consumer. It MUST NOT contain Go source code or processing logic. It exists solely to host static visualization assets and data artifacts.
+        - **Viewer Mandate (gh-pages Branch)**: The `gh-pages` branch is a pure data consumer. It MUST NOT contain Go source code or processing logic. It exists solely to host static visualization assets and data artifacts.
+
+### 4.5 Performance Auditing & Traceability
+To ensure that architectural changes do not silently degrade performance or bypass intended optimizations, the project mandates the use of **Execution Explanation**.
+- **Traceability Mandate**: Every regular expression compiled by the engine MUST be inspectable via the `Regexp.Explain()` method.
+- **Auditing Tool (`regexp-re-explain`)**: Developers MUST use the `regexp-re-explain` command to verify that:
+    1. The intended **MAP Strategy** (Literal vs SWAR vs sDFA) is selected based on pattern characteristics.
+    2. **Gaze/Snap filters** are correctly skipped when redundant.
+    3. The pattern's **SBL Fitness** aligns with architectural expectations (e.g., high-L patterns achieving SIMD acceleration).
+- **Optimization Validation**: When introducing new optimization layers, the developer MUST provide an explain comparison showing how the logical execution plan has been improved.
 
 ## 5. Coding Conventions
 - **Explicit Aliasing**:

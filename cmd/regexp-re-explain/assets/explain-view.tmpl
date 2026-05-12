@@ -1,0 +1,62 @@
+[IR - COMPILED STRUCTURE]
+  Pattern:  {{.Pattern}}
+  Strategy: {{.OverallStrategy}}
+  MAP Strategy:
+{{- if .Pass0.LiteralMatcher}}
+    +-- Selected: LiteralMatcher (SIMD bytes.Index)
+{{- else}}
+{{- range $i, $s := .Pass0.Strategies}}
+    {{if eq (add $i 1) (len $.Pass0.Strategies)}}+--{{else}}|--{{end}} {{if .Selected}}*{{else}} {{end}} {{.Name}}: {{.Detail}}
+{{- end}}
+{{- end}}
+{{- if .DFA}}
+  DFA Resource Stats:
+    - Identity: {{.DFA.Identity}}
+    - States:   {{.DFA.States}} states
+    - Memory:   ~{{.DFA.TotalMemory}} (Primary: {{.DFA.PrimaryTableMem}})
+{{- if .DFA.SearchDFA}}
+    - sDFA:     {{.DFA.SearchDFAMem}} ({{.DFA.SearchDFAStates}} states)
+{{- end}}
+{{- if .DFA.RecapTablesMem}}
+    - Recap:    {{.DFA.RecapTablesMem}}
+{{- end}}
+{{- else if .LiteralMemory}}
+  Literal Memory: ~{{.LiteralMemory}}
+{{- end}}
+  Groups:   {{.NumGroups}} capturing groups
+
+[EXPLAIN - LOGICAL EXECUTION PLAN]
++- Pass 0: Discovery (MAP)
+|  |-- Gaze: {{.Pass0.Gaze}}
+{{- range $i, $d := .Pass0.GazeDetails}}
+|  |  {{if eq (add $i 1) (len $.Pass0.GazeDetails)}}+--{{else}}|--{{end}} {{.}}
+{{- end}}
+|  +-- Snap: {{.Pass0.Snap}}
+{{- range $i, $d := .Pass0.SnapDetails}}
+|     {{if eq (add $i 1) (len $.Pass0.SnapDetails)}}+--{{else}}|--{{end}} {{.}}
+{{- end}}
+|
++- Pass 1: Boundary Discovery ({{.Pass1.Engine}})
+|  +-- Goal: {{.Pass1.Goal}}
+|
+{{if .Pass2 -}}
++- Pass 2-4: Submatch Recap (Metadata Extraction)
+|  |-- Pass 2: {{.Pass2.Engine}} ({{.Pass2.History}})
+|  |-- Pass 3: Path Selection (Backward Trace)
+|  +-- Pass 4: Group Recap (Tag Licking)
+{{- else -}}
++-- Pass 2-4: Skip (Submatch extraction not required)
+{{- end}}
+
+[ESTIMATED PERFORMANCE MODEL]
+B (Complexity): {{.SBL.BLabel}} (Pattern Invariant)
+  +-- Stats:  {{.DFA.States}}.00 states
+
+S (Selectivity) Trend: {{range .SBL.STrend}} [ {{if .Active}}* {{.Label}} *{{else}}{{.Label}}{{end}} ] {{end}}
+L (Locality)    Trend: {{range .SBL.LTrend}} [ {{if .Active}}* {{.Label}} *{{else}}{{.Label}}{{end}} ] {{end}}
+
+Optimization Fitness Logic (Heuristic Estimate):
+{{- range .SBL.FitnessLogic}}
+  S:{{.S}} * L:{{.L}} => [ {{if .Active}}* {{.Fitness}} *{{else}}{{.Fitness}}{{end}} ]
+{{- end}}
+

@@ -79,6 +79,21 @@ const (
 	SearchStrategySDFA                      // Searching DFA (Best for complex prefixes like (abc|def))
 )
 
+func (s SearchStrategy) String() string {
+	switch s {
+	case SearchStrategyNone:
+		return "None"
+	case SearchStrategyLiteral:
+		return "Literal (SIMD)"
+	case SearchStrategySearchWarp:
+		return "SearchWarp (SWAR)"
+	case SearchStrategySDFA:
+		return "Searching DFA (sDFA)"
+	default:
+		return "Unknown"
+	}
+}
+
 type SearchDFA struct {
 	NumStates   int
 	Transitions []uint8 // [numStates * 256]uint8
