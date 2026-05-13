@@ -52,7 +52,7 @@ func CalculateSelectivity(anchor []byte, isAnchorJoined bool, hasClass bool) int
 	}
 
 	// Base score: length and diversity
-	score := (length * 5) + (unique * 10)
+	score := (length * 5) + (unique * 15)
 
 	// Non-linear bonus for longer literals (where SIMD really shines)
 	if length >= 4 {

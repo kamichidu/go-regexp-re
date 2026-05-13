@@ -19,12 +19,12 @@ func TestSearchStrategySelection(t *testing.T) {
 		},
 		{
 			pattern:   "[a-z]",
-			wantStrat: SearchStrategySDFA,
+			wantStrat: SearchStrategySearchWarp,
 			wantKern:  CCWarpSingleRange,
 		},
 		{
 			pattern:   "a|z",
-			wantStrat: SearchStrategySDFA,
+			wantStrat: SearchStrategySearchWarp,
 			wantKern:  CCWarpBitmask,
 		},
 		{
@@ -54,7 +54,7 @@ func TestSearchStrategySelection(t *testing.T) {
 		},
 		{
 			pattern:   `(aa)*$`,
-			wantStrat: SearchStrategySDFA,
+			wantStrat: SearchStrategyNone,
 			wantKern:  CCWarpEqual, // 'a'
 		},
 	}

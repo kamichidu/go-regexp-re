@@ -537,18 +537,16 @@ func NewDFAWithMemoryLimit(ctx context.Context, re *syntax.Regexp, prog *syntax.
 			}
 		}
 		if d.searchStrategy == SearchStrategyNone && d.searchDFA != nil {
-			// Only use sDFA if it's more complex than a single byte search
+			// Only use sDFA if it's more complex than a single byte search.
+			// It's complex if at least one path from the start state requires more than 1 byte to match.
 			isComplex := false
 			startState := d.searchDFA.StartState
-			transCount := 0
 			for b := 0; b < 256; b++ {
-				if d.searchDFA.Transitions[(uint16(startState)<<8)|uint16(b)] != d.searchDFA.DeadState {
-					transCount++
+				st := d.searchDFA.Transitions[(uint16(startState)<<8)|uint16(b)]
+				if st != d.searchDFA.DeadState && !d.searchDFA.Accepting[st] {
+					isComplex = true
+					break
 				}
-			}
-			// If it has multiple branches from the start, or more than one state, it's a good candidate for sDFA
-			if transCount > 1 || d.searchDFA.NumStates > 1 {
-				isComplex = true
 			}
 
 			if isComplex {

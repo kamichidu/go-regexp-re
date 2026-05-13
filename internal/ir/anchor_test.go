@@ -12,13 +12,13 @@ func TestCalculateSelectivity(t *testing.T) {
 		hasClass       bool
 		want           int
 	}{
-		{"LiteralShort", []byte("a"), false, false, 1*5 + 1*10},                 // length=1, unique=1 -> 15
-		{"LiteralRepeat", []byte("aaa"), false, false, 3*5 + 1*10},              // length=3, unique=1 -> 25
-		{"LiteralDiverse", []byte("abc"), false, false, 3*5 + 3*10},             // length=3, unique=3 -> 45
-		{"LiteralLong", []byte("abcdefgh"), false, false, 8*5 + 8*10 + 20 + 40}, // length=8, unique=8, bonus 20+40 -> 180
-		{"AnchorJoinedShort", []byte("a"), true, false, 15 + 200},               // 215
-		{"ClassOnly", nil, false, true, -15},                                    // (1*5 + 1*10) - 30 = -15
-		{"AnchorJoinedClass", nil, true, true, 185},                             // (1*5 + 1*10) + 200 - 30 = 185
+		{"LiteralShort", []byte("a"), false, false, 1*5 + 1*15},                 // length=1, unique=1 -> 20
+		{"LiteralRepeat", []byte("aaa"), false, false, 3*5 + 1*15},              // length=3, unique=1 -> 30
+		{"LiteralDiverse", []byte("abc"), false, false, 3*5 + 3*15},             // length=3, unique=3 -> 60
+		{"LiteralLong", []byte("abcdefgh"), false, false, 8*5 + 8*15 + 20 + 40}, // length=8, unique=8, bonus 20+40 -> 220
+		{"AnchorJoinedShort", []byte("a"), true, false, 20 + 200},               // 220
+		{"ClassOnly", nil, false, true, 1*5 + 1*15 - 30},                        // -10
+		{"AnchorJoinedClass", nil, true, true, 180 + 10},                        // (15 + 5 + 200) - 30 = 190
 	}
 
 	for _, tt := range tests {
