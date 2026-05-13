@@ -51,8 +51,9 @@
 
 - [x] Implement **Searching DFA (sDFA)** as a multi-byte pre-filter in Pass 0.
 - [x] Implement **Search Strategy Dispatch** (Literal > SearchWarp > sDFA).
-- [ ] Implement **Bounded Gap Anchors (Right-Anchored Template Matching)** in `internal/ir/anchor.go`.
-    - Detect `Literal + Dot/Class + Literal + $` sequences.
+- [x] Implement **Variable-Distance Snapping (WarpBack)** for `.*LITERAL` patterns.
+- [ ] Extend WarpBack to handle **Bounded Gap Anchors (Right-Anchored Template Matching)**.
+    - Detect `Literal + Dot/Class + Literal + $` sequences in `internal/ir/anchor.go`.
     - **Placeholder + EOF Synergy**:
         - For `HTTP/1.1$`, we know the distance from `HTTP/1` to `$` is exactly 2 bytes (if `.` is literal) or 2-5 bytes (if `.` is UTF-8).
         - **Fast Pruning**: If `HTTP/1` is found at position `p`, and `len(input) - (p + len("HTTP/1"))` is not within [2..5], the match is **impossible**.

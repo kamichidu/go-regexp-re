@@ -81,3 +81,62 @@ func TestCCWarp(t *testing.T) {
 		})
 	}
 }
+
+func TestVariableDistanceCorrectness(t *testing.T) {
+	tests := []struct {
+		pattern string
+		input   string
+		want    []int
+	}{
+		{
+			pattern: ".*@example\\.com",
+			input:   "prefix @example.com suffix",
+			want:    []int{0, 19},
+		},
+		{
+			pattern: ".*@example\\.com",
+			input:   "first @example.com then second @example.com",
+			want:    []int{0, 43},
+		},
+		{
+			pattern: "a*b",
+			input:   "aaabbb",
+			want:    []int{0, 4},
+		},
+		{
+			pattern: ".*apple",
+			input:   "an apple and another apple",
+			want:    []int{0, 26},
+		},
+		{
+			pattern: "a[bcd]*dcdcde",
+			input:   "adcdcde",
+			want:    []int{0, 7},
+		},
+		{
+			pattern: "a[bcd]*dcdcde",
+			input:   "abbbdcdcde",
+			want:    []int{0, 10},
+		},
+		{
+			pattern: ".*@example\\.com",
+			input:   "line1\nline2 @example.com",
+			want:    []int{6, 24},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.pattern+"/"+tt.input, func(t *testing.T) {
+			re := MustCompile(tt.pattern)
+			got := re.FindStringIndex(tt.input)
+			if len(got) != len(tt.want) {
+				t.Fatalf("got %v; want %v", got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("at index %d: got %v; want %v", i, got, tt.want)
+				}
+			}
+		})
+	}
+}

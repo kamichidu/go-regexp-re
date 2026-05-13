@@ -47,6 +47,11 @@ func TestSearchStrategySelection(t *testing.T) {
 			wantStrat: SearchStrategySearchWarp,
 			wantKern:  CCWarpBitmask, // 'a', 'd', 'g' are not contiguous
 		},
+		{
+			pattern:   `^([^!]+!)?([^!]+)$`,
+			wantStrat: SearchStrategySearchWarp,
+			wantKern:  CCWarpNotSingleRange, // [^!]
+		},
 	}
 
 	for _, tt := range tests {
@@ -65,5 +70,19 @@ func TestSearchStrategySelection(t *testing.T) {
 				t.Errorf("Pattern %q: Kernel = %v; want %v", tt.pattern, CCWarpKernel(dfa.SearchWarp().Kernel), tt.wantKern)
 			}
 		})
+	}
+}
+
+func TestVariableDistancePivot(t *testing.T) {
+	pattern := ".*@example\\.com"
+	re, _ := syntax.Parse(pattern, syntax.Perl)
+	prog, _ := syntax.Compile(re)
+	dfa, err := NewDFAWithMemoryLimit(context.Background(), re, prog, 1024*1024, true)
+	if err != nil {
+		t.Fatalf("Failed to build DFA: %v", err)
+	}
+
+	if dfa.SearchStrategy() != SearchStrategyLiteral {
+		t.Errorf("Pattern %q: Strategy = %v; want SearchStrategyLiteral", pattern, dfa.SearchStrategy())
 	}
 }

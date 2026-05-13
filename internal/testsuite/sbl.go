@@ -32,7 +32,20 @@ func ExportSBLRegistry(path string) error {
 	sblMu.Lock()
 	defer sblMu.Unlock()
 
-	data, err := json.MarshalIndent(sblRegistry, "", "  ")
+	// Merge with existing data if the file exists
+	combined := make(map[string]SBL)
+	if data, err := os.ReadFile(path); err == nil {
+		if err := json.Unmarshal(data, &combined); err != nil {
+			// If file is corrupt, we'll just overwrite it with new data
+			combined = make(map[string]SBL)
+		}
+	}
+
+	for k, v := range sblRegistry {
+		combined[k] = v
+	}
+
+	data, err := json.MarshalIndent(combined, "", "  ")
 	if err != nil {
 		return err
 	}

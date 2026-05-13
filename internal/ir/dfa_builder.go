@@ -104,7 +104,7 @@ func NewDFAWithMemoryLimit(ctx context.Context, re *syntax.Regexp, prog *syntax.
 			if !a.HasConstraints && !a.HasBeginText && !a.HasBeginLine && !a.HasEndText && !a.HasEndLine && len(a.SimpleBackward) == 0 {
 				a.SkipGaze = true
 			}
-			if a.Mandatory && a.IsFixed {
+			if a.Mandatory {
 				s := a.Score()
 				if s > maxScore {
 					maxScore = s
@@ -523,12 +523,18 @@ func NewDFAWithMemoryLimit(ctx context.Context, re *syntax.Regexp, prog *syntax.
 	}
 
 	// Select optimal search strategy
-	if d.primaryAnchor != nil && d.primaryAnchor.IsFixed {
+	if d.primaryAnchor != nil {
 		score := d.primaryAnchor.Score()
-		// Threshold: A score of 30 means unanchored 3-byte literal (3*10)
-		// Or any anchored literal (minimum score 110 for 1-byte + boundary bonus)
-		if score >= 30 {
-			d.searchStrategy = SearchStrategyLiteral
+		// Threshold: A score of 10 means unanchored 4-byte literal (/4 = 10)
+		// Or any anchored literal (minimum score 275+ for 1-byte + boundary bonus / 4)
+		if score >= 10 {
+			if len(d.primaryAnchor.Anchor) > 0 {
+				d.searchStrategy = SearchStrategyLiteral
+			} else if d.primaryAnchor.HasClass {
+				// Character classes should use SearchWarp, not Literal
+				d.searchStrategy = SearchStrategySearchWarp
+				d.searchWarp = d.primaryAnchor.Class
+			}
 		}
 	}
 	if d.searchStrategy == SearchStrategyNone && CCWarpKernel(d.searchWarp.Kernel) != CCWarpNone {
