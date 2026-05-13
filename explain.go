@@ -43,6 +43,7 @@ type dfaStats struct {
 
 type pass0Data struct {
 	LiteralMatcher bool
+	Skip           bool
 	Strategies     []strategyData
 	Gaze           string
 	GazeDetails    []string
@@ -210,6 +211,7 @@ func (re *Regexp) getExplainViewData(opts ExplainOptions) explainViewData {
 		}
 
 		selected := re.dfa.SearchStrategy()
+		p0.Skip = selected == ir.SearchStrategyNone
 
 		// Literal
 		litScore := -1
