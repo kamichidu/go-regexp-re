@@ -523,39 +523,41 @@ func NewDFAWithMemoryLimit(ctx context.Context, re *syntax.Regexp, prog *syntax.
 	}
 
 	// Select optimal search strategy
-	if d.primaryAnchor != nil {
-		score := d.primaryAnchor.Score()
-		if score >= MinLiteralScore {
-			if len(d.primaryAnchor.Anchor) > 0 {
-				d.searchStrategy = SearchStrategyLiteral
-			} else if d.primaryAnchor.HasClass {
-				// Character classes should use SearchWarp, not Literal
-				d.searchStrategy = SearchStrategySearchWarp
-				d.searchWarp = d.primaryAnchor.Class
+	if minLength(re) > 0 {
+		if d.primaryAnchor != nil {
+			score := d.primaryAnchor.Score()
+			if score >= MinLiteralScore {
+				if len(d.primaryAnchor.Anchor) > 0 {
+					d.searchStrategy = SearchStrategyLiteral
+				} else if d.primaryAnchor.HasClass {
+					// Character classes should use SearchWarp, not Literal
+					d.searchStrategy = SearchStrategySearchWarp
+					d.searchWarp = d.primaryAnchor.Class
+				}
 			}
 		}
-	}
-	if d.searchStrategy == SearchStrategyNone && d.searchDFA != nil {
-		// Only use sDFA if it's more complex than a single byte search
-		isComplex := false
-		startState := d.searchDFA.StartState
-		transCount := 0
-		for b := 0; b < 256; b++ {
-			if d.searchDFA.Transitions[(uint16(startState)<<8)|uint16(b)] != d.searchDFA.DeadState {
-				transCount++
+		if d.searchStrategy == SearchStrategyNone && d.searchDFA != nil {
+			// Only use sDFA if it's more complex than a single byte search
+			isComplex := false
+			startState := d.searchDFA.StartState
+			transCount := 0
+			for b := 0; b < 256; b++ {
+				if d.searchDFA.Transitions[(uint16(startState)<<8)|uint16(b)] != d.searchDFA.DeadState {
+					transCount++
+				}
 			}
-		}
-		// If it has multiple branches from the start, or more than one state, it's a good candidate for sDFA
-		if transCount > 1 || d.searchDFA.NumStates > 1 {
-			isComplex = true
-		}
+			// If it has multiple branches from the start, or more than one state, it's a good candidate for sDFA
+			if transCount > 1 || d.searchDFA.NumStates > 1 {
+				isComplex = true
+			}
 
-		if isComplex {
-			d.searchStrategy = SearchStrategySDFA
+			if isComplex {
+				d.searchStrategy = SearchStrategySDFA
+			}
 		}
-	}
-	if d.searchStrategy == SearchStrategyNone && CCWarpKernel(d.searchWarp.Kernel) != CCWarpNone {
-		d.searchStrategy = SearchStrategySearchWarp
+		if d.searchStrategy == SearchStrategyNone && CCWarpKernel(d.searchWarp.Kernel) != CCWarpNone {
+			d.searchStrategy = SearchStrategySearchWarp
+		}
 	}
 
 	return d, nil

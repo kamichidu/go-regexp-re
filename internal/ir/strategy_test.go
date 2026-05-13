@@ -52,6 +52,11 @@ func TestSearchStrategySelection(t *testing.T) {
 			wantStrat: SearchStrategySearchWarp,
 			wantKern:  CCWarpNotSingleRange, // [^!]
 		},
+		{
+			pattern:   `(aa)*$`,
+			wantStrat: SearchStrategySDFA,
+			wantKern:  CCWarpEqual, // 'a'
+		},
 	}
 
 	for _, tt := range tests {
