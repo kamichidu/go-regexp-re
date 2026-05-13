@@ -227,7 +227,7 @@ func (re *Regexp) getExplainViewData(opts ExplainOptions) explainViewData {
 			} else if re.primaryAnchor != nil {
 				pattern = fmt.Sprintf(" (Pattern: %q)", string(re.primaryAnchor.Anchor))
 			}
-			litDetail = fmt.Sprintf("Score %d (Threshold: 10)%s", litScore, pattern)
+			litDetail = fmt.Sprintf("Score %d (Threshold: %d)%s", litScore, ir.MinLiteralScore, pattern)
 		}
 		p0.Strategies = append(p0.Strategies, strategyData{
 			Name: "Literal (SIMD)", Detail: litDetail, Selected: selected == ir.SearchStrategyLiteral,

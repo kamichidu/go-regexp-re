@@ -19,22 +19,22 @@ func TestSearchStrategySelection(t *testing.T) {
 		},
 		{
 			pattern:   "[a-z]",
-			wantStrat: SearchStrategySearchWarp,
+			wantStrat: SearchStrategySDFA,
 			wantKern:  CCWarpSingleRange,
 		},
 		{
 			pattern:   "a|z",
-			wantStrat: SearchStrategySearchWarp,
+			wantStrat: SearchStrategySDFA,
 			wantKern:  CCWarpBitmask,
 		},
 		{
 			pattern:   "000-0000|111-1111",
-			wantStrat: SearchStrategySearchWarp,
+			wantStrat: SearchStrategySDFA,
 			wantKern:  CCWarpSingleRange, // '0' and '1' are contiguous
 		},
 		{
 			pattern:   "000-0000|222-2222",
-			wantStrat: SearchStrategySearchWarp,
+			wantStrat: SearchStrategySDFA,
 			wantKern:  CCWarpBitmask, // '0' and '2' are not contiguous
 		},
 		{
@@ -44,7 +44,7 @@ func TestSearchStrategySelection(t *testing.T) {
 		},
 		{
 			pattern:   "abc|def|ghi",
-			wantStrat: SearchStrategySearchWarp,
+			wantStrat: SearchStrategySDFA,
 			wantKern:  CCWarpBitmask, // 'a', 'd', 'g' are not contiguous
 		},
 		{

@@ -70,6 +70,13 @@ type NFAPath struct {
 
 const NFAPathSize = int(unsafe.Sizeof(NFAPath{}))
 
+const (
+	// MinLiteralScore is the minimum selectivity score required to select the Literal (SIMD) search strategy.
+	// A score of 31 typically requires at least a 3-byte literal (e.g. "foo" = 40)
+	// or a high-diversity 2-byte anchored literal.
+	MinLiteralScore = 31
+)
+
 type SearchStrategy uint8
 
 const (
