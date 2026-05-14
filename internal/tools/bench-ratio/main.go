@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strconv"
 	"text/tabwriter"
+
+	"github.com/kamichidu/go-regexp-re/internal/benchstat"
 )
 
 // Metric stores all supported benchmark metrics
@@ -100,9 +102,9 @@ func run(r io.Reader, w io.Writer) error {
 				// Time & Throughput: Ratio (Noise-resistant)
 				if i < len(stdResults) {
 					std := stdResults[i]
-					fmt.Fprintf(tw, "\t%.6f ns/op", (re.Ns/std.Ns)*1000)
+					fmt.Fprintf(tw, "\t%.6f ns/op", benchstat.ComputeRatio(re.Ns, std.Ns))
 					if std.MBs > 0 && re.MBs > 0 {
-						fmt.Fprintf(tw, "\t%.6f MB/s", (re.MBs/std.MBs)*100)
+						fmt.Fprintf(tw, "\t%.6f MB/s", benchstat.ComputeRatioThroughput(re.MBs, std.MBs))
 					}
 				} else {
 					fmt.Fprintf(tw, "\t0.000000 ns/op")

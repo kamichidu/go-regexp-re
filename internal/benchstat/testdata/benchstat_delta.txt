@@ -1,0 +1,12 @@
+name                                     old ns/op  new ns/op  delta
+StandardSuite/Alternation/(fo|foo)       220ns ± 0%    38ns ± 0%  -82.50%  (p=0.000 n=1+1)
+StandardSuite/Anchored/^(?:a)$            40ns ± 0%    17ns ± 0%  -57.06%  (p=0.000 n=1+1)
+StandardSuite/CharClass/(?i)[@-A]+       167ns ± 0%    47ns ± 0%  -71.63%  (p=0.000 n=1+1)
+StandardSuite/Complex/a+                 154ns ± 0%    49ns ± 0%  -68.24%  (p=0.000 n=1+1)
+StandardSuite/Literal/a                  142ns ± 0%    22ns ± 0%  -84.36%  (p=0.000 n=1+1)
+Synthetic/CCWarp                        15.8ms ± 0%   0.0ms ± 0%  -100.00%  (p=0.000 n=1+1)
+Synthetic/PureDFA                       29.9ms ± 0%   4.3ms ± 0%  -85.55%  (p=0.000 n=1+1)
+Synthetic/SIMDWarp                      35.7µs ± 0%  35.5µs ± 0%   -0.50%  (p=0.000 n=1+1)
+Synthetic/SearchWarp                    24.4ms ± 0%   0.3ms ± 0%  -98.85%  (p=0.000 n=1+1)
+RegressionCase                           100ns ± 0%   120ns ± 0%  +20.00%  (p=0.000 n=1+1)
+MinorJitter                              100ns ± 0%   101ns ± 0%   +1.00%  (p=0.000 n=1+1)
