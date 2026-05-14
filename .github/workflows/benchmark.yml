@@ -30,11 +30,11 @@ jobs:
         run: |
           # 1. Download Latest Main Baseline from gh-pages
           curl --fail -sL https://raw.githubusercontent.com/${{ github.repository }}/gh-pages/benchmarks/baseline/benchmark-main.txt -o benchmark-baseline.txt || touch benchmark-baseline.txt
-          
+
           # 2. Convert raw benchmarks to relative ratios (Noise-resistant)
           ./_scripts/bench-ratio.sh < benchmark-baseline.txt > baseline-ratio.txt
           ./_scripts/bench-ratio.sh < benchmark-main.txt > current-ratio.txt
-          
+
           # 3. Use -col to show Standard vs Ours in the summary
           go tool benchstat -col /GoRegexp/GoRegexpRe benchmark-main.txt | tee comparison.txt
 
@@ -43,7 +43,7 @@ jobs:
           echo '```' >> $GITHUB_STEP_SUMMARY
           cat comparison.txt >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
-          
+
           if [ -s baseline-ratio.txt ]; then
             echo "#### Speedup Factor Delta (Previous Main vs Current)" >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
@@ -89,10 +89,21 @@ jobs:
 
       - name: Strict Regression Guard
         run: |
-          # Fails the workflow if a significant regression is detected,
-          # but run AFTER deployment to ensure data is preserved.
+          # Fails the workflow if a significant regression is detected.
+          # Run AFTER deployment to ensure data is preserved.
           chmod +x _scripts/check-regression.sh
-          ./_scripts/check-regression.sh current-ratio.txt baseline-ratio.txt
+
+          # 1. Absolute Check (vs Standard Library)
+          echo "::group::Absolute Performance Check"
+          ./_scripts/check-regression.sh current-ratio.txt
+          echo "::endgroup::"
+
+          # 2. Relative Check (vs Previous Main)
+          if [ -s baseline-ratio.txt ]; then
+            echo "::group::Relative Regression Check"
+            ./_scripts/check-regression.sh current-ratio.txt baseline-ratio.txt
+            echo "::endgroup::"
+          fi
       - name: Upload results as artifacts
         uses: actions/upload-artifact@v4
         with:
