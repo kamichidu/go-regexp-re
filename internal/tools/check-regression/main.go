@@ -91,15 +91,16 @@ func (c *RegressionChecker) CheckAbsolute(report *benchstat.Report) []string {
 	var regressions []string
 	const epsilon = 1e-9
 
-	// 1. Check Throughput (as scaled ratio: Std/Ours * 1000)
-	// We only check throughput for absolute regression because some benchmarks
-	// (like Capturing/Email) naturally have 1 alloc/op which would fail a strict absolute threshold.
-	limit := c.Threshold * benchstat.RatioScale
-	for _, stat := range report.MiBPerS.Stats {
-		if stat.Baseline >= limit-epsilon {
-			speedup := benchstat.RatioScale / stat.Baseline
-			msg := fmt.Sprintf("[Absolute Regression] %s (%.2f) exceeded threshold in MB/s (Speedup: %.2fx)", stat.Name, stat.Baseline, speedup)
-			regressions = append(regressions, msg)
+	// 1. Check Throughput (as scaled ratio: Ours/Std * 1000)
+	// Higher is better. Regression if Ours < Std / Threshold.
+	if report.MiBPerS != nil {
+		limit := benchstat.RatioScale / c.Threshold
+		for _, stat := range report.MiBPerS.Stats {
+			if stat.Baseline <= limit+epsilon {
+				speedup := stat.Baseline / benchstat.RatioScale
+				msg := fmt.Sprintf("[Absolute Regression] %s (%.2f) below threshold in MB/s (Speedup: %.2fx)", stat.Name, stat.Baseline, speedup)
+				regressions = append(regressions, msg)
+			}
 		}
 	}
 
@@ -111,8 +112,9 @@ func (c *RegressionChecker) CheckRelative(report *benchstat.Report) []string {
 	const epsilon = 1e-9
 	thresholdPercent := (c.Threshold - 1.0) * 100.0
 
-	// 1. Check Throughput (Negative delta is regression, respects -threshold)
+	// 1. Check Throughput (Higher is better, negative delta is regression)
 	for _, stat := range report.MiBPerS.Stats {
+		// Regression if throughput decreased by more than threshold
 		if stat.Delta != nil && *stat.Delta <= -thresholdPercent+epsilon {
 			msg := fmt.Sprintf("[Relative Regression] %s decreased by %.2f%% in MB/s (p=%.3f)", stat.Name, -*stat.Delta, stat.P)
 			regressions = append(regressions, msg)

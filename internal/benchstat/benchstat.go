@@ -204,12 +204,10 @@ func ComputeRatio(ours, std float64) float64 {
 }
 
 // ComputeRatioThroughput calculates the scaled ratio for throughput (MB/s).
-// Std / Ours * 1000. This mirrors time-based ratio: higher values mean Ours is slower.
-// Actually, to keep it consistent with "higher than 1000 means Ours is slower",
-// for throughput it should be Std / Ours.
+// Ours / Std * 1000. Higher values mean Ours is faster (Better).
 func ComputeRatioThroughput(ours, std float64) float64 {
-	if ours == 0 {
+	if std == 0 {
 		return 0
 	}
-	return (std / ours) * RatioScale
+	return (ours / std) * RatioScale
 }

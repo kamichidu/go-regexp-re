@@ -41,11 +41,11 @@ We categorize metrics into two types based on their stability and sensitivity to
 
 | **Time (ns/op)**
 | **Relative (Ratio)**
-| Highly sensitive to CPU load/frequency. Normalized as `Re / Std`.
+| Highly sensitive to CPU load/frequency. Normalized as `Re / Std` (Ours / Std).
 
 | **Throughput (MB/s)**
 | **Relative (Ratio)**
-| Directly derived from time. Normalized as `Std / Re` (higher is better).
+| Directly derived from time. Normalized as `Re / Std` (higher is better).
 
 | **Memory (B/op)**
 | **Absolute**
@@ -78,13 +78,13 @@ We employ a dual-layered regression check to ensure both absolute goals and rela
 === 1. Absolute Check (Ours vs Standard)
 Ensures the engine never falls significantly behind the standard library on key patterns.
 - **Target**: Throughput (MB/s).
-- **Threshold**: Respects `-threshold` (default 1.1). A ratio > 1100 (Ours < Std / 1.1) triggers an error.
+- **Threshold**: Respects `-threshold` (default 1.1). A ratio < 909 (1000 / 1.1) triggers an error.
 - **Rationale**: Guarantees the "Faster than Std" constitution.
 
 === 2. Relative Check (PR vs Baseline)
 Ensures current changes do not degrade existing performance or memory efficiency.
-- **Throughput (MB/s)**: Respects `-threshold` (default 10%). A decrease > 10% triggers an error.
-- **Allocations (allocs/op)**: **Zero-Tolerance Policy**. Any increase in allocations (Delta > 0) triggers an immediate regression error, regardless of the threshold.
+- **Throughput (MB/s)**: Respects `-threshold` (default 10%). A decrease > 10% (negative delta) triggers an error.
+- **Allocations (allocs/op)**: **Zero-Tolerance Policy**. Any increase in allocations (positive delta > 0) triggers an immediate regression error, regardless of the threshold.
 
 == Tooling & Usage
 
@@ -92,10 +92,10 @@ Ensures current changes do not degrade existing performance or memory efficiency
 A shared package for parsing `benchstat` output and managing project-wide ratio calculation logic (`Ours/Std * 1000`).
 
 === `internal/tools/bench-ratio`
-Converts raw `go test -bench` output into a normalized ratio format using `benchstat.ComputeRatio`.
+Converts raw `go test -bench` output into a normalized ratio format using `benchstat.ComputeRatio` (for time) and `benchstat.ComputeRatioThroughput` (for throughput).
 [source,bash]
 ----
-go test -bench . -tags goregexp,goregexpre | go run ./internal/tools/bench-ratio > results.txt
+go test -bench . -tags goregexp,goregexpre | (cd internal/tools/bench-ratio && go run .) > results.txt
 ----
 
 === `internal/tools/check-regression`
@@ -104,11 +104,11 @@ A Go-based tool that evaluates `benchstat` reports against the regression policy
 ----
 # Check absolute performance (vs Std)
 go tool benchstat current.txt > abs.stat
-go run ./internal/tools/check-regression -mode absolute -threshold 1.1 abs.stat
+(cd internal/tools/check-regression && go run . -mode absolute -threshold 1.1 abs.stat)
 
 # Check relative performance (vs Baseline)
 go tool benchstat baseline.txt current.txt > rel.stat
-go run ./internal/tools/check-regression -mode relative -threshold 1.1 rel.stat
+(cd internal/tools/check-regression && go run . -mode relative -threshold 1.1 rel.stat)
 ----
 
 == Key Performance Indicators (KPIs)

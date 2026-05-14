@@ -73,8 +73,8 @@ func TestComputeRatioThroughput(t *testing.T) {
 		ours, std float64
 		want      float64
 	}{
-		{200, 100, 500.0}, // 2x faster throughput -> ratio 500
-		{50, 100, 2000.0}, // 0.5x throughput -> ratio 2000
+		{200, 100, 2000.0}, // 2x faster throughput -> ratio 2000
+		{50, 100, 500.0},   // 0.5x throughput -> ratio 500
 		{100, 100, 1000.0},
 		{0, 100, 0.0},
 	}

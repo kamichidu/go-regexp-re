@@ -10,8 +10,8 @@ import (
 func TestParseBenchstat(t *testing.T) {
 	output := `
 name      old MB/s   new MB/s   delta
-Improve   500 ± 5%   600 ± 5%   +20.00%  (p=0.001 n=10+10)
-Regress   800 ± 2%   760 ± 2%   -5.00%   (p=0.001 n=10+10)
+Improve   1000 ± 5%  1200 ± 5%  +20.00%  (p=0.001 n=10+10)
+Regress   1000 ± 2%  800 ± 2%   -20.00%  (p=0.001 n=10+10)
 
 name      old allocs/op  new allocs/op  delta
 Other     1.00 ± 0%      1.01 ± 0%      +1.00%   (p=0.001 n=10+10)
@@ -21,10 +21,27 @@ Other     1.00 ± 0%      1.01 ± 0%      +1.00%   (p=0.001 n=10+10)
 
 	// 1. Test relative regression logic (CheckRelative)
 	relRegressions := checker.CheckRelative(report)
-	// MiBPerS: Regress(-5%) is within 10% threshold. Improve(+20%) is NOT a regression.
+	// MiBPerS: Regress(-20%) IS a regression. Improve(+20%) is NOT.
 	// Allocs: Other(+1%) IS a regression because of zero-tolerance.
-	if len(relRegressions) != 1 || !strings.Contains(relRegressions[0], "Other") {
-		t.Errorf("expected 1 relative regression in Other (allocs), got %d: %v", len(relRegressions), relRegressions)
+	if len(relRegressions) != 2 {
+		t.Errorf("expected 2 relative regressions (Regress throughput and Other allocs), got %d: %v", len(relRegressions), relRegressions)
+	}
+
+	foundRegress := false
+	foundOther := false
+	for _, msg := range relRegressions {
+		if strings.Contains(msg, "Regress") {
+			foundRegress = true
+		}
+		if strings.Contains(msg, "Other") {
+			foundOther = true
+		}
+		if strings.Contains(msg, "Improve") {
+			t.Errorf("Improvement (positive delta in ratio) was incorrectly flagged as regression: %s", msg)
+		}
+	}
+	if !foundRegress || !foundOther {
+		t.Errorf("missing expected regressions: regress=%v, other=%v", foundRegress, foundOther)
 	}
 
 	// 2. Test absolute regression logic (CheckAbsolute)
@@ -32,8 +49,8 @@ Other     1.00 ± 0%      1.01 ± 0%      +1.00%   (p=0.001 n=10+10)
 		MiBPerS: &benchstat.Section{
 			Metric: "MB/s",
 			Stats: []benchstat.Stat{
-				{Name: "SlowThroughput", Baseline: 1100.0},
-				{Name: "FastThroughput", Baseline: 900.0},
+				{Name: "SlowThroughput", Baseline: 800.0},
+				{Name: "FastThroughput", Baseline: 1200.0},
 			},
 		},
 		AllocsPerOp: &benchstat.Section{
@@ -44,7 +61,7 @@ Other     1.00 ± 0%      1.01 ± 0%      +1.00%   (p=0.001 n=10+10)
 		},
 	}
 	absRegressions := checker.CheckAbsolute(absReport)
-	// Only throughput should be flagged (Baseline 1100 >= 1.1*1000)
+	// Only SlowThroughput should be flagged (Baseline 800 <= 1000/1.1)
 	if len(absRegressions) != 1 || !strings.Contains(absRegressions[0], "SlowThroughput") {
 		t.Errorf("expected 1 absolute regression in SlowThroughput, got %v", absRegressions)
 	}
@@ -58,11 +75,10 @@ func TestIsRegression(t *testing.T) {
 		MiBPerS: &benchstat.Section{
 			Metric: "MB/s",
 			Stats: []benchstat.Stat{
-				{Name: "R1", Baseline: 1100.0}, // Regression (ratio)
-				{Name: "R2", Baseline: 900.0},  // Pass (ratio)
+				{Name: "R1", Baseline: 800.0},  // Regression (ratio < 909)
+				{Name: "R2", Baseline: 1000.0}, // Pass
 			},
 		},
-		AllocsPerOp: &benchstat.Section{Metric: "allocs/op"},
 	}
 	regs := checker.CheckAbsolute(report)
 	if len(regs) != 1 || !strings.Contains(regs[0], "R1") {
