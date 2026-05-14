@@ -58,19 +58,12 @@ func stateSearchingHeader(p *parser) stateFn {
 	}
 	p.line = p.scanner.Text()
 
-	// Header line: "name  old ns/op  new ns/op  delta"
-	if !strings.HasPrefix(p.line, "name") || !strings.Contains(p.line, "delta") {
-		// Also support single column header: "name  ns/op"
-		if !(strings.HasPrefix(p.line, "name") && (strings.Contains(p.line, "ns/op") || strings.Contains(p.line, "B/op"))) {
-			return stateSearchingHeader
-		}
-	}
-
+	// Detect which section we are entering by looking for known metric units in the header.
 	switch {
-	case strings.Contains(p.line, "ns/op"):
+	case strings.Contains(p.line, "sec/op") || strings.Contains(p.line, "ns/op"):
 		p.report.NsPerOp = &Section{Metric: "ns/op"}
 		p.section = p.report.NsPerOp
-	case strings.Contains(p.line, "MB/s"):
+	case strings.Contains(p.line, "MB/s") || strings.Contains(p.line, "B/s"):
 		p.report.MiBPerS = &Section{Metric: "MB/s"}
 		p.section = p.report.MiBPerS
 	case strings.Contains(p.line, "B/op"):
@@ -93,9 +86,8 @@ func stateParsingStats(p *parser) stateFn {
 	p.line = p.scanner.Text()
 	trimmed := strings.TrimSpace(p.line)
 
-	// A blank line strictly separates sections in benchstat.
 	if trimmed == "" {
-		return stateSearchingHeader
+		return stateParsingStats
 	}
 
 	fields := strings.Fields(trimmed)
@@ -103,39 +95,74 @@ func stateParsingStats(p *parser) stateFn {
 		return stateParsingStats
 	}
 
-	// If it's a new header without a preceding blank line
-	if fields[0] == "name" {
-		return stateSearchingHeader
+	// If we encounter a row that looks like a header (contains │ or known units)
+	if strings.Contains(p.line, "│") || strings.Contains(p.line, "sec/op") || strings.Contains(p.line, "B/s") {
+		return stateHeaderSwitch
 	}
 
-	stat := Stat{Name: fields[0]}
+	// Filter out footnotes or markers to get clean fields
+	var clean []string
+	for _, f := range fields {
+		if f == "¹" || f == "²" || f == "³" || f == "⁴" || f == "⁵" {
+			continue
+		}
+		clean = append(clean, f)
+	}
 
-	if len(fields) >= 10 && fields[2] == "±" {
-		// A/B comparison format: [Name, Val1, ±, Err1, Val2, ±, Err2, Delta, (p=P, n=N+N)]
-		stat.Baseline = parseValueUnit(fields[1])
-		stat.Current = parseValueUnit(fields[4])
+	if len(clean) < 2 {
+		return stateParsingStats
+	}
 
-		if fields[7] != "~" {
-			dStr := strings.TrimSuffix(fields[7], "%")
+	stat := Stat{Name: clean[0]}
+
+	// A/B comparison typically has "±" at index 2 and index 5 (if no markers)
+	// In our cleaned array, they should be at fixed positions if it's A/B
+	if len(clean) >= 10 && clean[2] == "±" && clean[5] == "±" {
+		stat.Baseline = parseValueUnit(clean[1])
+		stat.Current = parseValueUnit(clean[4])
+
+		deltaStr := clean[7]
+		if deltaStr != "~" {
+			dStr := strings.TrimSuffix(deltaStr, "%")
 			d, _ := strconv.ParseFloat(dStr, 64)
 			stat.Delta = &d
 		}
 
-		pStr := strings.TrimPrefix(fields[8], "(p=")
+		pStr := strings.TrimPrefix(clean[8], "(p=")
 		stat.P, _ = strconv.ParseFloat(pStr, 64)
 
-		nStr := strings.TrimPrefix(fields[9], "n=")
+		nStr := strings.TrimPrefix(clean[9], "n=")
 		if idx := strings.Index(nStr, "+"); idx != -1 {
 			nStr = nStr[:idx]
 		}
 		stat.N, _ = strconv.Atoi(nStr)
-	} else {
+	} else if len(clean) >= 2 {
 		// Single column format: [Name, Val, ±, Err]
-		// Map the only data column to Baseline for architectural consistency.
-		stat.Baseline = parseValueUnit(fields[1])
+		stat.Baseline = parseValueUnit(clean[1])
 	}
 
 	p.section.Stats = append(p.section.Stats, stat)
+	return stateParsingStats
+}
+
+func stateHeaderSwitch(p *parser) stateFn {
+	// Re-evaluate p.line as a header
+	switch {
+	case strings.Contains(p.line, "sec/op") || strings.Contains(p.line, "ns/op"):
+		p.report.NsPerOp = &Section{Metric: "ns/op"}
+		p.section = p.report.NsPerOp
+	case strings.Contains(p.line, "MB/s") || strings.Contains(p.line, "B/s"):
+		p.report.MiBPerS = &Section{Metric: "MB/s"}
+		p.section = p.report.MiBPerS
+	case strings.Contains(p.line, "B/op"):
+		p.report.BytePerOp = &Section{Metric: "B/op"}
+		p.section = p.report.BytePerOp
+	case strings.Contains(p.line, "allocs/op"):
+		p.report.AllocsPerOp = &Section{Metric: "allocs/op"}
+		p.section = p.report.AllocsPerOp
+	default:
+		return stateSearchingHeader
+	}
 	return stateParsingStats
 }
 
@@ -164,7 +191,7 @@ func parseValueUnit(s string) float64 {
 		multiplier = 1000
 	case strings.HasSuffix(unit, "ms"):
 		multiplier = 1000000
-	case strings.HasSuffix(unit, "s"):
+	case strings.HasSuffix(unit, "s") && !strings.Contains(unit, "/"):
 		multiplier = 1000000000
 	case strings.HasSuffix(unit, "k"):
 		multiplier = 1000
@@ -184,18 +211,18 @@ func parseValueUnit(s string) float64 {
 		multiplier = 1024 * 1024
 	case strings.HasSuffix(unit, "GB"):
 		multiplier = 1024 * 1024 * 1024
-	case strings.HasSuffix(unit, "B"):
+	case unit == "B" || strings.HasSuffix(unit, "B") && !unicode.IsLetter(rune(unit[0])):
+		multiplier = 1.0
+	case strings.HasSuffix(unit, "B/s"):
 		multiplier = 1.0
 	}
 	return val * multiplier
 }
 
 // RatioScale is the multiplier used when comparing Ours vs Standard.
-// A value of 1000.0 means parity (Ours == Standard).
 const RatioScale = 1000.0
 
 // ComputeRatio calculates the scaled ratio of two values (typically execution time).
-// Ours / Std * 1000. Higher values mean Ours is slower.
 func ComputeRatio(ours, std float64) float64 {
 	if std == 0 {
 		return 0
@@ -204,7 +231,6 @@ func ComputeRatio(ours, std float64) float64 {
 }
 
 // ComputeRatioThroughput calculates the scaled ratio for throughput (MB/s).
-// Ours / Std * 1000. Higher values mean Ours is faster (Better).
 func ComputeRatioThroughput(ours, std float64) float64 {
 	if std == 0 {
 		return 0

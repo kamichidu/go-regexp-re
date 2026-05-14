@@ -57,11 +57,27 @@ func (c *RegressionChecker) Run(path string) error {
 	}
 
 	report := benchstat.ParseReport(string(data))
+
+	// Collect names of parsed sections for debug
+	var parsed []string
+	if report.NsPerOp != nil {
+		parsed = append(parsed, "ns/op")
+	}
+	if report.MiBPerS != nil {
+		parsed = append(parsed, "MB/s")
+	}
+	if report.BytePerOp != nil {
+		parsed = append(parsed, "B/op")
+	}
+	if report.AllocsPerOp != nil {
+		parsed = append(parsed, "allocs/op")
+	}
+
 	if report.MiBPerS == nil {
-		panic("throughput (MB/s) section is missing from benchstat output")
+		panic(fmt.Sprintf("throughput (MB/s) section is missing from benchstat output (parsed: %v)", parsed))
 	}
 	if report.AllocsPerOp == nil {
-		panic("allocations (allocs/op) section is missing from benchstat output")
+		panic(fmt.Sprintf("allocations (allocs/op) section is missing from benchstat output (parsed: %v)", parsed))
 	}
 
 	var regressions []string

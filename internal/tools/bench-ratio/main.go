@@ -22,14 +22,24 @@ type Metric struct {
 }
 
 // Full regex to capture all 4 metrics
-// Groups: 1:GroupName, 2:Engine, 3:TestName, 4:ns/op, 5:MB/s, 6:B/op, 7:allocs/op
-var benchRe = regexp.MustCompile(`^Benchmark([^/]+)/([^/]+)/([^\s-]+)(?:-\d+)?\s+\d+\s+([\d\.]+)\s+ns/op(?:\s+([\d\.]+)\s+MB/s)?(?:\s+([\d\.]+)\s+B/op)?(?:\s+([\d\.]+)\s+allocs/op)?`)
+// Groups: 1:GroupName, 2:TestName, 3:Engine, 4:ns/op, 5:MB/s, 6:B/op, 7:allocs/op
+var benchRe = regexp.MustCompile(`^Benchmark([^/]+)/(.+)/([^\s/-]+)(?:-\d+)?\s+\d+\s+([\d\.]+)\s+ns/op(?:\s+([\d\.]+)\s+MB/s)?(?:\s+([\d\.]+)\s+B/op)?(?:\s+([\d\.]+)\s+allocs/op)?`)
 
 func main() {
 	if err := run(os.Stdin, os.Stdout); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+var knownEngines = map[string]bool{
+	"GoRegexp":   true,
+	"GoRegexpRe": true,
+	"Hyperscan":  true,
+	"PCRE2":      true,
+	"RE2":        true,
+	"RE2Wasm":    true,
+	"Coregex":    true,
 }
 
 func run(r io.Reader, w io.Writer) error {
@@ -45,8 +55,23 @@ func run(r io.Reader, w io.Writer) error {
 		matches := benchRe.FindStringSubmatch(line)
 		if len(matches) >= 5 {
 			groupName := matches[1]
-			engine := matches[2]
-			testName := matches[3]
+			p1 := matches[2]
+			p2 := matches[3]
+
+			var engine, testName string
+			if knownEngines[p1] {
+				// Old format: Suite/Engine/Test
+				engine = p1
+				testName = p2
+			} else if knownEngines[p2] {
+				// New format: Suite/Test/Engine
+				engine = p2
+				testName = p1
+			} else {
+				// Fallback or unknown
+				engine = p2
+				testName = p1
+			}
 
 			m := Metric{}
 			m.Ns, _ = strconv.ParseFloat(matches[4], 64)
