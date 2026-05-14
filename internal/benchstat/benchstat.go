@@ -96,7 +96,10 @@ func stateParsingStats(p *parser) stateFn {
 	}
 
 	// If we encounter a row that looks like a header (contains │ or known units)
-	if strings.Contains(p.line, "│") || strings.Contains(p.line, "sec/op") || strings.Contains(p.line, "B/s") {
+	if strings.Contains(p.line, "│") ||
+		strings.Contains(p.line, "sec/op") || strings.Contains(p.line, "ns/op") ||
+		strings.Contains(p.line, "B/s") || strings.Contains(p.line, "MB/s") ||
+		strings.Contains(p.line, "B/op") || strings.Contains(p.line, "allocs/op") {
 		return stateHeaderSwitch
 	}
 
