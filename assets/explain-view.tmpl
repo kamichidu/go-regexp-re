@@ -27,6 +27,9 @@
   Groups:   {{.NumGroups}} capturing groups
 
 [EXPLAIN - LOGICAL EXECUTION PLAN]
+{{if .Pass0.Skip -}}
++-- Pass 0: Skip (Search strategy not applicable to this pattern)
+{{- else -}}
 +- Pass 0: Discovery (MAP)
 |  |-- Gaze: {{.Pass0.Gaze}}
 {{- range $i, $d := .Pass0.GazeDetails}}
@@ -35,6 +38,7 @@
 |  +-- Snap: {{.Pass0.Snap}}
 {{- range $i, $d := .Pass0.SnapDetails}}
 |     {{if eq (add $i 1) (len $.Pass0.SnapDetails)}}+--{{else}}|--{{end}} {{.}}
+{{- end}}
 {{- end}}
 |
 +- Pass 1: Boundary Discovery ({{.Pass1.Engine}})

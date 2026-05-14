@@ -29,13 +29,45 @@ type Constraint struct {
 
 // CalculateSelectivity computes a score reflecting the expected throughput of a search pattern.
 // Higher scores indicate better selectivity (fewer false positives) and faster scanning.
-func CalculateSelectivity(length int, isAnchorJoined bool, hasClass bool) int {
-	score := length * 10
-	if isAnchorJoined {
-		score += 1000 // Boundary bonus for absolute or line-start anchors
-	}
+func CalculateSelectivity(anchor []byte, isAnchorJoined bool, hasClass bool) int {
+	length := len(anchor)
 	if hasClass {
-		score -= 50
+		length = 1
+	}
+
+	// Character diversity bonus
+	unique := 0
+	if length > 0 && !hasClass {
+		seen := [4]uint64{}
+		for _, b := range anchor {
+			idx := b / 64
+			bit := uint64(1) << (b % 64)
+			if seen[idx]&bit == 0 {
+				unique++
+				seen[idx] |= bit
+			}
+		}
+	} else if hasClass {
+		unique = 1
+	}
+
+	// Base score: length and diversity
+	score := (length * 5) + (unique * 15)
+
+	// Non-linear bonus for longer literals (where SIMD really shines)
+	if length >= 4 {
+		score += 20
+	}
+	if length >= 8 {
+		score += 40
+	}
+
+	if isAnchorJoined {
+		score += 200 // Boundary bonus for absolute or line-start anchors
+	}
+
+	if hasClass {
+		score -= 30
 	}
 	return score
 }
@@ -432,36 +464,36 @@ func ExtractConstraints(re *syntax.Regexp, anchor *AnchorInfo, anchorIdx int) {
 
 	if anchor.HasClass {
 		if anchor.HasBeginText && anchor.Distance == 0 {
-			score := CalculateSelectivity(1, true, true)
+			score := CalculateSelectivity(nil, true, true)
 			anchor.Augmented = append(anchor.Augmented, AugmentedPattern{Class: anchor.Class, HasClass: true, Selectivity: score, AnchorIdx: anchorIdx, Offset: 0, IsStart: true})
 		}
 		if anchor.HasBeginLine && anchor.Distance == 0 && (re.Flags&syntax.OneLine == 0) {
-			score := CalculateSelectivity(2, true, true)
+			score := CalculateSelectivity(nil, true, true)
 			anchor.Augmented = append(anchor.Augmented, AugmentedPattern{Pattern: []byte{'\n'}, Class: anchor.Class, HasClass: true, Selectivity: score, AnchorIdx: anchorIdx, Offset: 1})
-			score = CalculateSelectivity(1, true, true)
+			score = CalculateSelectivity(nil, true, true)
 			anchor.Augmented = append(anchor.Augmented, AugmentedPattern{Class: anchor.Class, HasClass: true, Selectivity: score, AnchorIdx: anchorIdx, Offset: 0, IsStart: true})
 		}
 	} else if len(anchor.Anchor) > 0 {
 		if anchor.HasBeginText && anchor.Distance == 0 {
-			score := CalculateSelectivity(len(anchor.Anchor), true, false)
+			score := CalculateSelectivity(anchor.Anchor, true, false)
 			anchor.Augmented = append(anchor.Augmented, AugmentedPattern{Pattern: anchor.Anchor, Selectivity: score, AnchorIdx: anchorIdx, Offset: 0, IsStart: true})
 		}
 		if anchor.HasEndText && anchor.MaxDistToEnd == 0 {
-			score := CalculateSelectivity(len(anchor.Anchor), true, false)
+			score := CalculateSelectivity(anchor.Anchor, true, false)
 			anchor.Augmented = append(anchor.Augmented, AugmentedPattern{Pattern: anchor.Anchor, Selectivity: score, AnchorIdx: anchorIdx, Offset: 0, IsEnd: true})
 		}
 		if anchor.HasBeginLine && anchor.Distance == 0 && (re.Flags&syntax.OneLine == 0) {
 			p := append([]byte{'\n'}, anchor.Anchor...)
-			score := CalculateSelectivity(len(p), true, false)
+			score := CalculateSelectivity(p, true, false)
 			anchor.Augmented = append(anchor.Augmented, AugmentedPattern{Pattern: p, Selectivity: score, AnchorIdx: anchorIdx, Offset: 1})
-			score = CalculateSelectivity(len(anchor.Anchor), true, false)
+			score = CalculateSelectivity(anchor.Anchor, true, false)
 			anchor.Augmented = append(anchor.Augmented, AugmentedPattern{Pattern: anchor.Anchor, Selectivity: score, AnchorIdx: anchorIdx, Offset: 0, IsStart: true})
 		}
 		if anchor.HasEndLine && anchor.MaxDistToLineEnd == 0 && (re.Flags&syntax.OneLine == 0) {
 			p := append(append([]byte(nil), anchor.Anchor...), '\n')
-			score := CalculateSelectivity(len(p), true, false)
+			score := CalculateSelectivity(p, true, false)
 			anchor.Augmented = append(anchor.Augmented, AugmentedPattern{Pattern: p, Selectivity: score, AnchorIdx: anchorIdx, Offset: 0})
-			score = CalculateSelectivity(len(anchor.Anchor), true, false)
+			score = CalculateSelectivity(anchor.Anchor, true, false)
 			anchor.Augmented = append(anchor.Augmented, AugmentedPattern{Pattern: anchor.Anchor, Selectivity: score, AnchorIdx: anchorIdx, Offset: 0, IsEnd: true})
 		}
 	}
@@ -1264,15 +1296,11 @@ func (a *AnchorInfo) Score() int {
 	if !a.Mandatory {
 		return 0
 	}
-	length := len(a.Anchor)
-	if a.HasClass {
-		length = 1
-	}
 
 	isAnchorJoined := a.HasBeginText || a.HasBeginLine || a.HasEndText || a.HasEndLine
-	score := CalculateSelectivity(length, isAnchorJoined, a.HasClass)
+	score := CalculateSelectivity(a.Anchor, isAnchorJoined, a.HasClass)
 
-	if length == 0 && !a.HasClass {
+	if len(a.Anchor) == 0 && !a.HasClass {
 		// Just an anchor (^, $, etc.) without any surrounding literals or classes.
 		// These are highly selective but not suitable for bytes.Index.
 		score = 0
