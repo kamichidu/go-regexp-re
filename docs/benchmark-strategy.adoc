@@ -27,6 +27,11 @@ Simple repetitions of the same pattern can lead to unrealistic branch prediction
 - Force the engine to actually "search" through the data.
 - Disrupt the CPU's branch predictor, providing more realistic throughput figures.
 
+=== 3. Interleaved Engine Execution
+To further cancel out temporal noise (OS background tasks, CPU frequency scaling), we employ **Interleaved Engine Execution**.
+- For each test case, we run all registered engines (`GoRegexp`, `GoRegexpRe`, etc.) back-to-back.
+- This ensures that all engines are evaluated under nearly identical system conditions for every specific pattern, eliminating the "drift" that occurs when running engine suites sequentially.
+
 == The Hybrid Metric Protocol
 
 We categorize metrics into two types based on their stability and sensitivity to hardware noise.
@@ -36,11 +41,11 @@ We categorize metrics into two types based on their stability and sensitivity to
 
 | **Time (ns/op)**
 | **Relative (Ratio)**
-| Highly sensitive to CPU load/frequency. Normalized as `Re / Std`.
+| Highly sensitive to CPU load/frequency. Normalized as `Re / Std` (Ours / Std).
 
 | **Throughput (MB/s)**
 | **Relative (Ratio)**
-| Directly derived from time. Normalized as `Re / Std`.
+| Directly derived from time. Normalized as `Re / Std` (higher is better).
 
 | **Memory (B/op)**
 | **Absolute**
@@ -59,30 +64,51 @@ The project maintains a tiered benchmarking pipeline to ensure zero-regression a
 - **Focused Scope**: To ensure fast feedback, PR benchmarks are limited to the **`Synthetic`** suite, focusing on core optimization layers.
 - **Baseline Retrieval**: Downloads the latest `main` baseline from `gh-pages`.
 - **Ratio-of-Ratios**: Uses `internal/tools/bench-ratio` to compare the PR's speedup factor against the main's speedup factor.
-- **Regression Detection**: A PR is flagged if its relative performance (Ratio) degrades by more than **10%**, regardless of absolute execution time.
+- **Regression Detection**: PRs are evaluated via `internal/tools/check-regression` (see section 5).
 
 === 2. Main-Branch Audit (`benchmark.yml`)
 - **Full Coverage**: Executes the complete benchmark suite to establish a global baseline.
 - **Robust Persistence**: Results and visualizations are deployed to `gh-pages` **before** the regression check. This ensures that the performance history is preserved even if a regression is detected.
 - **Latest Baseline**: Updates `benchmarks/baseline/benchmark-main.txt` for future PR comparisons.
 
+== Regression Detection Policy
+
+We employ a dual-layered regression check to ensure both absolute goals and relative stability.
+
+=== 1. Absolute Check (Ours vs Standard)
+Ensures the engine never falls significantly behind the standard library on key patterns.
+- **Target**: Throughput (MB/s).
+- **Threshold**: Respects `-threshold` (default 1.1). A ratio < 909 (1000 / 1.1) triggers an error.
+- **Rationale**: Guarantees the "Faster than Std" constitution.
+
+=== 2. Relative Check (PR vs Baseline)
+Ensures current changes do not degrade existing performance or memory efficiency.
+- **Throughput (MB/s)**: Respects `-threshold` (default 10%). A decrease > 10% (negative delta) triggers an error.
+- **Allocations (allocs/op)**: **Zero-Tolerance Policy**. Any increase in allocations (positive delta > 0) triggers an immediate regression error, regardless of the threshold.
+
 == Tooling & Usage
 
+=== `internal/benchstat`
+A shared package for parsing `benchstat` output and managing project-wide ratio calculation logic (`Ours/Std * 1000`).
+
 === `internal/tools/bench-ratio`
-A specialized Go tool that converts raw `go test -bench` output into a normalized ratio format.
+Converts raw `go test -bench` output into a normalized ratio format using `benchstat.ComputeRatio` (for time) and `benchstat.ComputeRatioThroughput` (for throughput).
 [source,bash]
 ----
-# Generate relative performance data
-go test -bench . -tags goregexp,goregexpre | ./_scripts/bench-ratio.sh > results.txt
+go test -bench . -tags goregexp,goregexpre | (cd internal/tools/bench-ratio && go run .) > results.txt
 ----
 
-=== `benchstat` Integration
-We leverage `go tool benchstat` for all comparisons to ensure statistical significance (`p-value` and confidence intervals).
-
+=== `internal/tools/check-regression`
+A Go-based tool that evaluates `benchstat` reports against the regression policy.
 [source,bash]
 ----
-# Compare PR ratios against Main ratios
-go tool benchstat main-ratio.txt pr-ratio.txt
+# Check absolute performance (vs Std)
+go tool benchstat current.txt > abs.stat
+(cd internal/tools/check-regression && go run . -mode absolute -threshold 1.1 abs.stat)
+
+# Check relative performance (vs Baseline)
+go tool benchstat baseline.txt current.txt > rel.stat
+(cd internal/tools/check-regression && go run . -mode relative -threshold 1.1 rel.stat)
 ----
 
 == Key Performance Indicators (KPIs)

@@ -45,29 +45,24 @@ jobs:
           echo "This report evaluates performance changes relative to the standard library and the current \`main\` branch baseline." >> pr_comment.md
 
           # Convert raw benchmarks to relative ratios (Re/Std)
+          # benchmark-main.txt was downloaded in the previous step
           ./_scripts/bench-ratio.sh < benchmark-main.txt > main-ratio.txt
           ./_scripts/bench-ratio.sh < benchmark-pr.txt > pr-ratio.txt
 
           # 1. Delta Analysis (Previous vs Current)
           if [ -s main-ratio.txt ]; then
+            echo "" >> pr_comment.md
             echo "#### Speedup Factor Delta (Main vs PR)" >> pr_comment.md
-            echo "Lower percentage means the PR is **faster relative to standard library** than main was." >> pr_comment.md
+            echo "Higher percentage means the PR is **faster relative to standard library** than main was." >> pr_comment.md
             echo '```' >> pr_comment.md
             go tool benchstat main-ratio.txt pr-ratio.txt | tee delta.txt >> pr_comment.md
             echo '```' >> pr_comment.md
           fi
 
-          # 2. Absolute Analysis (Standard vs Re)
-          echo "#### Current Speedup (Standard vs Ours)" >> pr_comment.md
-          echo '<details><summary>Click to view current speedup details</summary>' >> pr_comment.md
-          echo '' >> pr_comment.md
-          echo '```' >> pr_comment.md
-          go tool benchstat -col /GoRegexp/GoRegexpRe benchmark-pr.txt >> pr_comment.md
-          echo '```' >> pr_comment.md
-          echo '</details>' >> pr_comment.md
 
-          # 3. Regression Detection
+          # 2. Regression Detection
           chmod +x _scripts/check-regression.sh
+          # Pass 2 arguments to trigger relative check (Current, Baseline)
           if ./_scripts/check-regression.sh pr-ratio.txt main-ratio.txt; then
             echo "REGRESSION_DETECTED=false" >> $GITHUB_ENV
           else
@@ -80,7 +75,7 @@ jobs:
           # Prepend a warning to the comment file
           SED_TMP=$(mktemp)
           echo "## ⚠️ WARNING: Performance Regression Detected!" > $SED_TMP
-          echo "Some benchmarks for \`GoRegexpRe\` showed a significant slowdown (> 10%) compared to \`main\`. Please review the Delta Analysis below." >> $SED_TMP
+          echo "Some benchmarks for \`GoRegexpRe\` showed a significant throughput slowdown or allocation increase compared to \`main\`. Please review the Delta Analysis below." >> $SED_TMP
           echo "" >> $SED_TMP
           cat pr_comment.md >> $SED_TMP
           mv $SED_TMP pr_comment.md
