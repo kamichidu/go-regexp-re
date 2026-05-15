@@ -51,6 +51,9 @@ An optimization that extracts common prefixes from alternation branches to enabl
 === 13. xref:algorithm/searching-dfa.adoc[Searching DFA (sDFA) - Multi-byte Pre-filter]
 A lightweight, `uint8`-based DFA that acts as a 2-stage multi-byte pre-filter in Pass 0. It combines a SIMD-accelerated trigger set and a DFA scan to resolve complex prefixes (e.g., `(abc|def)`). **The engine statically selects the most efficient pre-filter during compilation: Literal (SIMD) > SearchWarp (SWAR) > sDFA.**
 
+=== 14. xref:algorithm/rejected-regexp-struct-optimization.adoc[Regexp Struct Field Alignment Optimization - Rejected]
+A structural optimization of the `Regexp` object to minimize memory footprint. This was **rejected** because benchmarks confirmed that memory layout is not on the critical path for the DFA's execution speed.
+
 == Design Philosophy
 
 * **Pure Go (Zero CGO)**: Achieving maximum performance without sacrificing portability or introducing the overhead of C-interop.

@@ -1,0 +1,34 @@
+= Regexp Struct Field Alignment Optimization - [Rejected]
+
+== Methodology
+To determine if reordering the fields in the `Regexp` struct impacts performance, we isolated the Pass 1 (Naked DFA) execution path.
+
+* **Target:** `pass1_BoundaryDiscoveryFast` execution time.
+* **Input:** A short string (`"abc"`) matching a simple pattern (`"a.c"`). A short string was chosen specifically to maximize the relative cost of loading the `Regexp` struct compared to the actual scanning time.
+* **Execution:** Run via `go test -bench BenchmarkShortStringMatch -benchmem -count 10` to ensure statistical stability.
+* **Environment:** Linux/amd64, Intel(R) Xeon(R) CPU @ 2.80GHz.
+
+== Fact (Results)
+The `Regexp` struct was reordered to group heavily accessed fields (`dfa`, `matchState`) into the first 64-byte cache line and to order fields from largest to smallest to minimize padding.
+
+[cols="1,2,2", options="header"]
+|===
+| Metric | Baseline (Before) | Optimized (After)
+| Struct Size | 312 bytes | 296 bytes (-16 bytes)
+| Internal Padding | 19 bytes | 3 bytes
+| Latency | ~12.36 ns/op | ~12.37 ns/op
+| Allocations | 0 allocs/op | 0 allocs/op
+|===
+
+== Analysis
+The benchmark results show no statistically significant difference in execution latency. The observed variance (~±0.1 ns/op) is larger than the measured delta, confirming statistical parity.
+
+The lack of speed improvement is attributed to the following architectural factors:
+1. **Critical Path Isolation:** The Pass 1 execution path is dominated by branch resolution and state transition logic (Compute/Branch Bound) rather than memory access patterns. Therefore, changes to the `Regexp` struct's internal layout do not affect the critical execution path.
+2. **Register Hoisting:** The Go compiler optimizes the hot loop by loading necessary struct fields (such as `dfa.Transitions()`) into local variables (registers) before the loop begins. This eliminates per-step struct member access.
+3. **Hardware Prefetching:** On modern x86 architectures, the difference between loading 296 bytes versus 312 bytes is masked by hardware prefetchers, making the layout impact negligible even for short-string workloads.
+
+== Conclusion
+Reordering the `Regexp` struct fields provides **no measurable speed improvement** (throughput or latency) for regex execution. No correlation between struct size reduction and latency improvement was observed across repeated runs.
+
+Based on this evidence, the optimization was **REJECTED**. While it reduces the memory footprint (-16 bytes), the lack of impact on runtime performance does not justify the modification of the core API structure. This case serves as proof that for the current DFA implementation, **memory layout is not on the critical path.**
