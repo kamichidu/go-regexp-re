@@ -1,170 +1,82 @@
 [
   {
     "engine": "GoRegexp",
-    "category": "Landscape/S=0.90/B=1/L=0.10",
-    "s": 0.9,
-    "b": 0.5,
-    "l": 1,
-    "throughput": 9136.73
-  },
-  {
-    "engine": "GoRegexp",
-    "category": "Landscape/S=0.90/B=1/L=0.90",
-    "s": 0.9,
-    "b": 0.5,
-    "l": 1,
-    "throughput": 9146.356
-  },
-  {
-    "engine": "GoRegexp",
-    "category": "Landscape/S=0.90/B=10/L=0.10",
-    "s": 0.9,
+    "category": "Anchors/pat=(?m)HTTP/1.1$",
+    "s": 0.05,
     "b": 0.5124973964842103,
     "l": 0.75,
-    "throughput": 9131.34
+    "throughput": 832.85
   },
   {
     "engine": "GoRegexp",
-    "category": "Landscape/S=0.90/B=10/L=0.90",
-    "s": 0.9,
+    "category": "Anchors/pat=(?m)^127.0.0.1",
+    "s": 0.05,
+    "b": 0.5124973964842103,
+    "l": 0.3333333333333333,
+    "throughput": 66.9
+  },
+  {
+    "engine": "GoRegexp",
+    "category": "Anchors/pat=HTTP/1.1$",
+    "s": 0.05,
     "b": 0.5124973964842103,
     "l": 0.75,
-    "throughput": 9134.306
+    "throughput": 860.658
   },
   {
     "engine": "GoRegexp",
-    "category": "Landscape/S=0.90/B=50/L=0.10",
-    "s": 0.9,
-    "b": 0.6524894621927444,
-    "l": 0.25,
-    "throughput": 9135.442
-  },
-  {
-    "engine": "GoRegexp",
-    "category": "Landscape/S=0.90/B=50/L=0.90",
-    "s": 0.9,
-    "b": 0.6524894621927444,
-    "l": 0.25,
-    "throughput": 9141.352
-  },
-  {
-    "engine": "GoRegexp",
-    "category": "Landscape/S=0.50/B=1/L=0.10",
-    "s": 0.5,
-    "b": 0.5,
-    "l": 1,
-    "throughput": 9175.152
-  },
-  {
-    "engine": "GoRegexp",
-    "category": "Landscape/S=0.50/B=1/L=0.90",
-    "s": 0.5,
-    "b": 0.5,
-    "l": 1,
-    "throughput": 9127.804
-  },
-  {
-    "engine": "GoRegexp",
-    "category": "Landscape/S=0.50/B=10/L=0.90",
-    "s": 0.5,
+    "category": "Anchors/pat=\\bGET\\b",
+    "s": 0.05,
     "b": 0.5124973964842103,
-    "l": 0.75,
-    "throughput": 9144.36
-  },
-  {
-    "engine": "GoRegexp",
-    "category": "Landscape/S=0.50/B=10/L=0.10",
-    "s": 0.5,
-    "b": 0.5124973964842103,
-    "l": 0.75,
-    "throughput": 9120.632000000001
-  },
-  {
-    "engine": "GoRegexp",
-    "category": "Landscape/S=0.50/B=50/L=0.90",
-    "s": 0.5,
-    "b": 0.6524894621927444,
-    "l": 0.25,
-    "throughput": 9104.434
-  },
-  {
-    "engine": "GoRegexp",
-    "category": "Landscape/S=0.50/B=50/L=0.10",
-    "s": 0.5,
-    "b": 0.6524894621927444,
-    "l": 0.25,
-    "throughput": 9121.142
-  },
-  {
-    "engine": "GoRegexp",
-    "category": "Landscape/S=0.10/B=1/L=0.90",
-    "s": 0.1,
-    "b": 0.5,
     "l": 1,
-    "throughput": 9167.382000000001
+    "throughput": 1950258.814
   },
   {
     "engine": "GoRegexp",
-    "category": "Landscape/S=0.10/B=1/L=0.10",
-    "s": 0.1,
-    "b": 0.5,
-    "l": 1,
-    "throughput": 1043.6280000000002
-  },
-  {
-    "engine": "GoRegexp",
-    "category": "Landscape/S=0.10/B=10/L=0.90",
-    "s": 0.1,
+    "category": "Anchors/pat=^127.0.0.1",
+    "s": 0.05,
     "b": 0.5124973964842103,
-    "l": 0.75,
-    "throughput": 9154.142
+    "l": 0.3333333333333333,
+    "throughput": 59692074.60999999
   },
   {
     "engine": "GoRegexp",
-    "category": "Landscape/S=0.10/B=10/L=0.10",
-    "s": 0.1,
-    "b": 0.5124973964842103,
-    "l": 0.75,
-    "throughput": 1040.574
+    "category": "Capturing/Email",
+    "s": 0.00007628928898382667,
+    "b": 0.6224593312018546,
+    "l": 0.2,
+    "throughput": 492287.31200000003
   },
   {
     "engine": "GoRegexp",
-    "category": "Landscape/S=0.10/B=50/L=0.10",
-    "s": 0.1,
-    "b": 0.6524894621927444,
-    "l": 0.25,
-    "throughput": 1042.9779999999998
-  },
-  {
-    "engine": "GoRegexp",
-    "category": "Landscape/S=0.10/B=50/L=0.90",
-    "s": 0.1,
-    "b": 0.6524894621927444,
-    "l": 0.25,
-    "throughput": 9165.117999999999
-  },
-  {
-    "engine": "GoRegexp",
-    "category": "Landscape/S=0.01/B=1/L=0.90",
-    "s": 0.01,
-    "b": 0.5,
-    "l": 1,
-    "throughput": 23443.424000000003
+    "category": "Capturing/URI",
+    "s": 0.00007628928898382667,
+    "b": 0.7502601055951177,
+    "l": 0.18181818181818182,
+    "throughput": 2237301.128
   },
   {
     "engine": "GoRegexp",
     "category": "Landscape/S=0.01/B=1/L=0.10",
     "s": 0.01,
     "b": 0.5,
-    "l": 1,
+    "l": 0.1,
     "throughput": 9142.011999999999
+  },
+  {
+    "engine": "GoRegexp",
+    "category": "Landscape/S=0.01/B=1/L=0.90",
+    "s": 0.01,
+    "b": 0.5,
+    "l": 0.9,
+    "throughput": 23443.424000000003
   },
   {
     "engine": "GoRegexp",
     "category": "Landscape/S=0.01/B=10/L=0.10",
     "s": 0.01,
     "b": 0.5124973964842103,
-    "l": 0.75,
+    "l": 0.07500000000000001,
     "throughput": 9119.554
   },
   {
@@ -172,191 +84,367 @@
     "category": "Landscape/S=0.01/B=10/L=0.90",
     "s": 0.01,
     "b": 0.5124973964842103,
-    "l": 0.75,
+    "l": 0.675,
     "throughput": 23440.868
-  },
-  {
-    "engine": "GoRegexp",
-    "category": "Landscape/S=0.01/B=50/L=0.90",
-    "s": 0.01,
-    "b": 0.6524894621927444,
-    "l": 0.25,
-    "throughput": 23378.752
   },
   {
     "engine": "GoRegexp",
     "category": "Landscape/S=0.01/B=50/L=0.10",
     "s": 0.01,
     "b": 0.6524894621927444,
-    "l": 0.25,
+    "l": 0.025,
     "throughput": 9153.398000000001
   },
   {
-    "engine": "GoRegexpRe",
-    "category": "Landscape/S=0.90/B=1/L=0.10",
-    "s": 0.9,
-    "b": 0.5,
-    "l": 1,
-    "throughput": 9113.738
-  },
-  {
-    "engine": "GoRegexpRe",
-    "category": "Landscape/S=0.90/B=1/L=0.90",
-    "s": 0.9,
-    "b": 0.5,
-    "l": 1,
-    "throughput": 9173.974
-  },
-  {
-    "engine": "GoRegexpRe",
-    "category": "Landscape/S=0.90/B=10/L=0.10",
-    "s": 0.9,
-    "b": 0.5124973964842103,
-    "l": 0.75,
-    "throughput": 9179.516
-  },
-  {
-    "engine": "GoRegexpRe",
-    "category": "Landscape/S=0.90/B=10/L=0.90",
-    "s": 0.9,
-    "b": 0.5124973964842103,
-    "l": 0.75,
-    "throughput": 9172.18
-  },
-  {
-    "engine": "GoRegexpRe",
-    "category": "Landscape/S=0.90/B=50/L=0.90",
-    "s": 0.9,
+    "engine": "GoRegexp",
+    "category": "Landscape/S=0.01/B=50/L=0.90",
+    "s": 0.01,
     "b": 0.6524894621927444,
-    "l": 0.25,
-    "throughput": 9183.936
+    "l": 0.225,
+    "throughput": 23378.752
   },
   {
-    "engine": "GoRegexpRe",
-    "category": "Landscape/S=0.90/B=50/L=0.10",
-    "s": 0.9,
-    "b": 0.6524894621927444,
-    "l": 0.25,
-    "throughput": 9179.702
-  },
-  {
-    "engine": "GoRegexpRe",
-    "category": "Landscape/S=0.50/B=1/L=0.90",
-    "s": 0.5,
-    "b": 0.5,
-    "l": 1,
-    "throughput": 9180.678
-  },
-  {
-    "engine": "GoRegexpRe",
-    "category": "Landscape/S=0.50/B=1/L=0.10",
-    "s": 0.5,
-    "b": 0.5,
-    "l": 1,
-    "throughput": 9180.764000000001
-  },
-  {
-    "engine": "GoRegexpRe",
-    "category": "Landscape/S=0.50/B=10/L=0.90",
-    "s": 0.5,
-    "b": 0.5124973964842103,
-    "l": 0.75,
-    "throughput": 9171.342
-  },
-  {
-    "engine": "GoRegexpRe",
-    "category": "Landscape/S=0.50/B=10/L=0.10",
-    "s": 0.5,
-    "b": 0.5124973964842103,
-    "l": 0.75,
-    "throughput": 9162.48
-  },
-  {
-    "engine": "GoRegexpRe",
-    "category": "Landscape/S=0.50/B=50/L=0.10",
-    "s": 0.5,
-    "b": 0.6524894621927444,
-    "l": 0.25,
-    "throughput": 9167.470000000001
-  },
-  {
-    "engine": "GoRegexpRe",
-    "category": "Landscape/S=0.50/B=50/L=0.90",
-    "s": 0.5,
-    "b": 0.6524894621927444,
-    "l": 0.25,
-    "throughput": 9180.25
-  },
-  {
-    "engine": "GoRegexpRe",
+    "engine": "GoRegexp",
     "category": "Landscape/S=0.10/B=1/L=0.10",
     "s": 0.1,
     "b": 0.5,
-    "l": 1,
-    "throughput": 1071.52
+    "l": 0.1,
+    "throughput": 1043.6280000000002
   },
   {
-    "engine": "GoRegexpRe",
+    "engine": "GoRegexp",
     "category": "Landscape/S=0.10/B=1/L=0.90",
     "s": 0.1,
     "b": 0.5,
-    "l": 1,
-    "throughput": 9174.937999999998
+    "l": 0.9,
+    "throughput": 9167.382000000001
   },
   {
-    "engine": "GoRegexpRe",
-    "category": "Landscape/S=0.10/B=10/L=0.90",
-    "s": 0.1,
-    "b": 0.5124973964842103,
-    "l": 0.75,
-    "throughput": 9165.772
-  },
-  {
-    "engine": "GoRegexpRe",
+    "engine": "GoRegexp",
     "category": "Landscape/S=0.10/B=10/L=0.10",
     "s": 0.1,
     "b": 0.5124973964842103,
-    "l": 0.75,
-    "throughput": 1070.568
+    "l": 0.07500000000000001,
+    "throughput": 1040.574
   },
   {
-    "engine": "GoRegexpRe",
+    "engine": "GoRegexp",
+    "category": "Landscape/S=0.10/B=10/L=0.90",
+    "s": 0.1,
+    "b": 0.5124973964842103,
+    "l": 0.675,
+    "throughput": 9154.142
+  },
+  {
+    "engine": "GoRegexp",
     "category": "Landscape/S=0.10/B=50/L=0.10",
     "s": 0.1,
     "b": 0.6524894621927444,
-    "l": 0.25,
-    "throughput": 1072.9379999999999
+    "l": 0.025,
+    "throughput": 1042.9779999999998
   },
   {
-    "engine": "GoRegexpRe",
+    "engine": "GoRegexp",
     "category": "Landscape/S=0.10/B=50/L=0.90",
     "s": 0.1,
     "b": 0.6524894621927444,
-    "l": 0.25,
-    "throughput": 9181.354000000001
+    "l": 0.225,
+    "throughput": 9165.117999999999
   },
   {
-    "engine": "GoRegexpRe",
-    "category": "Landscape/S=0.01/B=1/L=0.90",
+    "engine": "GoRegexp",
+    "category": "Landscape/S=0.50/B=1/L=0.10",
+    "s": 0.5,
+    "b": 0.5,
+    "l": 0.1,
+    "throughput": 9175.152
+  },
+  {
+    "engine": "GoRegexp",
+    "category": "Landscape/S=0.50/B=1/L=0.90",
+    "s": 0.5,
+    "b": 0.5,
+    "l": 0.9,
+    "throughput": 9127.804
+  },
+  {
+    "engine": "GoRegexp",
+    "category": "Landscape/S=0.50/B=10/L=0.10",
+    "s": 0.5,
+    "b": 0.5124973964842103,
+    "l": 0.07500000000000001,
+    "throughput": 9120.632000000001
+  },
+  {
+    "engine": "GoRegexp",
+    "category": "Landscape/S=0.50/B=10/L=0.90",
+    "s": 0.5,
+    "b": 0.5124973964842103,
+    "l": 0.675,
+    "throughput": 9144.36
+  },
+  {
+    "engine": "GoRegexp",
+    "category": "Landscape/S=0.50/B=50/L=0.10",
+    "s": 0.5,
+    "b": 0.6524894621927444,
+    "l": 0.025,
+    "throughput": 9121.142
+  },
+  {
+    "engine": "GoRegexp",
+    "category": "Landscape/S=0.50/B=50/L=0.90",
+    "s": 0.5,
+    "b": 0.6524894621927444,
+    "l": 0.225,
+    "throughput": 9104.434
+  },
+  {
+    "engine": "GoRegexp",
+    "category": "Landscape/S=0.90/B=1/L=0.10",
+    "s": 0.9,
+    "b": 0.5,
+    "l": 0.1,
+    "throughput": 9136.73
+  },
+  {
+    "engine": "GoRegexp",
+    "category": "Landscape/S=0.90/B=1/L=0.90",
+    "s": 0.9,
+    "b": 0.5,
+    "l": 0.9,
+    "throughput": 9146.356
+  },
+  {
+    "engine": "GoRegexp",
+    "category": "Landscape/S=0.90/B=10/L=0.10",
+    "s": 0.9,
+    "b": 0.5124973964842103,
+    "l": 0.07500000000000001,
+    "throughput": 9131.34
+  },
+  {
+    "engine": "GoRegexp",
+    "category": "Landscape/S=0.90/B=10/L=0.90",
+    "s": 0.9,
+    "b": 0.5124973964842103,
+    "l": 0.675,
+    "throughput": 9134.306
+  },
+  {
+    "engine": "GoRegexp",
+    "category": "Landscape/S=0.90/B=50/L=0.10",
+    "s": 0.9,
+    "b": 0.6524894621927444,
+    "l": 0.025,
+    "throughput": 9135.442
+  },
+  {
+    "engine": "GoRegexp",
+    "category": "Landscape/S=0.90/B=50/L=0.90",
+    "s": 0.9,
+    "b": 0.6524894621927444,
+    "l": 0.225,
+    "throughput": 9141.352
+  },
+  {
+    "engine": "GoRegexp",
+    "category": "LargeAlternation/Count=10",
+    "s": 0.0000076290962286516434,
+    "b": 0.7190996574163838,
+    "l": 0.125,
+    "throughput": 55408.89
+  },
+  {
+    "engine": "GoRegexp",
+    "category": "LargeAlternation/Count=100",
+    "s": 0.0000076290962286516434,
+    "b": 0.9970115276645228,
+    "l": 0.023529411764705882,
+    "throughput": 55336.06999999999
+  },
+  {
+    "engine": "GoRegexp",
+    "category": "LargeAlternation/Count=1000",
+    "s": 0.0000076290962286516434,
+    "b": 1,
+    "l": 0.00392156862745098,
+    "throughput": 53681.536
+  },
+  {
+    "engine": "GoRegexp",
+    "category": "LargeAlternation/Count=10000",
+    "s": 0.0000076290962286516434,
+    "b": 1,
+    "l": 0.0003403014098201264,
+    "throughput": 53903.35400000001
+  },
+  {
+    "engine": "GoRegexp",
+    "category": "LiteralScan/pat=Sherlock",
+    "s": 0.000006584318786378361,
+    "b": 0.5,
+    "l": 1,
+    "throughput": 4196682.572
+  },
+  {
+    "engine": "GoRegexp",
+    "category": "NFAWorstCase/Run",
+    "s": 0.01,
+    "b": 0.5986876601124521,
+    "l": 0.5,
+    "throughput": 21.274
+  },
+  {
+    "engine": "GoRegexp",
+    "category": "StandardSuite/Alternation/(fo|foo)",
+    "s": 0.0038910505836575876,
+    "b": 0.5670929049654543,
+    "l": 0.6666666666666666,
+    "throughput": 6092336.098
+  },
+  {
+    "engine": "GoRegexp",
+    "category": "StandardSuite/Anchored/^(?:a)$",
+    "s": 0.0029211295034079843,
+    "b": 0.5124973964842103,
+    "l": 1,
+    "throughput": 26234218.286000002
+  },
+  {
+    "engine": "GoRegexp",
+    "category": "StandardSuite/CharClass/(?i)[@-A]+",
+    "s": 0.005825242718446602,
+    "b": 0.5374298453437496,
+    "l": 0,
+    "throughput": 7950416.854
+  },
+  {
+    "engine": "GoRegexp",
+    "category": "StandardSuite/Complex/a+",
+    "s": 0.0038910505836575876,
+    "b": 0.5374298453437496,
+    "l": 1,
+    "throughput": 8289334.75
+  },
+  {
+    "engine": "GoRegexp",
+    "category": "StandardSuite/Literal/a",
+    "s": 0.0029211295034079843,
+    "b": 0.5,
+    "l": 1,
+    "throughput": 9733723.29
+  },
+  {
+    "engine": "GoRegexp",
+    "category": "Synthetic/CCWarp",
+    "s": 1,
+    "b": 0.549833997312478,
+    "l": 0,
+    "throughput": 72.202
+  },
+  {
+    "engine": "GoRegexp",
+    "category": "Synthetic/PureDFA",
+    "s": 1,
+    "b": 0.5866175789173301,
+    "l": 0.16666666666666666,
+    "throughput": 38.356
+  },
+  {
+    "engine": "GoRegexp",
+    "category": "Synthetic/SIMDWarp",
     "s": 0.01,
     "b": 0.5,
     "l": 1,
-    "throughput": 23409.678000000004
+    "throughput": 54885.630000000005
+  },
+  {
+    "engine": "GoRegexp",
+    "category": "Synthetic/SearchWarp",
+    "s": 0.01,
+    "b": 0.5374298453437496,
+    "l": 0,
+    "throughput": 48.726000000000006
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "Anchors/pat=(?m)HTTP/1.1$",
+    "s": 0.05,
+    "b": 0.5124973964842103,
+    "l": 0.75,
+    "throughput": 1686.7279999999998
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "Anchors/pat=(?m)^127.0.0.1",
+    "s": 0.05,
+    "b": 0.5124973964842103,
+    "l": 0.3333333333333333,
+    "throughput": 16523.052
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "Anchors/pat=HTTP/1.1$",
+    "s": 0.05,
+    "b": 0.5124973964842103,
+    "l": 0.75,
+    "throughput": 48369180.633999996
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "Anchors/pat=\\bGET\\b",
+    "s": 0.05,
+    "b": 0.5124973964842103,
+    "l": 1,
+    "throughput": 37605442.736
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "Anchors/pat=^127.0.0.1",
+    "s": 0.05,
+    "b": 0.5124973964842103,
+    "l": 0.3333333333333333,
+    "throughput": 104780694.12600002
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "Capturing/Email",
+    "s": 0.00007628928898382667,
+    "b": 0.6224593312018546,
+    "l": 0.2,
+    "throughput": 1109126.548
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "Capturing/URI",
+    "s": 0.00007628928898382667,
+    "b": 0.7502601055951177,
+    "l": 0.18181818181818182,
+    "throughput": 12266727.494
   },
   {
     "engine": "GoRegexpRe",
     "category": "Landscape/S=0.01/B=1/L=0.10",
     "s": 0.01,
     "b": 0.5,
-    "l": 1,
+    "l": 0.1,
     "throughput": 9065.333999999999
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "Landscape/S=0.01/B=1/L=0.90",
+    "s": 0.01,
+    "b": 0.5,
+    "l": 0.9,
+    "throughput": 23409.678000000004
   },
   {
     "engine": "GoRegexpRe",
     "category": "Landscape/S=0.01/B=10/L=0.10",
     "s": 0.01,
     "b": 0.5124973964842103,
-    "l": 0.75,
+    "l": 0.07500000000000001,
     "throughput": 9059.460000000001
   },
   {
@@ -364,7 +452,7 @@
     "category": "Landscape/S=0.01/B=10/L=0.90",
     "s": 0.01,
     "b": 0.5124973964842103,
-    "l": 0.75,
+    "l": 0.675,
     "throughput": 23490.152000000002
   },
   {
@@ -372,7 +460,7 @@
     "category": "Landscape/S=0.01/B=50/L=0.10",
     "s": 0.01,
     "b": 0.6524894621927444,
-    "l": 0.25,
+    "l": 0.025,
     "throughput": 9043.598000000002
   },
   {
@@ -380,7 +468,271 @@
     "category": "Landscape/S=0.01/B=50/L=0.90",
     "s": 0.01,
     "b": 0.6524894621927444,
-    "l": 0.25,
+    "l": 0.225,
     "throughput": 23205.126000000004
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "Landscape/S=0.10/B=1/L=0.10",
+    "s": 0.1,
+    "b": 0.5,
+    "l": 0.1,
+    "throughput": 1071.52
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "Landscape/S=0.10/B=1/L=0.90",
+    "s": 0.1,
+    "b": 0.5,
+    "l": 0.9,
+    "throughput": 9174.937999999998
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "Landscape/S=0.10/B=10/L=0.10",
+    "s": 0.1,
+    "b": 0.5124973964842103,
+    "l": 0.07500000000000001,
+    "throughput": 1070.568
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "Landscape/S=0.10/B=10/L=0.90",
+    "s": 0.1,
+    "b": 0.5124973964842103,
+    "l": 0.675,
+    "throughput": 9165.772
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "Landscape/S=0.10/B=50/L=0.10",
+    "s": 0.1,
+    "b": 0.6524894621927444,
+    "l": 0.025,
+    "throughput": 1072.9379999999999
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "Landscape/S=0.10/B=50/L=0.90",
+    "s": 0.1,
+    "b": 0.6524894621927444,
+    "l": 0.225,
+    "throughput": 9181.354000000001
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "Landscape/S=0.50/B=1/L=0.10",
+    "s": 0.5,
+    "b": 0.5,
+    "l": 0.1,
+    "throughput": 9180.764000000001
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "Landscape/S=0.50/B=1/L=0.90",
+    "s": 0.5,
+    "b": 0.5,
+    "l": 0.9,
+    "throughput": 9180.678
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "Landscape/S=0.50/B=10/L=0.10",
+    "s": 0.5,
+    "b": 0.5124973964842103,
+    "l": 0.07500000000000001,
+    "throughput": 9162.48
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "Landscape/S=0.50/B=10/L=0.90",
+    "s": 0.5,
+    "b": 0.5124973964842103,
+    "l": 0.675,
+    "throughput": 9171.342
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "Landscape/S=0.50/B=50/L=0.10",
+    "s": 0.5,
+    "b": 0.6524894621927444,
+    "l": 0.025,
+    "throughput": 9167.470000000001
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "Landscape/S=0.50/B=50/L=0.90",
+    "s": 0.5,
+    "b": 0.6524894621927444,
+    "l": 0.225,
+    "throughput": 9180.25
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "Landscape/S=0.90/B=1/L=0.10",
+    "s": 0.9,
+    "b": 0.5,
+    "l": 0.1,
+    "throughput": 9113.738
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "Landscape/S=0.90/B=1/L=0.90",
+    "s": 0.9,
+    "b": 0.5,
+    "l": 0.9,
+    "throughput": 9173.974
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "Landscape/S=0.90/B=10/L=0.10",
+    "s": 0.9,
+    "b": 0.5124973964842103,
+    "l": 0.07500000000000001,
+    "throughput": 9179.516
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "Landscape/S=0.90/B=10/L=0.90",
+    "s": 0.9,
+    "b": 0.5124973964842103,
+    "l": 0.675,
+    "throughput": 9172.18
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "Landscape/S=0.90/B=50/L=0.10",
+    "s": 0.9,
+    "b": 0.6524894621927444,
+    "l": 0.025,
+    "throughput": 9179.702
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "Landscape/S=0.90/B=50/L=0.90",
+    "s": 0.9,
+    "b": 0.6524894621927444,
+    "l": 0.225,
+    "throughput": 9183.936
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "LargeAlternation/Count=10",
+    "s": 0.0000076290962286516434,
+    "b": 0.7190996574163838,
+    "l": 0.125,
+    "throughput": 56509.083999999995
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "LargeAlternation/Count=100",
+    "s": 0.0000076290962286516434,
+    "b": 0.9970115276645228,
+    "l": 0.023529411764705882,
+    "throughput": 57457.045999999995
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "LargeAlternation/Count=1000",
+    "s": 0.0000076290962286516434,
+    "b": 1,
+    "l": 0.00392156862745098,
+    "throughput": 57912.708
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "LargeAlternation/Count=10000",
+    "s": 0.0000076290962286516434,
+    "b": 1,
+    "l": 0.0003403014098201264,
+    "throughput": 57624.31
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "LiteralScan/pat=Sherlock",
+    "s": 0.000006584318786378361,
+    "b": 0.5,
+    "l": 1,
+    "throughput": 40183657.739999995
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "NFAWorstCase/Run",
+    "s": 0.01,
+    "b": 0.5986876601124521,
+    "l": 0.5,
+    "throughput": 59.751999999999995
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "StandardSuite/Alternation/(fo|foo)",
+    "s": 0.0038910505836575876,
+    "b": 0.5670929049654543,
+    "l": 0.6666666666666666,
+    "throughput": 21194685.327999998
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "StandardSuite/Anchored/^(?:a)$",
+    "s": 0.0029211295034079843,
+    "b": 0.5124973964842103,
+    "l": 1,
+    "throughput": 61712527.57000001
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "StandardSuite/CharClass/(?i)[@-A]+",
+    "s": 0.005825242718446602,
+    "b": 0.5374298453437496,
+    "l": 0,
+    "throughput": 31115011.134000003
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "StandardSuite/Complex/a+",
+    "s": 0.0038910505836575876,
+    "b": 0.5374298453437496,
+    "l": 1,
+    "throughput": 26194064.468000002
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "StandardSuite/Literal/a",
+    "s": 0.0029211295034079843,
+    "b": 0.5,
+    "l": 1,
+    "throughput": 48127094.336
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "Synthetic/CCWarp",
+    "s": 1,
+    "b": 0.549833997312478,
+    "l": 0,
+    "throughput": 43250039.722
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "Synthetic/PureDFA",
+    "s": 1,
+    "b": 0.5866175789173301,
+    "l": 0.16666666666666666,
+    "throughput": 243.964
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "Synthetic/SIMDWarp",
+    "s": 0.01,
+    "b": 0.5,
+    "l": 1,
+    "throughput": 56717.578
+  },
+  {
+    "engine": "GoRegexpRe",
+    "category": "Synthetic/SearchWarp",
+    "s": 0.01,
+    "b": 0.5374298453437496,
+    "l": 0,
+    "throughput": 5308.1900000000005
   }
 ]
