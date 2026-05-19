@@ -132,11 +132,14 @@ function renderLandscape() {
 
     const traces = [];
     const annotations = [];
+    const layout = {}; // Initialize layout object
     
     bValues.forEach((bVal, idx) => {
         const row = Math.floor(idx / nCols) + 1;
         const col = (idx % nCols) + 1;
         const axisSuffix = idx === 0 ? '' : (idx + 1);
+        const isLeft = col === 1;
+        const isBottom = idx >= bValues.length - nCols;
 
         // Standard library baseline for this B-slice
         const stdData = filtered.filter(d => d.engine === 'GoRegexp' && Math.abs(d.b - bVal) < 0.03);
@@ -201,39 +204,41 @@ function renderLandscape() {
 
         annotations.push({
             text: `Complexity B ≈ ${bVal.toFixed(2)}`,
-            xref: 'paper', yref: 'paper',
-            x: (col - 1) / nCols + 0.25,
-            y: 1 - (row - 1) / nRows,
+            xref: 'x' + axisSuffix + ' domain',
+            yref: 'y' + axisSuffix + ' domain',
+            x: 0.5,
+            y: 1.1,
             showarrow: false,
-            font: { size: 14, fontWeight: 'bold' }
+            font: { size: 13, fontWeight: 'bold' }
         });
-    });
 
-    const layout = {
-        grid: { rows: nRows, columns: nCols, pattern: 'independent' },
-        height: 400 * nRows,
-        margin: { t: 50, b: 50, l: 60, r: 20 },
-        hovermode: 'closest',
-        showlegend: true,
-        legend: { orientation: 'h', y: -0.1 },
-        annotations: annotations
-    };
-
-    // Configure all axes
-    for (let i = 0; i < bValues.length; i++) {
-        const axisSuffix = i === 0 ? '' : (i + 1);
+        // Configure axes for this subplot
         layout['xaxis' + axisSuffix] = { 
-            title: 'Selectivity (S)', 
+            title: isBottom ? 'Selectivity (S)' : '', 
             autorange: 'reversed', 
             gridcolor: '#eee',
-            range: [1.05, -0.05]
+            range: [1.05, -0.05],
+            showticklabels: isBottom
         };
         layout['yaxis' + axisSuffix] = { 
-            title: currentMode === 'relative' ? 'Speedup (x)' : 'Throughput (MB/s)',
+            title: isLeft ? (currentMode === 'relative' ? 'Speedup (x)' : 'Throughput (MB/s)') : '',
             type: 'log', 
             gridcolor: '#eee'
         };
-    }
+    });
+
+    const layoutParams = {
+        grid: { rows: nRows, columns: nCols, pattern: 'independent', roworder: 'top to bottom', xgap: 0.1, ygap: 0.2 },
+        height: 500 * nRows,
+        margin: { t: 80, b: 100, l: 80, r: 40 },
+        hovermode: 'closest',
+        showlegend: true,
+        legend: { orientation: 'h', y: -0.05, x: 0.5, xanchor: 'center' },
+        annotations: annotations
+    };
+
+    // Merge layoutParams into layout
+    Object.assign(layout, layoutParams);
 
     Plotly.newPlot(container, traces, layout, { responsive: true }).then(gd => {
         container.on('plotly_click', (data) => {
