@@ -216,15 +216,21 @@ function renderLandscape() {
         // Configure axes for this subplot
         layout['xaxis' + axisSuffix] = { 
             title: isBottom ? 'Selectivity (S)' : '', 
-            autorange: 'reversed', 
+            autorange: false,
+            range: [1.05, -0.05], // Static range for S
             gridcolor: '#eee',
-            range: [1.05, -0.05],
-            showticklabels: true // Keep tick labels for all to be safe for now
+            showticklabels: true,
+            matches: 'x'
         };
+        
+        const yRange = currentMode === 'relative' ? [-4, 7] : [0, 10]; // Log10 scales
         layout['yaxis' + axisSuffix] = { 
             title: isLeft ? (currentMode === 'relative' ? 'Speedup (x)' : 'Throughput (MB/s)') : '',
             type: 'log', 
-            gridcolor: '#eee'
+            autorange: false,
+            range: yRange, // Static range for Speedup/TP
+            gridcolor: '#eee',
+            matches: 'y'
         };
     });
 
