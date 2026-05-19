@@ -1,0 +1,76 @@
+= Visualization Architecture: Discrete Phase Response Mapping
+:sectnums:
+:toc: left
+
+This document defines the architectural principles and implementation specifications for the `go-regexp-re` performance dashboard. It establishes the transition from a "Heatmap Terrain" model to a "Discrete Phase Response" model.
+
+== Philosophy: Discrete Transition Integrity
+
+Regular expression engine performance is not a continuous, differentiable function. It is a system of **discrete phase transitions** where infinitesimal changes in pattern structure or input selectivity (S) can trigger non-linear shifts in execution strategy (e.g., from SIMD/MAP to table-based DFA).
+
+Traditional heatmaps smooth these transitions, leading to information loss. Our visualization architecture must prioritize **projection integrity** over aesthetic smoothness.
+
+== The SBL Coordinate System
+
+Performance is evaluated across three primary axes, normalized to a $[0, 1]$ range to ensure consistent projection.
+
+|===
+| Axis | Definition | Normalization Method
+
+| **Selectivity (S)**
+| Probability of a match start per byte.
+| $S = \text{MatchCount} / \text{InputSize}$
+
+| **Complexity (B)**
+| Structural density of the NFA/DFA state space.
+| $\text{Sigmoid}(\text{StateCount})$ or $\text{round}(B, 2)$ for slicing.
+
+| **Locality (L)**
+| Spatial predictability of the input data.
+| Hybrid: $\text{PatternLocality} \times \text{InputEntropy}$
+|===
+
+== Visualization Model: Faceted Phase Slicing
+
+To visualize the interaction between $S$ and $B$ without 3D-projection distortion, the system employs **Faceted 2D Scatter Mapping**.
+
+=== 1. Primary Projection (S-Speedup Plane)
+* **X-Axis**: Selectivity ($S$), typically displayed on a reversed $[1, 0]$ scale to match "Sparse to Dense" intuition.
+* **Y-Axis**: Speedup Factor (Relative) or Throughput (Absolute), utilizing a **Logarithmic Scale** ($10^0$ to $10^6$).
+* **Baseline**: The standard library (`GoRegexp`) is treated as a **Visual Invariant** (a static reference line at $Y=1.0$) rather than a mobile data point.
+
+=== 2. Dimensional Slicing (Faceting)
+* **Tabs (Experimental Regime)**: Data is strictly separated by Locality ($L$) into four bins: Random, Natural, Structured, and Literal.
+* **Grid Facets (Complexity Slices)**: Within each tab, the complexity axis ($B$) is quantized (e.g., in $0.05$ increments) and projected onto a matrix of sub-plots. This allows simultaneous comparison of "Vertical" (B-fixed) and "Horizontal" (S-fixed) trends.
+
+== Data Materialization Strategy
+
+To balance dashboard interactivity with repository size, a two-tier materialization strategy is used.
+
+=== Tier 1: Aggregate Index (`data/landscape.json`)
+* **Scope**: Lightweight metrics for all test cases in the current landscape.
+* **Storage**: Committed to `gh-pages`.
+* **Content**: $S, B, L$, Engine, and Throughput.
+
+=== Tier 2: Lazy Trace Materialization (`data/trace/{id}.json`)
+* **Scope**: Deep-dive metadata for individual points.
+* **Trigger**: On-click interaction in the UI.
+* **Content**:
+** Regex Pattern
+** `Regexp.Explain()` output (Execution Regime)
+** Pass breakdown (Pass 0-4 execution cost)
+** Input class metadata
+
+== Execution Regime Mapping (Color/Shape)
+
+Points are colored by their **Execution Regime** to provide visual evidence of phase transitions:
+* **MAP (Gold)**: SIMD/SWAR pre-filter dominant.
+* **Warp (Blue)**: Character class acceleration dominant.
+* **DFA (Green)**: Pure table-based transition dominant.
+* **Hybrid (Purple)**: Multi-pass extraction dominant.
+
+== Repository Mandates (Generator-Viewer Decoupling)
+
+1. **Generator (Main/Dev Branch)**: Responsible for executing benchmarks and generating both Tier 1 and Tier 2 JSON files.
+2. **Viewer (gh-pages Branch)**: Strictly a consumer of static JSON. No Go source code or processing tools allowed.
+3. **Registry (`sbl_definitions.json`)**: The authoritative mapping of benchmark names to SBL coordinates, maintained by the implementation and synced to the viewer root.
