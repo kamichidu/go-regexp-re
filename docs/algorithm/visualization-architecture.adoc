@@ -1,76 +1,60 @@
-= Visualization Architecture: Discrete Phase Response Mapping
+= Visualization Architecture: Regime-Aware Phase Response Mapping
 :sectnums:
 :toc: left
 
-This document defines the architectural principles and implementation specifications for the `go-regexp-re` performance dashboard. It establishes the transition from a "Heatmap Terrain" model to a "Discrete Phase Response" model.
+This document defines the architectural principles for the `go-regexp-re` performance dashboard. It establishes the "Regime-Aware Phase Response Mapping" model, focusing on discrete execution transitions in the SBL space.
 
-== Philosophy: Discrete Transition Integrity
+== Philosophy: Structural Transition Visibility
 
-Regular expression engine performance is not a continuous, differentiable function. It is a system of **discrete phase transitions** where infinitesimal changes in pattern structure or input selectivity (S) can trigger non-linear shifts in execution strategy (e.g., from SIMD/MAP to table-based DFA).
+Performance in `go-regexp-re` is not a continuous surface but a collection of **Discrete Performance Regimes**. Our visualization must prioritize the visibility of these transitions over aesthetic smoothness.
 
-Traditional heatmaps smooth these transitions, leading to information loss. Our visualization architecture must prioritize **projection integrity** over aesthetic smoothness.
+Key objectives:
+1.  **Identify Phase Transitions**: Clearly mark where strategy shifts (e.g., MAP $\to$ DFA).
+2.  **Characterize the S-Dependency**: Visualize how Speedup is inversely proportional to Selectivity ($S$).
+3.  **Map the Overhead Floor**: Explicitly identify regions where constant overheads (DFA lookup or CGO) become dominant.
 
 == The SBL Coordinate System
 
-Performance is evaluated across three primary axes, normalized to a $[0, 1]$ range to ensure consistent projection.
-
 |===
-| Axis | Definition | Normalization Method
+| Axis | Definition | Physical Significance
 
 | **Selectivity (S)**
-| Probability of a match start per byte.
 | $S = \text{MatchCount} / \text{InputSize}$
+| The primary driver of Speedup. Determines MAP efficiency.
 
 | **Complexity (B)**
-| Structural density of the NFA/DFA state space.
-| $\text{Sigmoid}(\text{StateCount})$ or $\text{round}(B, 2)$ for slicing.
+| $\text{round}(B, 2)$ (Quantized)
+| Determines DFA state-space pressure and transition latency.
 
 | **Locality (L)**
-| Spatial predictability of the input data.
-| Hybrid: $\text{PatternLocality} \times \text{InputEntropy}$
+| Hybrid predictability metric.
+| Determines SWAR/SIMD skip efficiency (Regime: Warp).
 |===
 
-== Visualization Model: Faceted Phase Slicing
-
-To visualize the interaction between $S$ and $B$ without 3D-projection distortion, the system employs **Faceted 2D Scatter Mapping**.
+== Visualization Model: Regional Phase Mapping
 
 === 1. Primary Projection (S-Speedup Plane)
-* **X-Axis**: Selectivity ($S$), typically displayed on a reversed $[1, 0]$ scale to match "Sparse to Dense" intuition.
-* **Y-Axis**: Speedup Factor (Relative) or Throughput (Absolute), utilizing a **Logarithmic Scale** ($10^0$ to $10^6$).
-* **Baseline**: The standard library (`GoRegexp`) is treated as a **Visual Invariant** (a static reference line at $Y=1.0$) rather than a mobile data point.
+* **X-Axis**: Selectivity ($S$), on a reversed $[1.0, 0.0]$ scale.
+* **Y-Axis**: Speedup Factor (Relative vs. `GoRegexp`) on a **Logarithmic Scale** ($10^{-2}$ to $10^6$).
+* **Baseline Invariant**: The standard library is a static horizontal line at $Y=1.0$.
 
-=== 2. Dimensional Slicing (Faceting)
-* **Tabs (Experimental Regime)**: Data is strictly separated by Locality ($L$) into four bins: Random, Natural, Structured, and Literal.
-* **Grid Facets (Complexity Slices)**: Within each tab, the complexity axis ($B$) is quantized (e.g., in $0.05$ increments) and projected onto a matrix of sub-plots. This allows simultaneous comparison of "Vertical" (B-fixed) and "Horizontal" (S-fixed) trends.
+=== 2. Performance Zones (Shading)
+To provide instant analytical context, the plot area is divided into three functional zones:
 
-== Data Materialization Strategy
+1.  **Efficiency Frontier (Gold Shading)**: The region where Speedup $> 10\times$. This represents the "Peak Competitive Zone" where MAP and Warp optimizations are fully leveraged.
+2.  **Standard Parity (Clear/Neutral)**: The region between $0.8\times$ and $1.5\times$. Indicates typical DFA execution parity with the standard library.
+3.  **Overhead Zone (Red/Gray Shading)**: The region below $Y=1.0$. Explicitly labels the "DFA/CGO Overhead Zone" to visualize the physical floor of our performance.
 
-To balance dashboard interactivity with repository size, a two-tier materialization strategy is used.
+=== 3. Threshold Markers
+* **MAP Transition Boundary**: A vertical dashed line marking the $S$-coordinate where MAP speedup falls below a significant threshold (typically $2.0\times$). This marks the "Regime Shift" from pre-filter to core DFA.
 
-=== Tier 1: Aggregate Index (`data/landscape.json`)
-* **Scope**: Lightweight metrics for all test cases in the current landscape.
-* **Storage**: Committed to `gh-pages`.
-* **Content**: $S, B, L$, Engine, and Throughput.
+== Competitive Frontier (Multi-Engine Analysis)
 
-=== Tier 2: Lazy Trace Materialization (`data/trace/{id}.json`)
-* **Scope**: Deep-dive metadata for individual points.
-* **Trigger**: On-click interaction in the UI.
-* **Content**:
-** Regex Pattern
-** `Regexp.Explain()` output (Execution Regime)
-** Pass breakdown (Pass 0-4 execution cost)
-** Input class metadata
+The system visualizes the **Competitive Envelope**:
+- **Envelope Line**: A polyline representing the *maximum speedup* achieved by any competing engine (PCRE2, RE2, Hyperscan) at each S-coordinate.
+- **Superiority Gap**: The vertical distance between `GoRegexpRe` points and the Envelope Line, proving our architectural advantage in specific SBL slices.
 
-== Execution Regime Mapping (Color/Shape)
+== Interaction and Tiered Data
 
-Points are colored by their **Execution Regime** to provide visual evidence of phase transitions:
-* **MAP (Gold)**: SIMD/SWAR pre-filter dominant.
-* **Warp (Blue)**: Character class acceleration dominant.
-* **DFA (Green)**: Pure table-based transition dominant.
-* **Hybrid (Purple)**: Multi-pass extraction dominant.
-
-== Repository Mandates (Generator-Viewer Decoupling)
-
-1. **Generator (Main/Dev Branch)**: Responsible for executing benchmarks and generating both Tier 1 and Tier 2 JSON files.
-2. **Viewer (gh-pages Branch)**: Strictly a consumer of static JSON. No Go source code or processing tools allowed.
-3. **Registry (`sbl_definitions.json`)**: The authoritative mapping of benchmark names to SBL coordinates, maintained by the implementation and synced to the viewer root.
+* **Tier 1 (Landscape JSON)**: Global SBL coordinates and throughput metrics.
+* **Tier 2 (Trace JSON)**: Lazy-loaded `Regexp.Explain()` data and per-pass execution costs.
