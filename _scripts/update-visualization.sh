@@ -26,6 +26,14 @@ LATEST_JSON=$(ls -v "$HISTORY_DIR"/*.json | tail -n 1)
 if [ -f "$LATEST_JSON" ]; then
     cp "$LATEST_JSON" "$DATA_DIR/landscape.json"
     echo "Updated $DATA_DIR/landscape.json from $LATEST_JSON"
+
+    # Sync trace metadata (Tier 2)
+    LATEST_TRACE_DIR="$(dirname "$LATEST_JSON")/trace"
+    if [ -d "$LATEST_TRACE_DIR" ]; then
+        mkdir -p "$DATA_DIR/trace"
+        cp -r "$LATEST_TRACE_DIR"/* "$DATA_DIR/trace/"
+        echo "Updated $DATA_DIR/trace/ from $LATEST_TRACE_DIR"
+    fi
 fi
 
 # 3. Update data/history.json (Trends index)

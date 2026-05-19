@@ -1,0 +1,62 @@
+= Visualization Architecture: Propulsion Envelope Phase Mapping
+:sectnums:
+:toc: left
+
+This document defines the architectural principles for the `go-regexp-re` performance dashboard. It establishes the "Propulsion Envelope Mapping" (PEM) model, designed to visualize the architectural "Operating Territories" of regular expression engines.
+
+== Philosophy: Territory over Points
+
+An engine's performance is not a collection of static points but a **Dynamic Operating Envelope**. The PEM model focuses on the entire territory an engine occupies in the SBL space, revealing how much "Propulsion" it can generate from data structure (Locality $L$) at any given Selectivity ($S$) and Complexity ($B$).
+
+Key objectives:
+1.  **Map Propulsion Envelopes**: Visualize the shaded area between the performance floor ($L=0.1$) and ceiling ($L=1.0$) for each engine.
+2.  **Trace Regime Curvature**: Visualize the non-linear "Regime Shift Curve" where execution strategy transitions from MAP to DFA.
+3.  **Identify Unbeatable Territories**: Highlight regions where `GoRegexpRe`'s operating envelope is strictly superior to all competitors.
+
+== The SBL Mapping Strategy (PEM)
+
+|===
+| Dimension | Visual Encoding | Physical Significance
+
+| **Selectivity (S)**
+| **X-Axis** ($-\log_{10}(S + \epsilon)$)
+| Primary driver of strategy shifts. Log-transform expands sparse regions (MAP regime).
+
+| **Complexity (B)**
+| **Horizontal Strips** (Low, Mid, High)
+| Determines the vertical compression of the Propulsion Envelope.
+
+| **Locality Range**
+| **Shaded Envelope (Y-Height)**
+| Visualizes the engine's "Dynamic Range" or structural sensitivity.
+
+| **Engine**
+| **Layered Colors / Z-Order**
+| Defines the "Competitive Reach" of the engine architecture.
+|===
+
+== Visualization Model: The Layered Envelope Grid
+
+=== 1. Semantic B-Strips (Vertical Stack)
+The dashboard uses three horizontally elongated facets, stacked vertically to force vertical alignment of the $S$-axis. This makes it possible to see how the **MAP-to-DFA Cliff** migrates as complexity increases.
+
+=== 2. Propulsion Envelopes (Shaded Areas)
+For each engine:
+*   **Top Boundary**: Maximum speedup achieved at $L=1.0$ (Literal).
+*   **Bottom Boundary**: Minimum speedup achieved at $L=0.1$ (Random).
+*   **Propulsion Zone**: The area between boundaries is shaded with the engine's signature color (low opacity).
+*   **Interpretation**: A "thick" envelope indicates an architecture that is highly responsive to data locality (e.g., SIMD-heavy). A "thin" envelope indicates a rigid architecture (e.g., pure NFA).
+
+=== 3. The Regime Transition Curve
+A dashed line tracks the **Strategic Pivot Point**—the $(S, B)$ coordinates where the speedup ratio falls below $2.0\times$. This curve visualizes the "Retraction" of the MAP regime as complexity increases.
+
+== Strategic Competitive Analysis
+
+- **Envelope Overlap**: Regions where envelopes overlap indicate active competition.
+- **Superiority Gap**: The vertical distance between the *Bottom* of our envelope and the *Top* of a competitor's envelope. If this gap is positive, `GoRegexpRe` is **Architecturally Superior** regardless of data structure.
+
+== Implementation Mandates
+
+1.  **Area Plot Integration**: Use Plotly's `fill: 'toself'` or layered `fill: 'tonexty'` to generate engine envelopes.
+2.  **Global S-Axis**: Subplots must maintain a pixel-perfect vertical alignment of the $S$-axis.
+3.  **Regime Integration**: Point markers within the envelope still show the primary Execution Regime (MAP, DFA, etc.) for specific pattern/locality pairs.

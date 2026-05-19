@@ -351,3 +351,23 @@ type UnsupportedError = syntax.UnsupportedError
 func (re *Regexp) LiteralPrefix() (prefix string, complete bool) {
 	return string(re.prefix), re.complete
 }
+
+// Regime returns the semantic execution regime for the compiled pattern.
+func (re *Regexp) Regime() string {
+	if re.strategy == strategyLiteral {
+		return "MAP"
+	}
+	if re.dfa != nil {
+		switch re.dfa.SearchStrategy() {
+		case ir.SearchStrategyLiteral, ir.SearchStrategySearchWarp:
+			return "MAP"
+		}
+		if re.dfa.SearchWarp().Kernel != uint8(ir.CCWarpNone) {
+			return "Warp"
+		}
+	}
+	if re.strategy == strategyExtended {
+		return "Hybrid"
+	}
+	return "DFA"
+}

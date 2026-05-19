@@ -26,10 +26,17 @@ type Engine struct {
 	Name    string
 	Compile func(pattern string) (Matcher, error)
 	cache   map[string]Matcher
-	mu      sync.Mutex
+	mu      *sync.Mutex
+}
+
+func (e *Engine) ensureMu() {
+	if e.mu == nil {
+		e.mu = new(sync.Mutex)
+	}
 }
 
 func (e *Engine) getMatcher(pattern string) (Matcher, error) {
+	e.ensureMu()
 	e.mu.Lock()
 	if e.cache == nil {
 		e.cache = make(map[string]Matcher)
@@ -52,8 +59,11 @@ func (e *Engine) getMatcher(pattern string) (Matcher, error) {
 }
 
 func (e *Engine) ClearCache() {
+	e.ensureMu()
 	e.mu.Lock()
-	e.cache = nil
+	if e.cache != nil {
+		e.cache = nil
+	}
 	e.mu.Unlock()
 }
 
@@ -257,6 +267,7 @@ func (r *CompatibilityRegistry) Report() {
 
 // Register registers a regex engine for the test suite.
 func Register(engine Engine) {
+	engine.ensureMu()
 	engines = append(engines, engine)
 }
 

@@ -14,41 +14,46 @@ func BenchmarkLandscape(b *testing.B) {
 	bValues := []int{1, 10, 50}
 	lValues := []float64{0.1, 0.9}
 
-	runOnEngines(b, func(b *testing.B, engine Engine) {
-		defer engine.ClearCache()
-		for _, s := range sValues {
-			for _, bv := range bValues {
-				for _, l := range lValues {
-					pattern := generatePattern(bv)
-					input := generateInput(1*1024*1024, s, l)
+	for _, s := range sValues {
+		for _, bv := range bValues {
+			for _, l := range lValues {
+				pattern := generatePattern(bv)
+				input := generateInput(1*1024*1024, s, l)
 
-					ast, err := syntax.Parse(pattern, syntax.Perl)
-					if err != nil {
-						continue
-					}
+				ast, err := syntax.Parse(pattern, syntax.Perl)
+				if err != nil {
+					continue
+				}
 
-					// Compute actual SBL metrics
-					b_val := ComputeB(ast)
-					l_val := ComputeL(ast)
+				// Compute actual SBL metrics
+				b_val := ComputeB(ast)
+				l_val := ComputeL(ast)
 
-					benchName := fmt.Sprintf("S=%.2f/B=%d/L=%.2f", s, bv, l)
-					RecordSBL("Landscape/"+benchName, s, b_val, l_val)
+				// Use a hybrid L metric: Pattern Locality * Input Locality
+				// This ensures that complex patterns or random data both result in low L.
+				combined_l := l_val * l
 
-					re, err := engine.Compile(pattern)
-					if err != nil {
-						continue
-					}
-					b.Run(benchName, func(b *testing.B) {
+				benchName := fmt.Sprintf("S=%.2f/B=%d/L=%.2f", s, bv, l)
+				RecordSBL("Landscape/"+benchName, s, b_val, combined_l)
+
+				b.Run(benchName, func(b *testing.B) {
+					runOnEngines(b, func(b *testing.B, engine Engine) {
+						defer engine.ClearCache()
+						re, err := engine.Compile(pattern)
+						if err != nil {
+							b.Skip()
+							return
+						}
 						b.SetBytes(int64(len(input)))
 						b.ResetTimer()
 						for i := 0; i < b.N; i++ {
 							re.MatchString(input)
 						}
 					})
-				}
+				})
 			}
 		}
-	})
+	}
 }
 
 func generatePattern(complexity int) string {

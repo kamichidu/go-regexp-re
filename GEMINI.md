@@ -270,12 +270,19 @@ To prove the engine's superiority across diverse workloads, the project maintain
 ### 4.5 Performance Auditing & Traceability
 To ensure that architectural changes do not silently degrade performance or bypass intended optimizations, the project mandates the use of **Execution Explanation**.
 - **Traceability Mandate**: Every regular expression compiled by the engine MUST be inspectable via the `Regexp.Explain()` method.
+- **Regime Classification Mandate**: Every `Regexp` object MUST provide a `Regime()` method that returns a semantic label (MAP, Warp, DFA, Hybrid) representing its primary execution path. This label is used for color-coding the performance landscape to visualize engine phase transitions.
 - **Auditing Tool (`regexp-re-explain`)**: Developers MUST use the `regexp-re-explain` command to verify that:
     1. The intended **MAP Strategy** (Literal vs SWAR vs sDFA) is selected based on pattern characteristics.
     2. **Gaze/Snap filters** are correctly skipped when redundant.
     3. The pattern's **SBL Fitness** aligns with architectural expectations (e.g., high-L patterns achieving SIMD acceleration).
     4. **API Parity** is maintained by ensuring match boundaries align with standard expectations.
 - **Optimization Validation**: When introducing new optimization layers, the developer MUST provide an explain comparison showing how the logical execution plan has been improved.
+
+### 4.6 Tiered Visualization Data Mandate
+To maintain a responsive and feature-rich dashboard while managing repository size, the engine's performance data MUST be stored in a **Tiered JSON Architecture**:
+- **Tier 1 (Index)**: `data/landscape.json` contains high-level metrics (S, B, L, Throughput, Regime) for all benchmarks.
+- **Tier 2 (Traces)**: `data/trace/{slug}.json` contains detailed metadata (Pattern, Explain output, Pass breakdown) for individual test cases, materializing only upon user interaction (Lazy Loading).
+- **Data Synchronization**: CI workflows MUST ensure that both tiers are regenerated and synchronized to the `gh-pages` branch whenever a benchmark baseline is updated.
 
 ## 5. Coding Conventions
 - **Explicit Aliasing**:
