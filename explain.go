@@ -17,6 +17,7 @@ type explainViewData struct {
 	Pattern               string
 	CompilationTime       string
 	OverallStrategy       string
+	Regime                string
 	LiteralPrefix         string
 	LiteralPrefixComplete bool
 	DFA                   *dfaStats
@@ -160,6 +161,7 @@ func (re *Regexp) getExplainViewData(opts ExplainOptions) explainViewData {
 		Pattern:               displayPattern,
 		CompilationTime:       re.compileTime.String(),
 		OverallStrategy:       re.strategy.String(),
+		Regime:                re.Regime(),
 		LiteralPrefix:         string(re.prefix),
 		LiteralPrefixComplete: re.complete,
 		NumGroups:             re.numSubexp,
