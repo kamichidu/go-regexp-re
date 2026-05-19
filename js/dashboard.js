@@ -128,7 +128,7 @@ function renderLandscape() {
     }
 
     const nRows = Math.ceil(bValues.length / 2);
-    const nCols = Math.min(bValues.length, 2);
+    const nCols = bValues.length > 1 ? 2 : 1;
 
     const traces = [];
     const annotations = [];
@@ -139,7 +139,8 @@ function renderLandscape() {
         const col = (idx % nCols) + 1;
         const axisSuffix = idx === 0 ? '' : (idx + 1);
         const isLeft = col === 1;
-        const isBottom = idx >= bValues.length - nCols;
+        // Last row might be incomplete, so isBottom check needs to be accurate
+        const isBottom = (idx >= bValues.length - nCols) || (nCols === 1);
 
         // Standard library baseline for this B-slice
         const stdData = filtered.filter(d => d.engine === 'GoRegexp' && Math.abs(d.b - bVal) < 0.03);
@@ -207,9 +208,9 @@ function renderLandscape() {
             xref: 'x' + axisSuffix + ' domain',
             yref: 'y' + axisSuffix + ' domain',
             x: 0.5,
-            y: 1.1,
+            y: 1.12,
             showarrow: false,
-            font: { size: 13, fontWeight: 'bold' }
+            font: { size: 12, fontWeight: 'bold' }
         });
 
         // Configure axes for this subplot
@@ -218,7 +219,7 @@ function renderLandscape() {
             autorange: 'reversed', 
             gridcolor: '#eee',
             range: [1.05, -0.05],
-            showticklabels: isBottom
+            showticklabels: true // Keep tick labels for all to be safe for now
         };
         layout['yaxis' + axisSuffix] = { 
             title: isLeft ? (currentMode === 'relative' ? 'Speedup (x)' : 'Throughput (MB/s)') : '',
@@ -228,9 +229,10 @@ function renderLandscape() {
     });
 
     const layoutParams = {
-        grid: { rows: nRows, columns: nCols, pattern: 'independent', roworder: 'top to bottom', xgap: 0.1, ygap: 0.2 },
-        height: 500 * nRows,
-        margin: { t: 80, b: 100, l: 80, r: 40 },
+        grid: { rows: nRows, columns: nCols, pattern: 'independent', roworder: 'top to bottom', xgap: 0.05, ygap: 0.15 },
+        height: 450 * nRows,
+        autosize: true,
+        margin: { t: 100, b: 80, l: 80, r: 40 },
         hovermode: 'closest',
         showlegend: true,
         legend: { orientation: 'h', y: -0.05, x: 0.5, xanchor: 'center' },

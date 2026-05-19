@@ -185,10 +185,10 @@ h2 {
 /* Chart heights */
 #landscape-content {
     width: 100%;
+    max-width: 100%;
     min-height: 800px;
-    display: flex;
-    justify-content: center;
-    align-items: center;
+    display: block;
+    overflow: hidden;
 }
 
 #loading-overlay {
