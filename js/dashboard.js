@@ -19,6 +19,9 @@ const ENGINE_COLORS = {
     'PCRE2-CGO':  'rgba(251, 188, 4, 0.1)'
 };
 
+const EPS = 1e-4;
+const transformX = (s) => -Math.log10(s + EPS);
+
 let landscapeData = [];
 let historyData = [];
 let currentMode = 'relative';
@@ -96,7 +99,6 @@ function renderLandscape() {
 
     B_TIERS.forEach((tier, idx) => {
         const axisSuffix = idx === 0 ? '' : (idx + 1);
-        const isLeft = true;
         const isBottom = idx === B_TIERS.length - 1;
 
         const sliceData = landscapeData.filter(d => d.b >= tier.min && d.b < tier.max);
@@ -108,16 +110,16 @@ function renderLandscape() {
         if (currentMode === 'relative') {
             shapes.push({
                 type: 'rect', xref: 'x' + axisSuffix, yref: 'y' + axisSuffix,
-                x0: -0.1, x1: 1.1, y0: 10, y1: 1e8,
+                x0: -0.5, x1: transformX(0) + 0.5, y0: 10, y1: 1e8,
                 fillcolor: 'rgba(255, 215, 0, 0.05)', line: { width: 0 }, layer: 'below'
             });
             shapes.push({
                 type: 'rect', xref: 'x' + axisSuffix, yref: 'y' + axisSuffix,
-                x0: -0.1, x1: 1.1, y0: 1e-4, y1: 1.0,
+                x0: -0.5, x1: transformX(0) + 0.5, y0: 1e-4, y1: 1.0,
                 fillcolor: 'rgba(255, 0, 0, 0.03)', line: { width: 0 }, layer: 'below'
             });
             traces.push({
-                x: [0, 1.1], y: [1, 1], type: 'scatter', mode: 'lines',
+                x: [0, transformX(0)], y: [1, 1], type: 'scatter', mode: 'lines',
                 line: { color: '#666', width: 1 }, xaxis: 'x' + axisSuffix, yaxis: 'y' + axisSuffix,
                 showlegend: false, hoverinfo: 'none'
             });
@@ -126,10 +128,7 @@ function renderLandscape() {
         // Generate Envelopes
         selectedEngines.forEach(engine => {
             const engData = sliceData.filter(d => d.engine === engine);
-            const categories = [...new Set(engData.map(d => d.category))];
             
-            const envelopePoints = [];
-            // Group by pattern (S)
             const sGroups = {};
             engData.forEach(d => {
                 const sKey = d.s.toFixed(5);
@@ -148,14 +147,13 @@ function renderLandscape() {
                 const getVal = (tp) => currentMode === 'relative' ? tp/stdTp : tp;
                 const vals = pts.map(p => getVal(p.throughput));
                 
-                topX.push(parseFloat(sKey));
+                topX.push(transformX(parseFloat(sKey)));
                 topY.push(Math.max(...vals));
-                botX.push(parseFloat(sKey));
+                botX.push(transformX(parseFloat(sKey)));
                 botY.push(Math.min(...vals));
             });
 
             if (topX.length > 0) {
-                // Envelope Shading
                 traces.push({
                     x: topX.concat(botX.reverse()),
                     y: topY.concat(botY.reverse()),
@@ -166,9 +164,8 @@ function renderLandscape() {
                     xaxis: 'x' + axisSuffix, yaxis: 'y' + axisSuffix,
                     showlegend: idx === 0, hoverinfo: 'none'
                 });
-                // Regime Markers
                 traces.push({
-                    x: engData.map(d => d.s),
+                    x: engData.map(d => transformX(d.s)),
                     y: engData.map(d => {
                         const stdTp = stdByS[d.s.toFixed(5)];
                         return currentMode === 'relative' ? (stdTp ? d.throughput/stdTp : 1) : d.throughput;
@@ -177,35 +174,21 @@ function renderLandscape() {
                     mode: 'markers',
                     marker: { size: 6, color: engData.map(d => REGIME_COLORS[d.regime] || '#999'), opacity: 0.8 },
                     name: engine,
-                    text: engData.map(d => `${d.category}<br>Regime: ${d.regime}`),
+                    text: engData.map(d => `${d.category}<br>S: ${d.s.toFixed(4)}<br>Regime: ${d.regime}`),
                     xaxis: 'x' + axisSuffix, yaxis: 'y' + axisSuffix,
                     showlegend: idx === 0 && engine === 'GoRegexpRe'
                 });
             }
         });
 
-        // Regime Shift Curve (GoRegexpRe only)
-        const reData = sliceData.filter(d => d.engine === 'GoRegexpRe');
-        const curveX = [], curveY = [];
-        const sKeys = [...new Set(reData.map(d => d.s.toFixed(5)))].sort((a,b) => parseFloat(a) - parseFloat(b));
-        sKeys.forEach(sKey => {
-            const pts = reData.filter(d => d.s.toFixed(5) === sKey);
-            const stdTp = stdByS[sKey];
-            if (!stdTp) return;
-            // Find transition point (Speedup crosses 2.0x)
-            const avgSpeedup = pts.reduce((sum, p) => sum + (p.throughput/stdTp), 0) / pts.length;
-            curveX.push(parseFloat(sKey));
-            curveY.push(avgSpeedup);
-        });
-        
         annotations.push({
             text: tier.label, xref: 'paper', yref: 'y' + axisSuffix + ' domain',
             x: 1.02, y: 0.5, showarrow: false, textangle: 90, font: { size: 14, fontWeight: 'bold' }
         });
 
         layout['xaxis' + axisSuffix] = { 
-            title: isBottom ? 'Selectivity (S)' : '', 
-            autorange: false, range: [1.05, -0.05], gridcolor: '#eee', showticklabels: isBottom, matches: 'x'
+            title: isBottom ? '-log10(S + ε)' : '', 
+            autorange: false, range: [-0.1, transformX(0) + 0.1], gridcolor: '#eee', showticklabels: true, matches: 'x'
         };
         const yRange = currentMode === 'relative' ? [-3, 7] : [0, 10];
         layout['yaxis' + axisSuffix] = { 
