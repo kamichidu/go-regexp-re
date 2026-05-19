@@ -63,6 +63,7 @@ function setupControls(engines) {
 
     // Engine filters
     const filterContainer = document.getElementById('engine-filters');
+    filterContainer.innerHTML = '';
     engines.sort().forEach(engine => {
         if (engine === 'GoRegexp') return; // Reference engine
 
@@ -110,17 +111,15 @@ function formatLargeNumber(n) {
 function renderLandscape() {
     const locality = L_BINS.find(b => b.id === currentLocality);
     
-    // Filter data by Locality and Selected Engines
     const filtered = landscapeData.filter(d => 
         d.l >= locality.min && d.l < locality.max &&
         (d.engine === 'GoRegexp' || selectedEngines.has(d.engine))
     );
 
-    // Group by quantized B
     const bValues = [...new Set(filtered.map(d => Math.round(d.b * 20) / 20))].sort((a, b) => a - b);
     
     const container = document.getElementById('landscape-content');
-    container.innerHTML = ''; // Clear
+    container.innerHTML = ''; 
 
     if (bValues.length === 0) {
         container.innerHTML = '<p style="text-align:center; padding: 50px;">No data available for this locality segment.</p>';
@@ -132,24 +131,22 @@ function renderLandscape() {
 
     const traces = [];
     const annotations = [];
-    const layout = {}; // Initialize layout object
+    const shapes = [];
+    const layout = {}; 
     
     bValues.forEach((bVal, idx) => {
         const row = Math.floor(idx / nCols) + 1;
         const col = (idx % nCols) + 1;
         const axisSuffix = idx === 0 ? '' : (idx + 1);
         const isLeft = col === 1;
-        // Last row might be incomplete, so isBottom check needs to be accurate
         const isBottom = (idx >= bValues.length - nCols) || (nCols === 1);
 
-        // Standard library baseline for this B-slice
         const stdData = filtered.filter(d => d.engine === 'GoRegexp' && Math.abs(d.b - bVal) < 0.03);
         const ourData = filtered.filter(d => d.engine !== 'GoRegexp' && Math.abs(d.b - bVal) < 0.03);
 
         const stdByS = {};
         stdData.forEach(s => stdByS[s.s.toFixed(5)] = s.throughput);
 
-        // Plot Baseline
         if (currentMode === 'relative') {
             traces.push({
                 x: [0, 1], y: [1, 1],
@@ -159,7 +156,6 @@ function renderLandscape() {
                 showlegend: false, hoverinfo: 'none'
             });
         } else {
-            // Absolute mode: plot stdlib as reference points
             traces.push({
                 x: stdData.map(d => d.s),
                 y: stdData.map(d => d.throughput),
@@ -171,7 +167,36 @@ function renderLandscape() {
             });
         }
 
-        // Plot Our Data
+        const ourMainData = ourData.filter(d => d.engine === 'GoRegexpRe');
+        let transitionS = null;
+        ourMainData.sort((a, b) => b.s - a.s); 
+        for (const d of ourMainData) {
+            const stdTp = stdByS[d.s.toFixed(5)];
+            const ratio = stdTp ? (d.throughput / stdTp) : 1.0;
+            if (ratio > 2.0) {
+                transitionS = d.s;
+                break;
+            }
+        }
+
+        if (transitionS !== null && currentMode === 'relative') {
+            shapes.push({
+                type: 'line',
+                x0: transitionS, x1: transitionS,
+                y0: 0.0001, y1: 10000000,
+                xref: 'x' + axisSuffix, yref: 'y' + axisSuffix,
+                line: { color: 'rgba(255, 215, 0, 0.4)', width: 3, dash: 'dot' }
+            });
+            annotations.push({
+                text: 'MAP Threshold',
+                xref: 'x' + axisSuffix, yref: 'y' + axisSuffix + ' domain',
+                x: transitionS, y: 0.95,
+                showarrow: false,
+                textangle: -90,
+                font: { size: 10, color: '#b8860b' }
+            });
+        }
+
         const engineTraces = {};
         ourData.forEach(d => {
             if (!engineTraces[d.engine]) engineTraces[d.engine] = { x: [], y: [], text: [], ids: [], color: [] };
@@ -181,7 +206,7 @@ function renderLandscape() {
                 const stdTp = stdByS[d.s.toFixed(5)];
                 yVal = stdTp ? (d.throughput / stdTp) : 1.0;
             }
-            if (yVal <= 0) yVal = 0.0001; // Epsilon for log scale
+            if (yVal <= 0) yVal = 0.0001;
 
             engineTraces[d.engine].x.push(d.s);
             engineTraces[d.engine].y.push(yVal);
@@ -213,22 +238,21 @@ function renderLandscape() {
             font: { size: 12, fontWeight: 'bold' }
         });
 
-        // Configure axes for this subplot
         layout['xaxis' + axisSuffix] = { 
             title: isBottom ? 'Selectivity (S)' : '', 
             autorange: false,
-            range: [1.05, -0.05], // Static range for S
+            range: [1.05, -0.05],
             gridcolor: '#eee',
             showticklabels: true,
             matches: 'x'
         };
         
-        const yRange = currentMode === 'relative' ? [-4, 7] : [0, 10]; // Log10 scales
+        const yRange = currentMode === 'relative' ? [-4, 7] : [0, 10];
         layout['yaxis' + axisSuffix] = { 
             title: isLeft ? (currentMode === 'relative' ? 'Speedup (x)' : 'Throughput (MB/s)') : '',
             type: 'log', 
             autorange: false,
-            range: yRange, // Static range for Speedup/TP
+            range: yRange,
             gridcolor: '#eee',
             matches: 'y'
         };
@@ -242,10 +266,10 @@ function renderLandscape() {
         hovermode: 'closest',
         showlegend: true,
         legend: { orientation: 'h', y: -0.05, x: 0.5, xanchor: 'center' },
-        annotations: annotations
+        annotations: annotations,
+        shapes: shapes
     };
 
-    // Merge layoutParams into layout
     Object.assign(layout, layoutParams);
 
     Plotly.newPlot(container, traces, layout, { responsive: true }).then(gd => {
