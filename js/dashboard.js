@@ -32,7 +32,6 @@ async function init() {
         landscapeData = await lsResp.json();
         historyData = await histResp.json();
 
-        // Default: all engines except standard
         const engines = [...new Set(landscapeData.map(d => d.engine))];
         engines.forEach(e => {
             if (e !== 'GoRegexp') selectedEngines.add(e);
@@ -43,7 +42,6 @@ async function init() {
         renderLandscape();
         renderTrends();
 
-        // Setup Modal
         const modal = document.getElementById('trace-modal');
         document.querySelector('.close-btn').onclick = () => modal.style.display = 'none';
         window.onclick = (event) => { if (event.target == modal) modal.style.display = 'none'; };
@@ -55,17 +53,15 @@ async function init() {
 }
 
 function setupControls(engines) {
-    // Metric mode
     document.getElementById('metric-mode').onchange = (e) => {
         currentMode = e.target.value;
         renderLandscape();
     };
 
-    // Engine filters
     const filterContainer = document.getElementById('engine-filters');
     filterContainer.innerHTML = '';
     engines.sort().forEach(engine => {
-        if (engine === 'GoRegexp') return; // Reference engine
+        if (engine === 'GoRegexp') return;
 
         const label = document.createElement('label');
         label.style.marginRight = '15px';
@@ -82,7 +78,6 @@ function setupControls(engines) {
         filterContainer.appendChild(label);
     });
 
-    // Locality Tabs
     document.querySelectorAll('.tab-btn').forEach(btn => {
         btn.onclick = (e) => {
             document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
@@ -112,8 +107,7 @@ function renderLandscape() {
     const locality = L_BINS.find(b => b.id === currentLocality);
     
     const filtered = landscapeData.filter(d => 
-        d.l >= locality.min && d.l < locality.max &&
-        (d.engine === 'GoRegexp' || selectedEngines.has(d.engine))
+        d.l >= locality.min && d.l < locality.max
     );
 
     const bValues = [...new Set(filtered.map(d => Math.round(d.b * 20) / 20))].sort((a, b) => a - b);
@@ -135,38 +129,70 @@ function renderLandscape() {
     const layout = {}; 
     
     bValues.forEach((bVal, idx) => {
-        const row = Math.floor(idx / nCols) + 1;
-        const col = (idx % nCols) + 1;
         const axisSuffix = idx === 0 ? '' : (idx + 1);
-        const isLeft = col === 1;
+        const isLeft = (idx % nCols) === 0;
         const isBottom = (idx >= bValues.length - nCols) || (nCols === 1);
 
-        const stdData = filtered.filter(d => d.engine === 'GoRegexp' && Math.abs(d.b - bVal) < 0.03);
-        const ourData = filtered.filter(d => d.engine !== 'GoRegexp' && Math.abs(d.b - bVal) < 0.03);
+        const sliceData = filtered.filter(d => Math.abs(d.b - bVal) < 0.03);
+        const stdData = sliceData.filter(d => d.engine === 'GoRegexp');
+        const ourData = sliceData.filter(d => d.engine !== 'GoRegexp' && selectedEngines.has(d.engine));
+        const competitorData = sliceData.filter(d => d.engine !== 'GoRegexp' && d.engine !== 'GoRegexpRe');
 
         const stdByS = {};
         stdData.forEach(s => stdByS[s.s.toFixed(5)] = s.throughput);
 
         if (currentMode === 'relative') {
+            // Zone Shading
+            shapes.push({
+                type: 'rect', xref: 'x' + axisSuffix, yref: 'y' + axisSuffix,
+                x0: -0.1, x1: 1.1, y0: 10, y1: 10000000,
+                fillcolor: 'rgba(255, 215, 0, 0.05)', line: { width: 0 }, layer: 'below'
+            });
+            shapes.push({
+                type: 'rect', xref: 'x' + axisSuffix, yref: 'y' + axisSuffix,
+                x0: -0.1, x1: 1.1, y0: 0.0001, y1: 1.0,
+                fillcolor: 'rgba(255, 0, 0, 0.03)', line: { width: 0 }, layer: 'below'
+            });
+
+            // Baseline
             traces.push({
                 x: [0, 1], y: [1, 1],
                 type: 'scatter', mode: 'lines',
-                line: { color: '#ccc', width: 2, dash: 'dash' },
+                line: { color: '#666', width: 1.5, dash: 'solid' },
                 xaxis: 'x' + axisSuffix, yaxis: 'y' + axisSuffix,
                 showlegend: false, hoverinfo: 'none'
             });
-        } else {
-            traces.push({
-                x: stdData.map(d => d.s),
-                y: stdData.map(d => d.throughput),
-                name: 'GoRegexp (std)',
-                type: 'scatter', mode: 'markers',
-                marker: { symbol: 'cross-thin', color: '#666', size: 8, opacity: 0.4 },
-                xaxis: 'x' + axisSuffix, yaxis: 'y' + axisSuffix,
-                showlegend: idx === 0
+
+            // Competitive Envelope
+            const sPoints = [...new Set(sliceData.map(d => d.s))].sort((a, b) => a - b);
+            const envX = [];
+            const envY = [];
+            sPoints.forEach(s => {
+                const sStr = s.toFixed(5);
+                const stdTp = stdByS[sStr];
+                if (!stdTp) return;
+                
+                const matches = competitorData.filter(d => d.s.toFixed(5) === sStr);
+                if (matches.length > 0) {
+                    const maxTp = Math.max(...matches.map(d => d.throughput));
+                    envX.push(s);
+                    envY.push(maxTp / stdTp);
+                }
             });
+            if (envX.length > 0) {
+                traces.push({
+                    x: envX, y: envY,
+                    name: 'Competitive Envelope',
+                    type: 'scatter', mode: 'lines',
+                    line: { color: 'rgba(0,0,0,0.2)', width: 1, shape: 'hv' },
+                    fill: 'tonexty', fillcolor: 'rgba(0,0,0,0.05)',
+                    xaxis: 'x' + axisSuffix, yaxis: 'y' + axisSuffix,
+                    showlegend: idx === 0
+                });
+            }
         }
 
+        // MAP Threshold detection
         const ourMainData = ourData.filter(d => d.engine === 'GoRegexpRe');
         let transitionS = null;
         ourMainData.sort((a, b) => b.s - a.s); 
@@ -181,46 +207,31 @@ function renderLandscape() {
 
         if (transitionS !== null && currentMode === 'relative') {
             shapes.push({
-                type: 'line',
-                x0: transitionS, x1: transitionS,
-                y0: 0.0001, y1: 10000000,
+                type: 'line', x0: transitionS, x1: transitionS, y0: 0.0001, y1: 10000000,
                 xref: 'x' + axisSuffix, yref: 'y' + axisSuffix,
-                line: { color: 'rgba(255, 215, 0, 0.4)', width: 3, dash: 'dot' }
-            });
-            annotations.push({
-                text: 'MAP Threshold',
-                xref: 'x' + axisSuffix, yref: 'y' + axisSuffix + ' domain',
-                x: transitionS, y: 0.95,
-                showarrow: false,
-                textangle: -90,
-                font: { size: 10, color: '#b8860b' }
+                line: { color: 'rgba(255, 215, 0, 0.4)', width: 2, dash: 'dot' }
             });
         }
 
         const engineTraces = {};
         ourData.forEach(d => {
             if (!engineTraces[d.engine]) engineTraces[d.engine] = { x: [], y: [], text: [], ids: [], color: [] };
-            
             let yVal = d.throughput;
             if (currentMode === 'relative') {
                 const stdTp = stdByS[d.s.toFixed(5)];
                 yVal = stdTp ? (d.throughput / stdTp) : 1.0;
             }
             if (yVal <= 0) yVal = 0.0001;
-
             engineTraces[d.engine].x.push(d.s);
             engineTraces[d.engine].y.push(yVal);
-            engineTraces[d.engine].text.push(`Case: ${d.category}<br>S: ${d.s.toFixed(3)}, B: ${d.b.toFixed(3)}<br>TP: ${d.throughput.toFixed(2)} MB/s`);
+            engineTraces[d.engine].text.push(`${d.category}<br>Speedup: ${yVal.toFixed(2)}x`);
             engineTraces[d.engine].ids.push(d.trace_id);
             engineTraces[d.engine].color.push(REGIME_COLORS[d.regime] || '#999');
         });
 
         for (const [engine, data] of Object.entries(engineTraces)) {
             traces.push({
-                x: data.x, y: data.y,
-                text: data.text,
-                ids: data.ids,
-                name: engine,
+                x: data.x, y: data.y, text: data.text, ids: data.ids, name: engine,
                 type: 'scatter', mode: 'markers',
                 marker: { size: 10, color: data.color, line: { width: 1, color: '#fff' } },
                 xaxis: 'x' + axisSuffix, yaxis: 'y' + axisSuffix,
@@ -229,49 +240,32 @@ function renderLandscape() {
         }
 
         annotations.push({
-            text: `Complexity B ≈ ${bVal.toFixed(2)}`,
-            xref: 'x' + axisSuffix + ' domain',
-            yref: 'y' + axisSuffix + ' domain',
-            x: 0.5,
-            y: 1.12,
-            showarrow: false,
-            font: { size: 12, fontWeight: 'bold' }
+            text: `B ≈ ${bVal.toFixed(2)}`,
+            xref: 'x' + axisSuffix + ' domain', yref: 'y' + axisSuffix + ' domain',
+            x: 0.5, y: 1.1, showarrow: false, font: { size: 12, fontWeight: 'bold' }
         });
 
         layout['xaxis' + axisSuffix] = { 
             title: isBottom ? 'Selectivity (S)' : '', 
-            autorange: false,
-            range: [1.05, -0.05],
-            gridcolor: '#eee',
-            showticklabels: true,
-            matches: 'x'
+            autorange: false, range: [1.05, -0.05], gridcolor: '#eee', showticklabels: true, matches: 'x'
         };
-        
-        const yRange = currentMode === 'relative' ? [-4, 7] : [0, 10];
+        const yRange = currentMode === 'relative' ? [-3, 7] : [0, 10];
         layout['yaxis' + axisSuffix] = { 
             title: isLeft ? (currentMode === 'relative' ? 'Speedup (x)' : 'Throughput (MB/s)') : '',
-            type: 'log', 
-            autorange: false,
-            range: yRange,
-            gridcolor: '#eee',
-            matches: 'y'
+            type: 'log', autorange: false, range: yRange, gridcolor: '#eee', matches: 'y'
         };
     });
 
     const layoutParams = {
         grid: { rows: nRows, columns: nCols, pattern: 'independent', roworder: 'top to bottom', xgap: 0.05, ygap: 0.15 },
-        height: 450 * nRows,
-        autosize: true,
-        margin: { t: 100, b: 80, l: 80, r: 40 },
-        hovermode: 'closest',
-        showlegend: true,
-        legend: { orientation: 'h', y: -0.05, x: 0.5, xanchor: 'center' },
-        annotations: annotations,
-        shapes: shapes
+        height: 400 * nRows, autosize: true,
+        margin: { t: 80, b: 80, l: 80, r: 40 },
+        hovermode: 'closest', showlegend: true,
+        legend: { orientation: 'h', y: -0.1, x: 0.5, xanchor: 'center' },
+        annotations: annotations, shapes: shapes
     };
 
     Object.assign(layout, layoutParams);
-
     Plotly.newPlot(container, traces, layout, { responsive: true }).then(gd => {
         container.on('plotly_click', (data) => {
             const point = data.points[0];
@@ -286,19 +280,13 @@ function renderLandscape() {
 async function showTrace(id) {
     const modal = document.getElementById('trace-modal');
     document.getElementById('trace-title').innerText = 'Loading details...';
-    document.getElementById('trace-pattern').innerText = '';
-    document.getElementById('trace-explain').innerText = '';
-    document.getElementById('trace-stats').innerHTML = '';
     modal.style.display = 'block';
-
     try {
         const resp = await fetch(`data/trace/${id}.json`);
         const data = await resp.json();
-
         document.getElementById('trace-title').innerText = data.category;
         document.getElementById('trace-pattern').innerText = data.pattern;
         document.getElementById('trace-explain').innerText = data.explain;
-        
         document.getElementById('trace-stats').innerHTML = `
             <div><strong>S:</strong> ${data.s.toFixed(4)}</div>
             <div><strong>B:</strong> ${data.b.toFixed(4)}</div>
@@ -313,40 +301,17 @@ function renderTrends() {
     const dates = historyData.map(d => d.date);
     const avg = historyData.map(d => d.avg_speedup);
     const max = historyData.map(d => d.max_speedup);
-
     const traces = [
-        {
-            x: dates, y: avg,
-            name: 'Avg Speedup (Geometric Mean)',
-            type: 'scatter', mode: 'lines+markers',
-            line: { color: '#007bff', width: 3 },
-            marker: { size: 8 }
-        },
-        {
-            x: dates, y: max,
-            name: 'Max Speedup (Peak Performance)',
-            type: 'scatter', mode: 'lines+markers',
-            line: { color: '#28a745', width: 2, dash: 'dot' },
-            marker: { size: 6 },
-            yaxis: 'y2'
-        }
+        { x: dates, y: avg, name: 'Avg Speedup', type: 'scatter', mode: 'lines+markers', line: { color: '#007bff', width: 3 } },
+        { x: dates, y: max, name: 'Max Speedup', type: 'scatter', mode: 'lines+markers', line: { color: '#28a745', width: 2, dash: 'dot' }, yaxis: 'y2' }
     ];
-
     const layout = {
         title: 'Performance Evolution',
         xaxis: { title: 'Date' },
         yaxis: { title: 'Avg Speedup (x)', gridcolor: '#eee' },
-        yaxis2: { 
-            title: 'Max Speedup (x)', 
-            overlaying: 'y', 
-            side: 'right', 
-            type: 'log',
-            showgrid: false
-        },
+        yaxis2: { title: 'Max Speedup (x)', overlaying: 'y', side: 'right', type: 'log', showgrid: false },
         margin: { t: 50, b: 50, l: 60, r: 60 },
-        hovermode: 'x unified',
-        legend: { orientation: 'h', y: -0.2 }
+        hovermode: 'x unified', legend: { orientation: 'h', y: -0.2 }
     };
-
     Plotly.newPlot('trends-chart', traces, layout, { responsive: true });
 }

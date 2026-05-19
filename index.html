@@ -58,12 +58,20 @@
                 </div>
             </div>
 
-            <div style="margin-bottom: 20px; display: flex; gap: 20px; font-size: 0.9rem; justify-content: center; background: #fff; padding: 10px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
-                <span style="font-weight: bold;">Regimes:</span>
-                <span><span style="color: #FFD700;">●</span> MAP (Pre-filter)</span>
-                <span><span style="color: #00BFFF;">●</span> Warp (SWAR)</span>
-                <span><span style="color: #32CD32;">●</span> DFA (Pure)</span>
-                <span><span style="color: #9370DB;">●</span> Hybrid (Capture)</span>
+            <div style="margin-bottom: 20px; display: flex; flex-direction: column; gap: 10px; font-size: 0.9rem; align-items: center; background: #fff; padding: 15px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
+                <div style="display: flex; gap: 20px; flex-wrap: wrap; justify-content: center;">
+                    <span style="font-weight: bold;">Regimes:</span>
+                    <span><span style="color: #FFD700;">●</span> MAP (Pre-filter)</span>
+                    <span><span style="color: #00BFFF;">●</span> Warp (SWAR)</span>
+                    <span><span style="color: #32CD32;">●</span> DFA (Pure)</span>
+                    <span><span style="color: #9370DB;">●</span> Hybrid (Capture)</span>
+                </div>
+                <div style="display: flex; gap: 20px; flex-wrap: wrap; justify-content: center; border-top: 1px solid #eee; pt: 10px; width: 100%; justify-content: center; padding-top: 10px;">
+                    <span style="font-weight: bold;">Zones:</span>
+                    <span><span style="display: inline-block; width: 12px; height: 12px; background: rgba(255, 215, 0, 0.2); border: 1px solid #FFD700;"></span> Efficiency Frontier (>10x)</span>
+                    <span><span style="display: inline-block; width: 12px; height: 12px; background: rgba(255, 0, 0, 0.1); border: 1px solid #f00;"></span> Overhead Zone (<1x)</span>
+                    <span><span style="border-bottom: 2px dotted #FFD700; width: 20px; display: inline-block; vertical-align: middle;"></span> MAP Transition Threshold</span>
+                </div>
             </div>
 
             <div class="tabs">
