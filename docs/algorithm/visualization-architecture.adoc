@@ -1,60 +1,62 @@
-= Visualization Architecture: Regime-Aware Phase Response Mapping
+= Visualization Architecture: Propulsion Envelope Phase Mapping
 :sectnums:
 :toc: left
 
-This document defines the architectural principles for the `go-regexp-re` performance dashboard. It establishes the "Regime-Aware Phase Response Mapping" model, focusing on discrete execution transitions in the SBL space.
+This document defines the architectural principles for the `go-regexp-re` performance dashboard. It establishes the "Propulsion Envelope Mapping" (PEM) model, designed to visualize the architectural "Operating Territories" of regular expression engines.
 
-== Philosophy: Structural Transition Visibility
+== Philosophy: Territory over Points
 
-Performance in `go-regexp-re` is not a continuous surface but a collection of **Discrete Performance Regimes**. Our visualization must prioritize the visibility of these transitions over aesthetic smoothness.
+An engine's performance is not a collection of static points but a **Dynamic Operating Envelope**. The PEM model focuses on the entire territory an engine occupies in the SBL space, revealing how much "Propulsion" it can generate from data structure (Locality $L$) at any given Selectivity ($S$) and Complexity ($B$).
 
 Key objectives:
-1.  **Identify Phase Transitions**: Clearly mark where strategy shifts (e.g., MAP $\to$ DFA).
-2.  **Characterize the S-Dependency**: Visualize how Speedup is inversely proportional to Selectivity ($S$).
-3.  **Map the Overhead Floor**: Explicitly identify regions where constant overheads (DFA lookup or CGO) become dominant.
+1.  **Map Propulsion Envelopes**: Visualize the shaded area between the performance floor ($L=0.1$) and ceiling ($L=1.0$) for each engine.
+2.  **Trace Regime Curvature**: Visualize the non-linear "Regime Shift Curve" where execution strategy transitions from MAP to DFA.
+3.  **Identify Unbeatable Territories**: Highlight regions where `GoRegexpRe`'s operating envelope is strictly superior to all competitors.
 
-== The SBL Coordinate System
+== The SBL Mapping Strategy (PEM)
 
 |===
-| Axis | Definition | Physical Significance
+| Dimension | Visual Encoding | Physical Significance
 
 | **Selectivity (S)**
-| $S = \text{MatchCount} / \text{InputSize}$
-| The primary driver of Speedup. Determines MAP efficiency.
+| **X-Axis** ($-\log_{10}(S + \epsilon)$)
+| Primary driver of strategy shifts. Log-transform expands sparse regions (MAP regime).
 
 | **Complexity (B)**
-| $\text{round}(B, 2)$ (Quantized)
-| Determines DFA state-space pressure and transition latency.
+| **Horizontal Strips** (Low, Mid, High)
+| Determines the vertical compression of the Propulsion Envelope.
 
-| **Locality (L)**
-| Hybrid predictability metric.
-| Determines SWAR/SIMD skip efficiency (Regime: Warp).
+| **Locality Range**
+| **Shaded Envelope (Y-Height)**
+| Visualizes the engine's "Dynamic Range" or structural sensitivity.
+
+| **Engine**
+| **Layered Colors / Z-Order**
+| Defines the "Competitive Reach" of the engine architecture.
 |===
 
-== Visualization Model: Regional Phase Mapping
+== Visualization Model: The Layered Envelope Grid
 
-=== 1. Primary Projection (S-Speedup Plane)
-* **X-Axis**: Selectivity ($S$), on a reversed $[1.0, 0.0]$ scale.
-* **Y-Axis**: Speedup Factor (Relative vs. `GoRegexp`) on a **Logarithmic Scale** ($10^{-2}$ to $10^6$).
-* **Baseline Invariant**: The standard library is a static horizontal line at $Y=1.0$.
+=== 1. Semantic B-Strips (Vertical Stack)
+The dashboard uses three horizontally elongated facets, stacked vertically to force vertical alignment of the $S$-axis. This makes it possible to see how the **MAP-to-DFA Cliff** migrates as complexity increases.
 
-=== 2. Performance Zones (Shading)
-To provide instant analytical context, the plot area is divided into three functional zones:
+=== 2. Propulsion Envelopes (Shaded Areas)
+For each engine:
+*   **Top Boundary**: Maximum speedup achieved at $L=1.0$ (Literal).
+*   **Bottom Boundary**: Minimum speedup achieved at $L=0.1$ (Random).
+*   **Propulsion Zone**: The area between boundaries is shaded with the engine's signature color (low opacity).
+*   **Interpretation**: A "thick" envelope indicates an architecture that is highly responsive to data locality (e.g., SIMD-heavy). A "thin" envelope indicates a rigid architecture (e.g., pure NFA).
 
-1.  **Efficiency Frontier (Gold Shading)**: The region where Speedup $> 10\times$. This represents the "Peak Competitive Zone" where MAP and Warp optimizations are fully leveraged.
-2.  **Standard Parity (Clear/Neutral)**: The region between $0.8\times$ and $1.5\times$. Indicates typical DFA execution parity with the standard library.
-3.  **Overhead Zone (Red/Gray Shading)**: The region below $Y=1.0$. Explicitly labels the "DFA/CGO Overhead Zone" to visualize the physical floor of our performance.
+=== 3. The Regime Transition Curve
+A dashed line tracks the **Strategic Pivot Point**—the $(S, B)$ coordinates where the speedup ratio falls below $2.0\times$. This curve visualizes the "Retraction" of the MAP regime as complexity increases.
 
-=== 3. Threshold Markers
-* **MAP Transition Boundary**: A vertical dashed line marking the $S$-coordinate where MAP speedup falls below a significant threshold (typically $2.0\times$). This marks the "Regime Shift" from pre-filter to core DFA.
+== Strategic Competitive Analysis
 
-== Competitive Frontier (Multi-Engine Analysis)
+- **Envelope Overlap**: Regions where envelopes overlap indicate active competition.
+- **Superiority Gap**: The vertical distance between the *Bottom* of our envelope and the *Top* of a competitor's envelope. If this gap is positive, `GoRegexpRe` is **Architecturally Superior** regardless of data structure.
 
-The system visualizes the **Competitive Envelope**:
-- **Envelope Line**: A polyline representing the *maximum speedup* achieved by any competing engine (PCRE2, RE2, Hyperscan) at each S-coordinate.
-- **Superiority Gap**: The vertical distance between `GoRegexpRe` points and the Envelope Line, proving our architectural advantage in specific SBL slices.
+== Implementation Mandates
 
-== Interaction and Tiered Data
-
-* **Tier 1 (Landscape JSON)**: Global SBL coordinates and throughput metrics.
-* **Tier 2 (Trace JSON)**: Lazy-loaded `Regexp.Explain()` data and per-pass execution costs.
+1.  **Area Plot Integration**: Use Plotly's `fill: 'toself'` or layered `fill: 'tonexty'` to generate engine envelopes.
+2.  **Global S-Axis**: Subplots must maintain a pixel-perfect vertical alignment of the $S$-axis.
+3.  **Regime Integration**: Point markers within the envelope still show the primary Execution Regime (MAP, DFA, etc.) for specific pattern/locality pairs.
