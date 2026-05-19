@@ -1,0 +1,8 @@
+{
+  "category": "LargeAlternation/Count=10",
+  "pattern": "060-0000|064-0941|060-0041|060-0042|064-0820|060-0031|060-0001|064-0821|060-0032|060-0002",
+  "explain": "[IR - COMPILED STRUCTURE]\n  Pattern:  060-0000|064-0941|060-0041|060-0042|064-0820|060-0031|060-0001|064-0821|060-0032...\n  Compile:  1.33691ms\n  Strategy: Fast Path (Boundary Discovery Only)\n  MAP Strategy:\n    |-- * Literal (SIMD): Score 40 (Threshold: 31) (Pattern: \"06\")\n    |--   SearchWarp (SWAR): Available (Trigger: Equal('0'))\n    +--   SearchDFA (sDFA): Available (18 states)\n  DFA Resource Stats:\n    - Identity: Naked (State-space optimized)\n    - States:   18 states\n    - Memory:   ~22.85 KiB (Primary: 18.00 KiB)\n    - sDFA:     4.50 KiB (18 states)\n  Groups:   0 capturing groups\n\n[EXPLAIN - LOGICAL EXECUTION PLAN]\n+- Pass 0: Discovery (MAP)\n|  |-- Gaze: Strict Gaze (Constraint Propagation)\n|  |  +-- Forward: At +2, match None\n|  +-- Snap: Skip (Anchor is at Match Start)\n|\n+- Pass 1: Boundary Discovery (DFA)\n|  +-- Goal: Leftmost MatchEnd \u0026 Priority Determination\n|\n+-- Pass 2-4: Skip (Submatch extraction not required)\n\n[ESTIMATED PERFORMANCE MODEL]\nB (Complexity): Moderate (Pattern Invariant)\n  +-- Stats:  18.00 states\n\nS (Selectivity) Trend:  [ Low ]  [ Middle ]  [ * High * ] \nL (Locality)    Trend:  [ Low ]  [ Middle ]  [ * High * ] \n\nOptimization Fitness Logic (Heuristic Estimate):\n  S:Low    * L:High   =\u003e [ Optimal ]\n  S:Middle * L:High   =\u003e [ Balanced ]\n  S:Low    * L:Middle =\u003e [ Balanced ]\n  S:High   * L:High   =\u003e [ * Sub-optimal * ]\n  S:Low    * L:Low    =\u003e [ Sub-optimal ]\n  S:High   * L:Low    =\u003e [ Poor ]\n\n",
+  "s": 0.0000076290962286516434,
+  "b": 0.7190996574163838,
+  "l": 0.125
+}

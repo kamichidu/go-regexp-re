@@ -1,0 +1,8 @@
+{
+  "category": "LiteralScan/pat=Sherlock",
+  "pattern": "Sherlock",
+  "explain": "[IR - COMPILED STRUCTURE]\n  Pattern:  Sherlock\n  Compile:  14.891µs\n  Strategy: Literal (0-pass)\n  MAP Strategy:\n    +-- Selected: LiteralMatcher (SIMD bytes.Index)\n  DFA Resource Stats:\n    - Identity: N/A (Literal Bypass)\n    - States:   1 states\n    - Memory:   ~ (Primary: )\n  Groups:   0 capturing groups\n\n[EXPLAIN - LOGICAL EXECUTION PLAN]\n+- Pass 0: Discovery (MAP)\n|  |-- Gaze: Skip (Literal search is sufficient)\n|  +-- Snap: Skip (Literal search is sufficient)\n|\n+- Pass 1: Boundary Discovery (LiteralMatcher (Exact Match))\n|  +-- Goal: Leftmost MatchEnd \u0026 Priority Determination\n|\n+-- Pass 2-4: Skip (Submatch extraction not required)\n\n[ESTIMATED PERFORMANCE MODEL]\nB (Complexity): Simple (Pattern Invariant)\n  +-- Stats:  1.00 states\n\nS (Selectivity) Trend:  [ Low ]  [ * Middle * ]  [ High ] \nL (Locality)    Trend:  [ Low ]  [ Middle ]  [ * High * ] \n\nOptimization Fitness Logic (Heuristic Estimate):\n  S:Low    * L:High   =\u003e [ Optimal ]\n  S:Middle * L:High   =\u003e [ * Balanced * ]\n  S:Low    * L:Middle =\u003e [ Balanced ]\n  S:High   * L:High   =\u003e [ Sub-optimal ]\n  S:Low    * L:Low    =\u003e [ Sub-optimal ]\n  S:High   * L:Low    =\u003e [ Poor ]\n\n",
+  "s": 0.000006584318786378361,
+  "b": 0.5,
+  "l": 1
+}

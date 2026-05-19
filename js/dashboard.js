@@ -5,265 +5,311 @@ const L_BINS = [
     { id: 'literal',    label: 'Literal',    min: 0.8, max: 1.01 }
 ];
 
-document.addEventListener('DOMContentLoaded', async function() {
-    try {
-        const response = await fetch('data/landscape.json');
-        if (!response.ok) throw new Error('data/landscape.json not found. Run benchmark on main branch to generate data.');
-        const results = await response.json();
-        
-        // Render all layers of the landscape
-        renderLayeredLandscape(results);
-        
-        // Load history and update summary stats
-        await renderTrends();
-        
-        renderRegression(results);
-        renderDeepDive(results);
-    } catch (err) {
-        console.error('Viewer Error:', err);
-        document.querySelector('main').insertAdjacentHTML('afterbegin', `
-            <div style="background: #fff3f3; color: #721c24; padding: 20px; border-radius: 8px; margin-bottom: 30px; border: 1px solid #f5c6cb;">
-                <strong>Viewer Status:</strong> ${err.message}
-            </div>
-        `);
-    }
+const REGIME_COLORS = {
+    'MAP': '#FFD700',    // Gold
+    'Warp': '#00BFFF',   // Blue
+    'DFA': '#32CD32',    // Green
+    'Hybrid': '#9370DB', // Purple
+    'Standard': '#666666'
+};
+
+let landscapeData = [];
+let historyData = [];
+let currentLocality = 'random';
+let currentMode = 'relative';
+let selectedEngines = new Set();
+
+document.addEventListener('DOMContentLoaded', async () => {
+    await init();
 });
 
-function renderLayeredLandscape(results) {
-    L_BINS.forEach(bin => {
-        renderLandscapeBin(results, bin);
-    });
+async function init() {
+    try {
+        const [lsResp, histResp] = await Promise.all([
+            fetch('data/landscape.json'),
+            fetch('data/history.json')
+        ]);
+        landscapeData = await lsResp.json();
+        historyData = await histResp.json();
+
+        // Default: all engines except standard
+        const engines = [...new Set(landscapeData.map(d => d.engine))];
+        engines.forEach(e => {
+            if (e !== 'GoRegexp') selectedEngines.add(e);
+        });
+
+        setupControls(engines);
+        updateSummary();
+        renderLandscape();
+        renderTrends();
+
+        // Setup Modal
+        const modal = document.getElementById('trace-modal');
+        document.querySelector('.close-btn').onclick = () => modal.style.display = 'none';
+        window.onclick = (event) => { if (event.target == modal) modal.style.display = 'none'; };
+
+    } catch (err) {
+        console.error('Failed to load dashboard data:', err);
+        document.getElementById('loading-overlay').innerText = 'Error loading data. Check console.';
+    }
 }
 
-function renderLandscapeBin(results, bin) {
-    const binResults = results.filter(r => r.l >= bin.min && r.l < bin.max);
-    
-    const ourResults = binResults.filter(r => r.engine === 'GoRegexpRe');
-    const stdResults = binResults.filter(r => r.engine === 'GoRegexp');
-
-    const sValues = [...new Set(results.map(r => r.s))].sort((a, b) => b - a);
-    const bValues = [...new Set(results.map(r => r.b))].sort((a, b) => a - b);
-    
-    const zData = bValues.map(b => sValues.map(s => {
-        const reMatches = ourResults.filter(r => Math.abs(r.s - s) < 0.01 && Math.abs(r.b - b) < 0.01);
-        const stdMatches = stdResults.filter(r => Math.abs(r.s - s) < 0.01 && Math.abs(r.b - b) < 0.01);
-        
-        if (reMatches.length > 0 && stdMatches.length > 0) {
-            const avgRe = reMatches.reduce((acc, r) => acc + r.throughput, 0) / reMatches.length;
-            const avgStd = stdMatches.reduce((acc, r) => acc + r.throughput, 0) / stdMatches.length;
-            return avgStd > 0 ? Math.log10(Math.max(avgRe / avgStd, 0.1)) : null;
-        }
-        return null;
-    }));
-
-    const data = [{
-        z: zData,
-        x: sValues,
-        y: bValues,
-        type: 'heatmap',
-        colorscale: 'Portland',
-        zmin: 0,
-        // Remove hard cap, let it scale to the 'explosion'
-        showscale: bin.id === 'literal',
-        colorbar: { 
-            title: 'Speedup',
-            thickness: 15,
-            tickvals: [0, 1, 2, 3, 4, 5, 6],
-            ticktext: ['1x', '10x', '100x', '1kx', '10kx', '100kx', '1Mx']
-        },
-        hoverongaps: false,
-
-        hovertemplate: 'S: %{x}<br>B: %{y}<br>Speedup: %{customdata}x<extra></extra>',
-        customdata: bValues.map(b => sValues.map(s => {
-            const reMatches = ourResults.filter(r => Math.abs(r.s - s) < 0.01 && Math.abs(r.b - b) < 0.01);
-            const stdMatches = stdResults.filter(r => Math.abs(r.s - s) < 0.01 && Math.abs(r.b - b) < 0.01);
-            if (reMatches.length > 0 && stdMatches.length > 0) {
-                const avgRe = reMatches.reduce((acc, r) => acc + r.throughput, 0) / reMatches.length;
-                const avgStd = stdMatches.reduce((acc, r) => acc + r.throughput, 0) / stdMatches.length;
-                return (avgRe / avgStd).toFixed(1);
-            }
-            return 'N/A';
-        }))
-    }];
-
-    const layout = {
-        margin: { t: 10, b: 25, l: 30, r: bin.id === 'literal' ? 50 : 5 },
-        xaxis: { 
-            title: 'S', 
-            range: [1, 0], 
-            tickvals: [0, 0.5, 1],
-            fixedrange: true 
-        },
-        yaxis: { 
-            title: bin.id === 'random' ? 'B' : '', 
-            range: [0, 1], 
-            tickvals: [0, 0.5, 1],
-            fixedrange: true 
-        },
-        hovermode: 'closest',
-        font: { size: 9 }
+function setupControls(engines) {
+    // Metric mode
+    document.getElementById('metric-mode').onchange = (e) => {
+        currentMode = e.target.value;
+        renderLandscape();
     };
 
-    Plotly.newPlot(`landscape-${bin.id}`, data, layout, {displayModeBar: false});
-}
+    // Engine filters
+    const filterContainer = document.getElementById('engine-filters');
+    engines.sort().forEach(engine => {
+        if (engine === 'GoRegexp') return; // Reference engine
 
-async function renderTrends() {
-    try {
-        const response = await fetch('data/history.json');
-        if (!response.ok) throw new Error('data/history.json not found');
-        const history = await response.json();
-
-        // Update summary from the LATEST history entry (ground truth)
-        if (history.length > 0) {
-            const latest = history[history.length - 1];
-            document.getElementById('min-speedup').textContent = latest.min_speedup.toFixed(1) + 'x';
-            document.getElementById('avg-speedup').textContent = latest.avg_speedup.toFixed(1) + 'x';
-            document.getElementById('max-speedup').textContent = latest.max_speedup.toFixed(1) + 'x';
-        }
-
-        const dates = history.map(h => h.date);
-        const avgs = history.map(h => h.avg_speedup);
-        const mins = history.map(h => h.min_speedup);
-        const maxs = history.map(h => h.max_speedup);
-
-        const data = [
-            {
-                x: dates, y: maxs,
-                type: 'scatter', mode: 'lines', line: { width: 0 },
-                showlegend: false, hoverinfo: 'skip'
-            },
-            {
-                x: dates, y: mins,
-                type: 'scatter', mode: 'lines', line: { width: 0 },
-                fill: 'tonexty', fillcolor: 'rgba(0, 123, 255, 0.1)',
-                name: 'Min-Max Range', hoverinfo: 'skip'
-            },
-            { 
-                x: dates, y: avgs, 
-                name: 'Geo Mean Speedup', 
-                type: 'scatter', mode: 'lines+markers',
-                line: { shape: 'spline', color: '#007bff', width: 3 },
-                marker: { size: 8 }
-            }
-        ];
-
-        const layout = {
-            title: 'Historical Performance Evolution (Min / GeoMean / Max)',
-            xaxis: { title: 'Commit Date', tickangle: -45 },
-            yaxis: { title: 'Speedup (x)', type: 'log', autorange: true },
-            margin: { b: 100 },
-            legend: { orientation: 'h', y: -0.2 }
+        const label = document.createElement('label');
+        label.style.marginRight = '15px';
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.checked = selectedEngines.has(engine);
+        cb.onchange = (e) => {
+            if (e.target.checked) selectedEngines.add(engine);
+            else selectedEngines.delete(engine);
+            renderLandscape();
         };
+        label.appendChild(cb);
+        label.appendChild(document.createTextNode(' ' + engine));
+        filterContainer.appendChild(label);
+    });
 
-        Plotly.newPlot('trends-chart', data, layout);
-    } catch (err) {
-        console.warn('Trends Chart Error:', err);
-        document.getElementById('trends-chart').innerHTML = `<p style="padding: 100px; text-align: center; color: #999;">Error loading trends: ${err.message}</p>`;
-    }
+    // Locality Tabs
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+        btn.onclick = (e) => {
+            document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            currentLocality = btn.dataset.locality;
+            renderLandscape();
+        };
+    });
 }
 
-async function renderRegression(currentResults) {
-    try {
-        const hResponse = await fetch('data/history.json');
-        if (!hResponse.ok) throw new Error('data/history.json not found');
-        const history = await hResponse.json();
+function updateSummary() {
+    const latest = historyData[historyData.length - 1];
+    if (!latest) return;
 
-        if (history.length < 2) {
-            document.getElementById('regression-chart').innerHTML = '<p style="padding: 100px; text-align: center; color: #999;">Need at least two data points for regression analysis.</p>';
-            return;
+    document.getElementById('min-speedup').innerText = latest.min_speedup.toFixed(2) + 'x';
+    document.getElementById('avg-speedup').innerText = latest.avg_speedup.toFixed(2) + 'x';
+    document.getElementById('max-speedup').innerText = formatLargeNumber(latest.max_speedup) + 'x';
+}
+
+function formatLargeNumber(n) {
+    if (n < 1000) return n.toFixed(2);
+    if (n < 1000000) return (n/1000).toFixed(1) + 'k';
+    return (n/1000000).toFixed(1) + 'M';
+}
+
+function renderLandscape() {
+    const locality = L_BINS.find(b => b.id === currentLocality);
+    
+    // Filter data by Locality and Selected Engines
+    const filtered = landscapeData.filter(d => 
+        d.l >= locality.min && d.l < locality.max &&
+        (d.engine === 'GoRegexp' || selectedEngines.has(d.engine))
+    );
+
+    // Group by quantized B
+    const bValues = [...new Set(filtered.map(d => Math.round(d.b * 20) / 20))].sort((a, b) => a - b);
+    
+    const container = document.getElementById('landscape-content');
+    container.innerHTML = ''; // Clear
+
+    if (bValues.length === 0) {
+        container.innerHTML = '<p style="text-align:center; padding: 50px;">No data available for this locality segment.</p>';
+        return;
+    }
+
+    const nRows = Math.ceil(bValues.length / 2);
+    const nCols = Math.min(bValues.length, 2);
+
+    const traces = [];
+    const annotations = [];
+    
+    bValues.forEach((bVal, idx) => {
+        const row = Math.floor(idx / nCols) + 1;
+        const col = (idx % nCols) + 1;
+        const axisSuffix = idx === 0 ? '' : (idx + 1);
+
+        // Standard library baseline for this B-slice
+        const stdData = filtered.filter(d => d.engine === 'GoRegexp' && Math.abs(d.b - bVal) < 0.03);
+        const ourData = filtered.filter(d => d.engine !== 'GoRegexp' && Math.abs(d.b - bVal) < 0.03);
+
+        const stdByS = {};
+        stdData.forEach(s => stdByS[s.s.toFixed(5)] = s.throughput);
+
+        // Plot Baseline
+        if (currentMode === 'relative') {
+            traces.push({
+                x: [0, 1], y: [1, 1],
+                type: 'scatter', mode: 'lines',
+                line: { color: '#ccc', width: 2, dash: 'dash' },
+                xaxis: 'x' + axisSuffix, yaxis: 'y' + axisSuffix,
+                showlegend: false, hoverinfo: 'none'
+            });
+        } else {
+            // Absolute mode: plot stdlib as reference points
+            traces.push({
+                x: stdData.map(d => d.s),
+                y: stdData.map(d => d.throughput),
+                name: 'GoRegexp (std)',
+                type: 'scatter', mode: 'markers',
+                marker: { symbol: 'cross-thin', color: '#666', size: 8, opacity: 0.4 },
+                xaxis: 'x' + axisSuffix, yaxis: 'y' + axisSuffix,
+                showlegend: idx === 0
+            });
         }
 
-        const prevEntry = history[history.length - 2];
-        const pResponse = await fetch(`benchmarks/history/${prevEntry.file}`);
-        if (!pResponse.ok) throw new Error(`Failed to load ${prevEntry.file}`);
-        const prevResults = await pResponse.json();
-
-        const curOur = currentResults.filter(r => r.engine === 'GoRegexpRe');
-        const prevOur = prevResults.filter(r => r.engine === 'GoRegexpRe');
-
-        const sValues = [...new Set(currentResults.map(r => r.s))].sort((a, b) => b - a);
-        const bValues = [...new Set(currentResults.map(r => r.b))].sort((a, b) => a - b);
-        
-        let regressionCount = 0;
-
-        const zData = bValues.map(b => sValues.map(s => {
-            const curMatches = curOur.filter(r => Math.abs(r.s - s) < 0.01 && Math.abs(r.b - b) < 0.01);
-            const prevMatches = prevOur.filter(r => Math.abs(r.s - s) < 0.01 && Math.abs(r.b - b) < 0.01);
+        // Plot Our Data
+        const engineTraces = {};
+        ourData.forEach(d => {
+            if (!engineTraces[d.engine]) engineTraces[d.engine] = { x: [], y: [], text: [], ids: [], color: [] };
             
-            if (curMatches.length > 0 && prevMatches.length > 0) {
-                const avgCur = curMatches.reduce((acc, r) => acc + r.throughput, 0) / curMatches.length;
-                const avgPrev = prevMatches.reduce((acc, r) => acc + r.throughput, 0) / prevMatches.length;
-                const diff = (avgCur - avgPrev) / avgPrev * 100;
-                if (diff < -10.0) regressionCount++; 
-                return diff;
+            let yVal = d.throughput;
+            if (currentMode === 'relative') {
+                const stdTp = stdByS[d.s.toFixed(5)];
+                yVal = stdTp ? (d.throughput / stdTp) : 1.0;
             }
-            return null;
-        }));
+            if (yVal <= 0) yVal = 0.0001; // Epsilon for log scale
 
-        const data = [{
-            z: zData,
-            x: sValues,
-            y: bValues,
-            type: 'heatmap',
-            colorscale: 'RdBu',
-            reversescale: true,
-            zmid: 0,
-            colorbar: { title: 'Diff (%)' },
-            hoverongaps: false,
-            hovertemplate: 'S: %{x}<br>B: %{y}<br>Diff: %{customdata}%<extra></extra>',
-            customdata: bValues.map(b => sValues.map(s => {
-                const curMatches = curOur.filter(r => Math.abs(r.s - s) < 0.01 && Math.abs(r.b - b) < 0.01);
-                const prevMatches = prevOur.filter(r => Math.abs(r.s - s) < 0.01 && Math.abs(r.b - b) < 0.01);
-                if (curMatches.length > 0 && prevMatches.length > 0) {
-                    const avgCur = curMatches.reduce((acc, r) => acc + r.throughput, 0) / curMatches.length;
-                    const avgPrev = prevMatches.reduce((acc, r) => acc + r.throughput, 0) / prevMatches.length;
-                    return ((avgCur - avgPrev) / avgPrev * 100).toFixed(2);
-                }
-                return 'N/A';
-            }))
-        }];
+            engineTraces[d.engine].x.push(d.s);
+            engineTraces[d.engine].y.push(yVal);
+            engineTraces[d.engine].text.push(`Case: ${d.category}<br>S: ${d.s.toFixed(3)}, B: ${d.b.toFixed(3)}<br>TP: ${d.throughput.toFixed(2)} MB/s`);
+            engineTraces[d.engine].ids.push(d.trace_id);
+            engineTraces[d.engine].color.push(REGIME_COLORS[d.regime] || '#999');
+        });
 
-        const layout = {
-            title: `Regression Heatmap (All L Averaged, Current vs ${prevEntry.sha})`,
-            xaxis: { title: 'Selectivity (S)', autorange: 'reversed' },
-            yaxis: { title: 'Complexity (B)' },
-            hovermode: 'closest'
+        for (const [engine, data] of Object.entries(engineTraces)) {
+            traces.push({
+                x: data.x, y: data.y,
+                text: data.text,
+                ids: data.ids,
+                name: engine,
+                type: 'scatter', mode: 'markers',
+                marker: { size: 10, color: data.color, line: { width: 1, color: '#fff' } },
+                xaxis: 'x' + axisSuffix, yaxis: 'y' + axisSuffix,
+                showlegend: idx === 0
+            });
+        }
+
+        annotations.push({
+            text: `Complexity B ≈ ${bVal.toFixed(2)}`,
+            xref: 'paper', yref: 'paper',
+            x: (col - 1) / nCols + 0.25,
+            y: 1 - (row - 1) / nRows,
+            showarrow: false,
+            font: { size: 14, fontWeight: 'bold' }
+        });
+    });
+
+    const layout = {
+        grid: { rows: nRows, columns: nCols, pattern: 'independent' },
+        height: 400 * nRows,
+        margin: { t: 50, b: 50, l: 60, r: 20 },
+        hovermode: 'closest',
+        showlegend: true,
+        legend: { orientation: 'h', y: -0.1 },
+        annotations: annotations
+    };
+
+    // Configure all axes
+    for (let i = 0; i < bValues.length; i++) {
+        const axisSuffix = i === 0 ? '' : (i + 1);
+        layout['xaxis' + axisSuffix] = { 
+            title: 'Selectivity (S)', 
+            autorange: 'reversed', 
+            gridcolor: '#eee',
+            range: [1.05, -0.05]
         };
+        layout['yaxis' + axisSuffix] = { 
+            title: currentMode === 'relative' ? 'Speedup (x)' : 'Throughput (MB/s)',
+            type: 'log', 
+            gridcolor: '#eee'
+        };
+    }
 
-        Plotly.newPlot('regression-chart', data, layout);
-        document.getElementById('regression-count').textContent = regressionCount;
+    Plotly.newPlot(container, traces, layout, { responsive: true }).then(gd => {
+        container.on('plotly_click', (data) => {
+            const point = data.points[0];
+            if (point && point.data.ids) {
+                const traceId = point.data.ids[point.pointIndex];
+                if (traceId) showTrace(traceId);
+            }
+        });
+    });
+}
+
+async function showTrace(id) {
+    const modal = document.getElementById('trace-modal');
+    document.getElementById('trace-title').innerText = 'Loading details...';
+    document.getElementById('trace-pattern').innerText = '';
+    document.getElementById('trace-explain').innerText = '';
+    document.getElementById('trace-stats').innerHTML = '';
+    modal.style.display = 'block';
+
+    try {
+        const resp = await fetch(`data/trace/${id}.json`);
+        const data = await resp.json();
+
+        document.getElementById('trace-title').innerText = data.category;
+        document.getElementById('trace-pattern').innerText = data.pattern;
+        document.getElementById('trace-explain').innerText = data.explain;
+        
+        document.getElementById('trace-stats').innerHTML = `
+            <div><strong>S:</strong> ${data.s.toFixed(4)}</div>
+            <div><strong>B:</strong> ${data.b.toFixed(4)}</div>
+            <div><strong>L:</strong> ${data.l.toFixed(4)}</div>
+        `;
     } catch (err) {
-        console.warn('Regression Chart Error:', err);
-        document.getElementById('regression-chart').innerHTML = `<p style="padding: 100px; text-align: center; color: #999;">Error loading regression: ${err.message}</p>`;
+        document.getElementById('trace-title').innerText = 'Error loading trace';
     }
 }
 
-function renderDeepDive(results) {
-    const bTarget = Math.max(...results.map(r => r.b));
-    const ourDataRaw = results.filter(r => r.engine === 'GoRegexpRe' && Math.abs(r.b - bTarget) < 0.01);
-    const stdDataRaw = results.filter(r => r.engine === 'GoRegexp' && Math.abs(r.b - bTarget) < 0.01);
-    const sValues = [...new Set(ourDataRaw.map(r => r.s))].sort((a, b) => b - a);
-    
-    const ourData = sValues.map(s => {
-        const matches = ourDataRaw.filter(r => Math.abs(r.s - s) < 0.01);
-        return { s, throughput: matches.reduce((acc, r) => acc + r.throughput, 0) / matches.length };
-    });
-    
-    const stdData = sValues.map(s => {
-        const matches = stdDataRaw.filter(r => Math.abs(r.s - s) < 0.01);
-        return { s, throughput: matches.reduce((acc, r) => acc + r.throughput, 0) / matches.length };
-    });
+function renderTrends() {
+    const dates = historyData.map(d => d.date);
+    const avg = historyData.map(d => d.avg_speedup);
+    const max = historyData.map(d => d.max_speedup);
 
-    const data = [
-        { x: ourData.map(d => d.s), y: ourData.map(d => d.throughput), name: 'go-regexp-re', type: 'scatter', mode: 'lines+markers' },
-        { x: stdData.map(d => d.s), y: stdData.map(d => d.throughput), name: 'Go standard', type: 'scatter', mode: 'lines+markers' }
+    const traces = [
+        {
+            x: dates, y: avg,
+            name: 'Avg Speedup (Geometric Mean)',
+            type: 'scatter', mode: 'lines+markers',
+            line: { color: '#007bff', width: 3 },
+            marker: { size: 8 }
+        },
+        {
+            x: dates, y: max,
+            name: 'Max Speedup (Peak Performance)',
+            type: 'scatter', mode: 'lines+markers',
+            line: { color: '#28a745', width: 2, dash: 'dot' },
+            marker: { size: 6 },
+            yaxis: 'y2'
+        }
     ];
 
     const layout = {
-        title: `Throughput Profile (B=${bTarget.toFixed(2)}, All L Averaged)`,
-        xaxis: { title: 'Selectivity (S)', autorange: 'reversed' },
-        yaxis: { title: 'Throughput (MB/s)', type: 'log' }
+        title: 'Performance Evolution',
+        xaxis: { title: 'Date' },
+        yaxis: { title: 'Avg Speedup (x)', gridcolor: '#eee' },
+        yaxis2: { 
+            title: 'Max Speedup (x)', 
+            overlaying: 'y', 
+            side: 'right', 
+            type: 'log',
+            showgrid: false
+        },
+        margin: { t: 50, b: 50, l: 60, r: 60 },
+        hovermode: 'x unified',
+        legend: { orientation: 'h', y: -0.2 }
     };
 
-    Plotly.newPlot('deepdive-chart', data, layout);
+    Plotly.newPlot('trends-chart', traces, layout, { responsive: true });
 }

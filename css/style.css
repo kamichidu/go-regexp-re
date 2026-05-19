@@ -2,7 +2,7 @@ body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     line-height: 1.6;
     color: #333;
-    max-width: 1200px;
+    max-width: 1400px;
     margin: 0 auto;
     padding: 20px;
     background-color: #f8f9fa;
@@ -91,39 +91,114 @@ h2 {
     color: #333;
 }
 
-#landscape-chart, #trends-chart, #regression-chart, #deepdive-chart {
-    width: 100%;
-    height: 500px;
+.stat-card.primary {
+    background: #e7f1ff;
+    border: 1px solid #007bff;
 }
 
-.landscape-grid {
+.stat-card.primary p {
+    color: #007bff;
+}
+
+/* New Controls & Tabs */
+.controls {
     display: flex;
-    flex-wrap: nowrap;
-    gap: 10px;
-    margin-top: 20px;
-    overflow-x: auto;
-    padding-bottom: 10px;
-}
-
-.landscape-container {
-    flex: 1;
-    min-width: 240px;
-    background: #fff;
-    border: 1px solid #eee;
+    gap: 30px;
+    margin-bottom: 20px;
+    background: #f8f9fa;
+    padding: 15px;
     border-radius: 8px;
-    padding: 5px;
 }
 
-.landscape-container h3 {
-    font-size: 1rem;
-    text-align: center;
-    margin: 0 0 10px;
+.control-group {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.tabs {
+    display: flex;
+    gap: 5px;
+    margin-bottom: 20px;
+}
+
+.tab-btn {
+    padding: 10px 20px;
+    border: none;
+    background: #e9ecef;
+    cursor: pointer;
+    border-radius: 5px 5px 0 0;
+    font-weight: 600;
+}
+
+.tab-btn.active {
+    background: #fff;
+    color: #007bff;
+    border-top: 3px solid #007bff;
+}
+
+/* Modal */
+.modal {
+    display: none;
+    position: fixed;
+    z-index: 2000;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 100%;
+    background-color: rgba(0,0,0,0.5);
+}
+
+.modal-content {
+    background-color: #fff;
+    margin: 5% auto;
+    padding: 25px;
+    border-radius: 12px;
+    width: 80%;
+    max-width: 900px;
+    max-height: 85vh;
+    overflow-y: auto;
+    position: relative;
+    box-shadow: 0 10px 25px rgba(0,0,0,0.2);
+}
+
+.close-btn {
+    position: absolute;
+    right: 20px;
+    top: 10px;
+    font-size: 28px;
+    font-weight: bold;
+    cursor: pointer;
+}
+
+.explain-box {
+    background: #2d2d2d;
+    color: #f8f8f2;
+    padding: 15px;
+    border-radius: 6px;
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    font-size: 13px;
+    white-space: pre-wrap;
+    margin-top: 15px;
+}
+
+/* Chart heights */
+#landscape-content {
+    width: 100%;
+    min-height: 800px;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+
+#loading-overlay {
+    font-size: 1.2rem;
     color: #666;
 }
 
-.landscape-container div {
+#trends-chart {
     width: 100%;
-    height: 300px;
+    height: 500px;
 }
 
 footer {
