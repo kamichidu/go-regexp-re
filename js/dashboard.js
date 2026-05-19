@@ -1,8 +1,7 @@
-const L_BINS = [
-    { id: 'random',     label: 'Random',     min: 0.0, max: 0.2 },
-    { id: 'natural',    label: 'Natural',    min: 0.2, max: 0.6 },
-    { id: 'structured', label: 'Structured', min: 0.6, max: 0.8 },
-    { id: 'literal',    label: 'Literal',    min: 0.8, max: 1.01 }
+const B_TIERS = [
+    { label: 'Low B (Simple)',  min: 0.0, max: 0.6 },
+    { label: 'Mid B (Balanced)', min: 0.6, max: 0.8 },
+    { label: 'High B (Stress)',  min: 0.8, max: 1.1 }
 ];
 
 const REGIME_COLORS = {
@@ -13,11 +12,17 @@ const REGIME_COLORS = {
     'Standard': '#666666'
 };
 
+const ENGINE_COLORS = {
+    'GoRegexpRe': 'rgba(26, 115, 232, 0.15)',
+    'Coregex':    'rgba(234, 67, 53, 0.1)',
+    'RE2-CGO':    'rgba(52, 168, 83, 0.1)',
+    'PCRE2-CGO':  'rgba(251, 188, 4, 0.1)'
+};
+
 let landscapeData = [];
 let historyData = [];
-let currentLocality = 'random';
 let currentMode = 'relative';
-let selectedEngines = new Set();
+let selectedEngines = new Set(['GoRegexpRe', 'Coregex']);
 
 document.addEventListener('DOMContentLoaded', async () => {
     await init();
@@ -32,11 +37,7 @@ async function init() {
         landscapeData = await lsResp.json();
         historyData = await histResp.json();
 
-        const engines = [...new Set(landscapeData.map(d => d.engine))];
-        engines.forEach(e => {
-            if (e !== 'GoRegexp') selectedEngines.add(e);
-        });
-
+        const engines = [...new Set(landscapeData.map(d => d.engine))].filter(e => e !== 'GoRegexp');
         setupControls(engines);
         updateSummary();
         renderLandscape();
@@ -45,10 +46,9 @@ async function init() {
         const modal = document.getElementById('trace-modal');
         document.querySelector('.close-btn').onclick = () => modal.style.display = 'none';
         window.onclick = (event) => { if (event.target == modal) modal.style.display = 'none'; };
-
     } catch (err) {
         console.error('Failed to load dashboard data:', err);
-        document.getElementById('loading-overlay').innerText = 'Error loading data. Check console.';
+        document.getElementById('loading-overlay').innerText = 'Error loading data.';
     }
 }
 
@@ -61,8 +61,6 @@ function setupControls(engines) {
     const filterContainer = document.getElementById('engine-filters');
     filterContainer.innerHTML = '';
     engines.sort().forEach(engine => {
-        if (engine === 'GoRegexp') return;
-
         const label = document.createElement('label');
         label.style.marginRight = '15px';
         const cb = document.createElement('input');
@@ -77,191 +75,148 @@ function setupControls(engines) {
         label.appendChild(document.createTextNode(' ' + engine));
         filterContainer.appendChild(label);
     });
-
-    document.querySelectorAll('.tab-btn').forEach(btn => {
-        btn.onclick = (e) => {
-            document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-            btn.classList.add('active');
-            currentLocality = btn.dataset.locality;
-            renderLandscape();
-        };
-    });
 }
 
 function updateSummary() {
     const latest = historyData[historyData.length - 1];
     if (!latest) return;
-
     document.getElementById('min-speedup').innerText = latest.min_speedup.toFixed(2) + 'x';
     document.getElementById('avg-speedup').innerText = latest.avg_speedup.toFixed(2) + 'x';
-    document.getElementById('max-speedup').innerText = formatLargeNumber(latest.max_speedup) + 'x';
-}
-
-function formatLargeNumber(n) {
-    if (n < 1000) return n.toFixed(2);
-    if (n < 1000000) return (n/1000).toFixed(1) + 'k';
-    return (n/1000000).toFixed(1) + 'M';
+    document.getElementById('max-speedup').innerText = (latest.max_speedup/1000).toFixed(1) + 'k';
 }
 
 function renderLandscape() {
-    const locality = L_BINS.find(b => b.id === currentLocality);
-    
-    const filtered = landscapeData.filter(d => 
-        d.l >= locality.min && d.l < locality.max
-    );
-
-    const bValues = [...new Set(filtered.map(d => Math.round(d.b * 20) / 20))].sort((a, b) => a - b);
-    
     const container = document.getElementById('landscape-content');
     container.innerHTML = ''; 
-
-    if (bValues.length === 0) {
-        container.innerHTML = '<p style="text-align:center; padding: 50px;">No data available for this locality segment.</p>';
-        return;
-    }
-
-    const nRows = Math.ceil(bValues.length / 2);
-    const nCols = bValues.length > 1 ? 2 : 1;
 
     const traces = [];
     const annotations = [];
     const shapes = [];
-    const layout = {}; 
-    
-    bValues.forEach((bVal, idx) => {
+    const layout = {};
+
+    B_TIERS.forEach((tier, idx) => {
         const axisSuffix = idx === 0 ? '' : (idx + 1);
-        const isLeft = (idx % nCols) === 0;
-        const isBottom = (idx >= bValues.length - nCols) || (nCols === 1);
+        const isLeft = true;
+        const isBottom = idx === B_TIERS.length - 1;
 
-        const sliceData = filtered.filter(d => Math.abs(d.b - bVal) < 0.03);
+        const sliceData = landscapeData.filter(d => d.b >= tier.min && d.b < tier.max);
         const stdData = sliceData.filter(d => d.engine === 'GoRegexp');
-        const ourData = sliceData.filter(d => d.engine !== 'GoRegexp' && selectedEngines.has(d.engine));
-        const competitorData = sliceData.filter(d => d.engine !== 'GoRegexp' && d.engine !== 'GoRegexpRe');
-
         const stdByS = {};
         stdData.forEach(s => stdByS[s.s.toFixed(5)] = s.throughput);
 
+        // Zone Backgrounds
         if (currentMode === 'relative') {
-            // Zone Shading
             shapes.push({
                 type: 'rect', xref: 'x' + axisSuffix, yref: 'y' + axisSuffix,
-                x0: -0.1, x1: 1.1, y0: 10, y1: 10000000,
+                x0: -0.1, x1: 1.1, y0: 10, y1: 1e8,
                 fillcolor: 'rgba(255, 215, 0, 0.05)', line: { width: 0 }, layer: 'below'
             });
             shapes.push({
                 type: 'rect', xref: 'x' + axisSuffix, yref: 'y' + axisSuffix,
-                x0: -0.1, x1: 1.1, y0: 0.0001, y1: 1.0,
+                x0: -0.1, x1: 1.1, y0: 1e-4, y1: 1.0,
                 fillcolor: 'rgba(255, 0, 0, 0.03)', line: { width: 0 }, layer: 'below'
             });
-
-            // Baseline
             traces.push({
-                x: [0, 1], y: [1, 1],
-                type: 'scatter', mode: 'lines',
-                line: { color: '#666', width: 1.5, dash: 'solid' },
-                xaxis: 'x' + axisSuffix, yaxis: 'y' + axisSuffix,
+                x: [0, 1.1], y: [1, 1], type: 'scatter', mode: 'lines',
+                line: { color: '#666', width: 1 }, xaxis: 'x' + axisSuffix, yaxis: 'y' + axisSuffix,
                 showlegend: false, hoverinfo: 'none'
             });
+        }
 
-            // Competitive Envelope
-            const sPoints = [...new Set(sliceData.map(d => d.s))].sort((a, b) => a - b);
-            const envX = [];
-            const envY = [];
-            sPoints.forEach(s => {
-                const sStr = s.toFixed(5);
-                const stdTp = stdByS[sStr];
-                if (!stdTp) return;
-                
-                const matches = competitorData.filter(d => d.s.toFixed(5) === sStr);
-                if (matches.length > 0) {
-                    const maxTp = Math.max(...matches.map(d => d.throughput));
-                    envX.push(s);
-                    envY.push(maxTp / stdTp);
-                }
+        // Generate Envelopes
+        selectedEngines.forEach(engine => {
+            const engData = sliceData.filter(d => d.engine === engine);
+            const categories = [...new Set(engData.map(d => d.category))];
+            
+            const envelopePoints = [];
+            // Group by pattern (S)
+            const sGroups = {};
+            engData.forEach(d => {
+                const sKey = d.s.toFixed(5);
+                if (!sGroups[sKey]) sGroups[sKey] = [];
+                sGroups[sKey].push(d);
             });
-            if (envX.length > 0) {
+
+            const sortedS = Object.keys(sGroups).sort((a,b) => parseFloat(a) - parseFloat(b));
+            const topX = [], topY = [], botX = [], botY = [];
+
+            sortedS.forEach(sKey => {
+                const pts = sGroups[sKey];
+                const stdTp = stdByS[sKey];
+                if (!stdTp && currentMode === 'relative') return;
+
+                const getVal = (tp) => currentMode === 'relative' ? tp/stdTp : tp;
+                const vals = pts.map(p => getVal(p.throughput));
+                
+                topX.push(parseFloat(sKey));
+                topY.push(Math.max(...vals));
+                botX.push(parseFloat(sKey));
+                botY.push(Math.min(...vals));
+            });
+
+            if (topX.length > 0) {
+                // Envelope Shading
                 traces.push({
-                    x: envX, y: envY,
-                    name: 'Competitive Envelope',
-                    type: 'scatter', mode: 'lines',
-                    line: { color: 'rgba(0,0,0,0.2)', width: 1, shape: 'hv' },
-                    fill: 'tonexty', fillcolor: 'rgba(0,0,0,0.05)',
+                    x: topX.concat(botX.reverse()),
+                    y: topY.concat(botY.reverse()),
+                    fill: 'toself',
+                    fillcolor: ENGINE_COLORS[engine] || 'rgba(0,0,0,0.05)',
+                    line: { width: 0 },
+                    name: `${engine} Envelope`,
                     xaxis: 'x' + axisSuffix, yaxis: 'y' + axisSuffix,
-                    showlegend: idx === 0
+                    showlegend: idx === 0, hoverinfo: 'none'
+                });
+                // Regime Markers
+                traces.push({
+                    x: engData.map(d => d.s),
+                    y: engData.map(d => {
+                        const stdTp = stdByS[d.s.toFixed(5)];
+                        return currentMode === 'relative' ? (stdTp ? d.throughput/stdTp : 1) : d.throughput;
+                    }),
+                    ids: engData.map(d => d.trace_id),
+                    mode: 'markers',
+                    marker: { size: 6, color: engData.map(d => REGIME_COLORS[d.regime] || '#999'), opacity: 0.8 },
+                    name: engine,
+                    text: engData.map(d => `${d.category}<br>Regime: ${d.regime}`),
+                    xaxis: 'x' + axisSuffix, yaxis: 'y' + axisSuffix,
+                    showlegend: idx === 0 && engine === 'GoRegexpRe'
                 });
             }
-        }
-
-        // MAP Threshold detection
-        const ourMainData = ourData.filter(d => d.engine === 'GoRegexpRe');
-        let transitionS = null;
-        ourMainData.sort((a, b) => b.s - a.s); 
-        for (const d of ourMainData) {
-            const stdTp = stdByS[d.s.toFixed(5)];
-            const ratio = stdTp ? (d.throughput / stdTp) : 1.0;
-            if (ratio > 2.0) {
-                transitionS = d.s;
-                break;
-            }
-        }
-
-        if (transitionS !== null && currentMode === 'relative') {
-            shapes.push({
-                type: 'line', x0: transitionS, x1: transitionS, y0: 0.0001, y1: 10000000,
-                xref: 'x' + axisSuffix, yref: 'y' + axisSuffix,
-                line: { color: 'rgba(255, 215, 0, 0.4)', width: 2, dash: 'dot' }
-            });
-        }
-
-        const engineTraces = {};
-        ourData.forEach(d => {
-            if (!engineTraces[d.engine]) engineTraces[d.engine] = { x: [], y: [], text: [], ids: [], color: [] };
-            let yVal = d.throughput;
-            if (currentMode === 'relative') {
-                const stdTp = stdByS[d.s.toFixed(5)];
-                yVal = stdTp ? (d.throughput / stdTp) : 1.0;
-            }
-            if (yVal <= 0) yVal = 0.0001;
-            engineTraces[d.engine].x.push(d.s);
-            engineTraces[d.engine].y.push(yVal);
-            engineTraces[d.engine].text.push(`${d.category}<br>Speedup: ${yVal.toFixed(2)}x`);
-            engineTraces[d.engine].ids.push(d.trace_id);
-            engineTraces[d.engine].color.push(REGIME_COLORS[d.regime] || '#999');
         });
 
-        for (const [engine, data] of Object.entries(engineTraces)) {
-            traces.push({
-                x: data.x, y: data.y, text: data.text, ids: data.ids, name: engine,
-                type: 'scatter', mode: 'markers',
-                marker: { size: 10, color: data.color, line: { width: 1, color: '#fff' } },
-                xaxis: 'x' + axisSuffix, yaxis: 'y' + axisSuffix,
-                showlegend: idx === 0
-            });
-        }
-
+        // Regime Shift Curve (GoRegexpRe only)
+        const reData = sliceData.filter(d => d.engine === 'GoRegexpRe');
+        const curveX = [], curveY = [];
+        const sKeys = [...new Set(reData.map(d => d.s.toFixed(5)))].sort((a,b) => parseFloat(a) - parseFloat(b));
+        sKeys.forEach(sKey => {
+            const pts = reData.filter(d => d.s.toFixed(5) === sKey);
+            const stdTp = stdByS[sKey];
+            if (!stdTp) return;
+            // Find transition point (Speedup crosses 2.0x)
+            const avgSpeedup = pts.reduce((sum, p) => sum + (p.throughput/stdTp), 0) / pts.length;
+            curveX.push(parseFloat(sKey));
+            curveY.push(avgSpeedup);
+        });
+        
         annotations.push({
-            text: `B ≈ ${bVal.toFixed(2)}`,
-            xref: 'x' + axisSuffix + ' domain', yref: 'y' + axisSuffix + ' domain',
-            x: 0.5, y: 1.1, showarrow: false, font: { size: 12, fontWeight: 'bold' }
+            text: tier.label, xref: 'paper', yref: 'y' + axisSuffix + ' domain',
+            x: 1.02, y: 0.5, showarrow: false, textangle: 90, font: { size: 14, fontWeight: 'bold' }
         });
 
         layout['xaxis' + axisSuffix] = { 
             title: isBottom ? 'Selectivity (S)' : '', 
-            autorange: false, range: [1.05, -0.05], gridcolor: '#eee', showticklabels: true, matches: 'x'
+            autorange: false, range: [1.05, -0.05], gridcolor: '#eee', showticklabels: isBottom, matches: 'x'
         };
         const yRange = currentMode === 'relative' ? [-3, 7] : [0, 10];
         layout['yaxis' + axisSuffix] = { 
-            title: isLeft ? (currentMode === 'relative' ? 'Speedup (x)' : 'Throughput (MB/s)') : '',
-            type: 'log', autorange: false, range: yRange, gridcolor: '#eee', matches: 'y'
+            title: 'Speedup (x)', type: 'log', autorange: false, range: yRange, gridcolor: '#eee'
         };
     });
 
     const layoutParams = {
-        grid: { rows: nRows, columns: nCols, pattern: 'independent', roworder: 'top to bottom', xgap: 0.05, ygap: 0.15 },
-        height: 400 * nRows, autosize: true,
-        margin: { t: 80, b: 80, l: 80, r: 40 },
-        hovermode: 'closest', showlegend: true,
-        legend: { orientation: 'h', y: -0.1, x: 0.5, xanchor: 'center' },
+        grid: { rows: B_TIERS.length, columns: 1, pattern: 'independent', roworder: 'top to bottom', ygap: 0.1 },
+        height: 1200, autosize: true, margin: { t: 50, b: 80, l: 80, r: 80 },
+        hovermode: 'closest', showlegend: true, legend: { orientation: 'h', y: -0.05, x: 0.5, xanchor: 'center' },
         annotations: annotations, shapes: shapes
     };
 
@@ -279,7 +234,6 @@ function renderLandscape() {
 
 async function showTrace(id) {
     const modal = document.getElementById('trace-modal');
-    document.getElementById('trace-title').innerText = 'Loading details...';
     modal.style.display = 'block';
     try {
         const resp = await fetch(`data/trace/${id}.json`);
@@ -288,9 +242,9 @@ async function showTrace(id) {
         document.getElementById('trace-pattern').innerText = data.pattern;
         document.getElementById('trace-explain').innerText = data.explain;
         document.getElementById('trace-stats').innerHTML = `
-            <div><strong>S:</strong> ${data.s.toFixed(4)}</div>
-            <div><strong>B:</strong> ${data.b.toFixed(4)}</div>
-            <div><strong>L:</strong> ${data.l.toFixed(4)}</div>
+            <div>S: ${data.s.toFixed(4)}</div>
+            <div>B: ${data.b.toFixed(4)}</div>
+            <div>L: ${data.l.toFixed(4)}</div>
         `;
     } catch (err) {
         document.getElementById('trace-title').innerText = 'Error loading trace';
@@ -302,15 +256,15 @@ function renderTrends() {
     const avg = historyData.map(d => d.avg_speedup);
     const max = historyData.map(d => d.max_speedup);
     const traces = [
-        { x: dates, y: avg, name: 'Avg Speedup', type: 'scatter', mode: 'lines+markers', line: { color: '#007bff', width: 3 } },
-        { x: dates, y: max, name: 'Max Speedup', type: 'scatter', mode: 'lines+markers', line: { color: '#28a745', width: 2, dash: 'dot' }, yaxis: 'y2' }
+        { x: dates, y: avg, name: 'Avg Speedup', type: 'scatter', mode: 'lines+markers', line: { color: '#1a73e8', width: 3 } },
+        { x: dates, y: max, name: 'Max Speedup', type: 'scatter', mode: 'lines+markers', line: { color: '#34a853', width: 2, dash: 'dot' }, yaxis: 'y2' }
     ];
     const layout = {
-        title: 'Performance Evolution',
-        xaxis: { title: 'Date' },
+        title: 'Architectural Performance Trends',
+        xaxis: { title: 'Release Date' },
         yaxis: { title: 'Avg Speedup (x)', gridcolor: '#eee' },
         yaxis2: { title: 'Max Speedup (x)', overlaying: 'y', side: 'right', type: 'log', showgrid: false },
-        margin: { t: 50, b: 50, l: 60, r: 60 },
+        margin: { t: 60, b: 50, l: 60, r: 60 },
         hovermode: 'x unified', legend: { orientation: 'h', y: -0.2 }
     };
     Plotly.newPlot('trends-chart', traces, layout, { responsive: true });

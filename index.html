@@ -3,33 +3,33 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>go-regexp-re Performance Landscape</title>
+    <title>go-regexp-re Propulsion Landscape</title>
     <script src="https://cdn.plot.ly/plotly-2.24.1.min.js"></script>
     <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
     <header>
-        <h1>go-regexp-re Performance Landscape</h1>
-        <p>Discrete Phase Response Mapping (Faceted 2D Scatter)</p>
+        <h1>go-regexp-re Propulsion Landscape</h1>
+        <p>Architectural Operating Territory Analysis (Propulsion Envelope Mapping)</p>
     </header>
 
     <nav>
         <ul>
-            <li><a href="#landscape">Performance Landscape</a></li>
+            <li><a href="#landscape">Operating Envelopes</a></li>
             <li><a href="#trends">Historical Trends</a></li>
         </ul>
     </nav>
 
     <main>
         <section id="overview">
-            <h2>🧭 Performance Summary</h2>
+            <h2>🧭 Global Performance Baseline</h2>
             <div id="summary-stats">
                 <div class="stat-card">
                     <h3>Min Speedup</h3>
                     <p id="min-speedup">-</p>
                 </div>
                 <div class="stat-card primary">
-                    <h3>Avg Speedup</h3>
+                    <h3>Avg Speedup (GeoMean)</h3>
                     <p id="avg-speedup">-</p>
                 </div>
                 <div class="stat-card">
@@ -40,7 +40,7 @@
         </section>
 
         <section id="landscape">
-            <h2>🌍 Phase Response Map</h2>
+            <h2>🚀 Operating Territories</h2>
             
             <div class="controls">
                 <div class="control-group">
@@ -58,36 +58,28 @@
                 </div>
             </div>
 
-            <div style="margin-bottom: 20px; display: flex; flex-direction: column; gap: 10px; font-size: 0.9rem; align-items: center; background: #fff; padding: 15px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
-                <div style="display: flex; gap: 20px; flex-wrap: wrap; justify-content: center;">
-                    <span style="font-weight: bold;">Regimes:</span>
-                    <span><span style="color: #FFD700;">●</span> MAP (Pre-filter)</span>
-                    <span><span style="color: #00BFFF;">●</span> Warp (SWAR)</span>
-                    <span><span style="color: #32CD32;">●</span> DFA (Pure)</span>
-                    <span><span style="color: #9370DB;">●</span> Hybrid (Capture)</span>
+            <div class="legend-container">
+                <div class="legend-row">
+                    <span style="font-weight: bold;">Execution Regimes:</span>
+                    <div class="legend-item"><span class="swatch" style="background: #FFD700;"></span> MAP (Pre-filter)</div>
+                    <div class="legend-item"><span class="swatch" style="background: #00BFFF;"></span> Warp (SWAR)</div>
+                    <div class="legend-item"><span class="swatch" style="background: #32CD32;"></span> DFA (Pure)</div>
+                    <div class="legend-item"><span class="swatch" style="background: #9370DB;"></span> Hybrid (Capture)</div>
                 </div>
-                <div style="display: flex; gap: 20px; flex-wrap: wrap; justify-content: center; border-top: 1px solid #eee; pt: 10px; width: 100%; justify-content: center; padding-top: 10px;">
-                    <span style="font-weight: bold;">Zones:</span>
-                    <span><span style="display: inline-block; width: 12px; height: 12px; background: rgba(255, 215, 0, 0.2); border: 1px solid #FFD700;"></span> Efficiency Frontier (>10x)</span>
-                    <span><span style="display: inline-block; width: 12px; height: 12px; background: rgba(255, 0, 0, 0.1); border: 1px solid #f00;"></span> Overhead Zone (<1x)</span>
-                    <span><span style="border-bottom: 2px dotted #FFD700; width: 20px; display: inline-block; vertical-align: middle;"></span> MAP Transition Threshold</span>
+                <div class="legend-row" style="border-top: 1px solid #f1f3f4; padding-top: 10px;">
+                    <span style="font-weight: bold;">Structural Concepts:</span>
+                    <div class="legend-item"><span style="display: inline-block; width: 16px; height: 12px; background: rgba(0,0,0,0.1); border: 1px solid rgba(0,0,0,0.2);"></span> Propulsion Envelope (Floor L=0.1 to Ceiling L=1.0)</div>
+                    <div class="legend-item"><span style="border-bottom: 2px dotted rgba(255,215,0,0.8); width: 20px;"></span> Regime Transition Curve</div>
                 </div>
-            </div>
-
-            <div class="tabs">
-                <button class="tab-btn active" data-locality="random">🎲 Random</button>
-                <button class="tab-btn" data-locality="natural">📄 Natural</button>
-                <button class="tab-btn" data-locality="structured">📊 Structured</button>
-                <button class="tab-btn" data-locality="literal">🚀 Literal</button>
             </div>
 
             <div id="landscape-content">
-                <div id="loading-overlay">Loading performance data...</div>
+                <div id="loading-overlay">Initializing PEM Projection...</div>
             </div>
         </section>
 
         <section id="trends">
-            <h2>📈 Historical Trends</h2>
+            <h2>📈 Long-term Evolution</h2>
             <div id="trends-chart"></div>
         </section>
     </main>
@@ -96,19 +88,19 @@
     <div id="trace-modal" class="modal">
         <div class="modal-content">
             <span class="close-btn">&times;</span>
-            <h2 id="trace-title">Test Case Detail</h2>
+            <h2 id="trace-title">Propulsion Trace Detail</h2>
             <div id="trace-body">
-                <p><strong>Pattern:</strong></p>
-                <pre id="trace-pattern" class="explain-box" style="background: #f1f3f5; color: #333;"></pre>
-                <div id="trace-stats" style="margin: 15px 0; display: flex; gap: 20px;"></div>
-                <p><strong>Execution Strategy (Explain):</strong></p>
+                <p><strong>Regex Pattern:</strong></p>
+                <pre id="trace-pattern" class="explain-box" style="background: #f8f9fa; color: #333;"></pre>
+                <div id="trace-stats" style="margin: 20px 0; display: flex; gap: 30px; font-weight: 600;"></div>
+                <p><strong>Execution Strategy (Engine Explanation):</strong></p>
                 <div id="trace-explain" class="explain-box"></div>
             </div>
         </div>
     </div>
 
     <footer>
-        <p>Generated by go-regexp-re CI | Visualization Architecture: Discrete Phase Response Mapping</p>
+        <p>Generated by go-regexp-re CI | Architectural Framework: Propulsion Envelope Mapping (PEM)</p>
     </footer>
 
     <script src="js/dashboard.js"></script>
